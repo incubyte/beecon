@@ -1,0 +1,93 @@
+// Command beecon is the single Beecon binary ("beecon serve"): it boots
+// against Postgres or SQLite, runs migrations, and serves the HTTP API.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"beecon/internal/app"
+	"beecon/internal/config"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	if len(os.Args) < 2 || os.Args[1] != "serve" {
+		logger.Error("usage: beecon serve")
+		os.Exit(1)
+	}
+
+	if err := serve(logger); err != nil {
+		logger.Error("beecon exited with error", "err", err)
+		os.Exit(1)
+	}
+}
+
+func serve(logger *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config load failed: %w", err)
+	}
+
+	wired, err := app.Wire(context.Background(), app.Deps{
+		Config: cfg,
+		Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("wiring failed: %w", err)
+	}
+	defer func() { _ = wired.Close() }()
+
+	srv := &http.Server{
+		Addr:              addrFromBaseURL(cfg.BaseURL),
+		Handler:           wired.Router,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		logger.Info("beecon listening", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("listen failed: %w", err)
+	case <-stop:
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown failed: %w", err)
+	}
+	return nil
+}
+
+// defaultPort is used when BEECON_BASE_URL carries no explicit port.
+const defaultPort = "8080"
+
+// addrFromBaseURL derives the listen address's port from BEECON_BASE_URL,
+// defaulting to defaultPort when the base URL carries no explicit port or
+// fails to parse.
+func addrFromBaseURL(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Port() == "" {
+		return ":" + defaultPort
+	}
+	return ":" + u.Port()
+}

@@ -79,15 +79,15 @@ binding decisions and is not up for debate here.
 The skeleton: one Go binary, two persistence adapters behind one port, the first
 entity with the id scheme, and the installation admin key guarding it.
 
-- [ ] `beecon serve` boots against Postgres using environment configuration and answers a health endpoint
-- [ ] The same binary boots against SQLite when configured, with identical API behavior (this adapter is what tests run on)
-- [ ] Database schema is created/migrated automatically at boot on both adapters
-- [ ] Boot fails fast with a clear message when database config is missing or the database is unreachable
-- [ ] Installation admin can create an organization with a name; response includes an immutable `org_`-prefixed CUID2 id
-- [ ] Installation admin can fetch an organization by id
-- [ ] Creating an organization with an empty or missing name shows a validation error
-- [ ] Requests to installation-level endpoints with a missing or wrong admin key are rejected as unauthorized
-- [ ] Domain and application code depend only on the persistence port — no Postgres/SQLite imports outside the adapters (verified by an architecture test)
+- [x] `beecon serve` boots against Postgres using environment configuration and answers a health endpoint
+- [x] The same binary boots against SQLite when configured, with identical API behavior (this adapter is what tests run on)
+- [x] Database schema is created/migrated automatically at boot on both adapters
+- [x] Boot fails fast with a clear message when database config is missing or the database is unreachable
+- [x] Installation admin can create an organization with a name; response includes an immutable `org_`-prefixed CUID2 id
+- [x] Installation admin can fetch an organization by id
+- [x] Creating an organization with an empty or missing name shows a validation error
+- [x] Requests to installation-level endpoints with a missing or wrong admin key are rejected as unauthorized
+- [x] Domain and application code depend only on the persistence port — no Postgres/SQLite imports outside the adapters (verified by an architecture test)
 
 ## Slice 2 — Keys and walls: org API keys, users, data isolation
 
