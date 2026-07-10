@@ -1,0 +1,135 @@
+uuid: 8b0450f3-764c-4acd-b982-c98083f0662a
+key: outlook_get_message
+name: Get email message
+isCustomized: true
+inputSchema:
+  description: >-
+    Retrieves a specific email message by its ID from the specified user's
+    Outlook mailbox. Use the 'select' parameter to include specific fields like
+    'internetMessageHeaders' for filtering automated emails.
+  type: object
+  properties:
+    messageId:
+      title: Message ID
+      description: The unique identifier of the email message to retrieve
+      type: string
+    userId:
+      title: User ID
+      description: >-
+        The user ID or principal name. Defaults to 'me' for the authenticated
+        user
+      type: string
+    select:
+      title: Select Fields
+      description: >-
+        Comma-separated list of fields to include in the response (e.g.,
+        'subject,from,receivedDateTime,internetMessageHeaders')
+      type: string
+  required:
+    - messageId
+type: api-request-to-external-app
+config:
+  request:
+    path:
+      $case:
+        cases:
+          - filter:
+              $and:
+                - $eval:
+                    $var: $.input.userId
+                  isNotEmpty: true
+                - $eval:
+                    $var: $.input.userId
+                  isNot: me
+            value: /users/{userId}/messages/{messageId}
+          - value: /me/messages/{messageId}
+    method: GET
+    pathParameters:
+      userId:
+        $var: $.input.userId
+      messageId:
+        $var: $.input.messageId
+    query:
+      $select:
+        $var: $.input.select
+customOutputSchema:
+  type: object
+  properties:
+    status:
+      type: number
+    data:
+      type: object
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        bodyPreview:
+          type: string
+        body:
+          type: object
+          properties:
+            contentType:
+              type: string
+            content:
+              type: string
+        from:
+          type: object
+          properties:
+            emailAddress:
+              type: object
+              properties:
+                name:
+                  type: string
+                address:
+                  type: string
+        toRecipients:
+          type: array
+          items:
+            type: object
+            properties:
+              emailAddress:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  address:
+                    type: string
+        ccRecipients:
+          type: array
+          items:
+            type: object
+            properties:
+              emailAddress:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  address:
+                    type: string
+        receivedDateTime:
+          type: string
+        sentDateTime:
+          type: string
+        hasAttachments:
+          type: boolean
+        internetMessageId:
+          type: string
+        internetMessageHeaders:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              value:
+                type: string
+        importance:
+          type: string
+        isRead:
+          type: boolean
+        isDraft:
+          type: boolean
+        conversationId:
+          type: string
+integrationUuid: 625c5388-a122-4fe2-92f3-55d0635d7b85

@@ -1,0 +1,28 @@
+# Bee session-local state (regenerated per session)
+.claude/*.local.md
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Go
+server/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Node / TypeScript SDK
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db

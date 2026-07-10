@@ -1,0 +1,11 @@
+uuid: 898b3f9b-0578-40ba-bca7-65eccee615ff
+key: 1-hubspot-all-in-one
+name: HubSpot All in one
+logoUri: >-
+  https://static.integration.app/connectors/hubspot/asset-54a174fb-e4ee-4df2-acc3-eb9e6432f1a4.png
+connectorVersion: 2.0.6
+connectorUuid: 2533a7ba-27ff-4f1b-8e73-1d6154ee5fae
+externalAppUuid: c04f4af3-1704-4693-86a4-9af453205335
+optionsConfig:
+  auth-proxy:
+    disabled: true

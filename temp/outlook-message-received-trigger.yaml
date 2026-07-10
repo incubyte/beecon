@@ -1,0 +1,598 @@
+uuid: 264eb0c3-611e-4044-b3b7-0833e8cc055e
+key: outlook-message-trigger
+name: New Outlook Message
+description: Triggered when a new message is received in the Outlook mailbox.
+isCustomized: true
+parametersSchema:
+  type: object
+  properties:
+    folderId:
+      title: Folder ID
+      description: >-
+        Outlook folder identifier to monitor (well-known folder name like
+        Inbox/SentItems or a folder ID). Defaults to Inbox.
+      type: string
+      default: Inbox
+nodes:
+  message-received:
+    type: data-record-created-trigger
+    name: New Message Received
+    description: Triggered when a new message is received in the Outlook mailbox
+    config:
+      dataSource:
+        collectionKey: messages
+        parameters:
+          folderId:
+            $firstNotEmpty:
+              - $var: $.flowInstance.parameters.folderId
+              - Inbox
+        fullSyncIntervalSeconds: 60
+        pullUpdatesIntervalSeconds: 60
+    outputSchema:
+      type: object
+      properties:
+        type:
+          type: string
+        record:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            uri:
+              type: string
+              format: url
+            createdTime:
+              type: string
+              format: datetime
+            updatedTime:
+              type: string
+              format: datetime
+            deletedTime:
+              type: string
+              format: datetime
+            createdById:
+              type: string
+            updatedById:
+              type: string
+            fields:
+              type: object
+              properties:
+                "@odata.context":
+                  type: string
+                "@odata.type":
+                  type: string
+                "@odata.etag":
+                  type: string
+                id:
+                  type: string
+                createdDateTime:
+                  type: string
+                lastModifiedDateTime:
+                  type: string
+                changeKey:
+                  type: string
+                categories:
+                  type: array
+                receivedDateTime:
+                  type: string
+                sentDateTime:
+                  type: string
+                hasAttachments:
+                  type: boolean
+                internetMessageId:
+                  type: string
+                subject:
+                  type: string
+                bodyPreview:
+                  type: string
+                importance:
+                  type: string
+                parentFolderId:
+                  type: string
+                  referenceCollection:
+                    key: mailfolders
+                conversationId:
+                  type: string
+                conversationIndex:
+                  type: string
+                isDeliveryReceiptRequested:
+                  type: boolean
+                isReadReceiptRequested:
+                  type: boolean
+                isRead:
+                  type: boolean
+                isDraft:
+                  type: boolean
+                webLink:
+                  type: string
+                inferenceClassification:
+                  type: string
+                meetingMessageType:
+                  type: string
+                type:
+                  type: string
+                isOutOfDate:
+                  type: boolean
+                isAllDay:
+                  type: boolean
+                isDelegated:
+                  type: boolean
+                responseRequested:
+                  type: boolean
+                allowNewTimeProposals:
+                  type: boolean
+                meetingRequestType:
+                  type: string
+                body:
+                  type: object
+                  properties:
+                    contentType:
+                      type: string
+                    content:
+                      type: string
+                sender:
+                  type: object
+                  properties:
+                    emailAddress:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        address:
+                          type: string
+                from:
+                  type: object
+                  properties:
+                    emailAddress:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        address:
+                          type: string
+                toRecipients:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      emailAddress:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          address:
+                            type: string
+                ccRecipients:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      emailAddress:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          address:
+                            type: string
+                bccRecipients:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      emailAddress:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          address:
+                            type: string
+                replyTo:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      emailAddress:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          address:
+                            type: string
+                flag:
+                  type: object
+                  properties:
+                    flagStatus:
+                      type: string
+                startDateTime:
+                  type: object
+                  properties:
+                    dateTime:
+                      type: string
+                    timeZone:
+                      type: string
+                endDateTime:
+                  type: object
+                  properties:
+                    dateTime:
+                      type: string
+                    timeZone:
+                      type: string
+                location:
+                  type: object
+                  properties:
+                    displayName:
+                      type: string
+                    locationType:
+                      type: string
+                    uniqueIdType:
+                      type: string
+                recurrence: {}
+                previousLocation:
+                  type: object
+                  properties:
+                    displayName:
+                      type: string
+                    locationType:
+                      type: string
+                    uniqueIdType:
+                      type: string
+                previousStartDateTime:
+                  type: object
+                  properties:
+                    dateTime:
+                      type: string
+                    timeZone:
+                      type: string
+                previousEndDateTime:
+                  type: object
+                  properties:
+                    dateTime:
+                      type: string
+                    timeZone:
+                      type: string
+                attachments:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      fileName:
+                        type: string
+                      fileUri:
+                        type: string
+                    writeOnly: true
+      title: New Message Received
+    links:
+      - key: find-by-id-message
+    dependencies: []
+  find-by-id-message:
+    type: find-data-record-by-id
+    name: "Find By Id: Message"
+    config:
+      dataSource:
+        collectionKey: messages
+      id:
+        $var: $.input.message-received.record.id
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        uri:
+          type: string
+          format: url
+        createdTime:
+          type: string
+          format: datetime
+        updatedTime:
+          type: string
+          format: datetime
+        deletedTime:
+          type: string
+          format: datetime
+        createdById:
+          type: string
+        updatedById:
+          type: string
+        fields:
+          type: object
+          properties:
+            "@odata.context":
+              type: string
+            "@odata.type":
+              type: string
+            "@odata.etag":
+              type: string
+            id:
+              type: string
+            createdDateTime:
+              type: string
+            lastModifiedDateTime:
+              type: string
+            changeKey:
+              type: string
+            categories:
+              type: array
+            receivedDateTime:
+              type: string
+            sentDateTime:
+              type: string
+            hasAttachments:
+              type: boolean
+            internetMessageId:
+              type: string
+            subject:
+              type: string
+            bodyPreview:
+              type: string
+            importance:
+              type: string
+            parentFolderId:
+              type: string
+              referenceCollection:
+                key: mailfolders
+            conversationId:
+              type: string
+            conversationIndex:
+              type: string
+            isDeliveryReceiptRequested:
+              type: boolean
+            isReadReceiptRequested:
+              type: boolean
+            isRead:
+              type: boolean
+            isDraft:
+              type: boolean
+            webLink:
+              type: string
+            inferenceClassification:
+              type: string
+            meetingMessageType:
+              type: string
+            type:
+              type: string
+            isOutOfDate:
+              type: boolean
+            isAllDay:
+              type: boolean
+            isDelegated:
+              type: boolean
+            responseRequested:
+              type: boolean
+            allowNewTimeProposals:
+              type: boolean
+            meetingRequestType:
+              type: string
+            body:
+              type: object
+              properties:
+                contentType:
+                  type: string
+                content:
+                  type: string
+            sender:
+              type: object
+              properties:
+                emailAddress:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    address:
+                      type: string
+            from:
+              type: object
+              properties:
+                emailAddress:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    address:
+                      type: string
+            toRecipients:
+              type: array
+              items:
+                type: object
+                properties:
+                  emailAddress:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      address:
+                        type: string
+            ccRecipients:
+              type: array
+              items:
+                type: object
+                properties:
+                  emailAddress:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      address:
+                        type: string
+            bccRecipients:
+              type: array
+              items:
+                type: object
+                properties:
+                  emailAddress:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      address:
+                        type: string
+            replyTo:
+              type: array
+              items:
+                type: object
+                properties:
+                  emailAddress:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      address:
+                        type: string
+            flag:
+              type: object
+              properties:
+                flagStatus:
+                  type: string
+            startDateTime:
+              type: object
+              properties:
+                dateTime:
+                  type: string
+                timeZone:
+                  type: string
+            endDateTime:
+              type: object
+              properties:
+                dateTime:
+                  type: string
+                timeZone:
+                  type: string
+            location:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                locationType:
+                  type: string
+                uniqueIdType:
+                  type: string
+            recurrence: {}
+            previousLocation:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                locationType:
+                  type: string
+                uniqueIdType:
+                  type: string
+            previousStartDateTime:
+              type: object
+              properties:
+                dateTime:
+                  type: string
+                timeZone:
+                  type: string
+            previousEndDateTime:
+              type: object
+              properties:
+                dateTime:
+                  type: string
+                timeZone:
+                  type: string
+            attachments:
+              type: array
+              items:
+                type: object
+                properties:
+                  fileName:
+                    type: string
+                  fileUri:
+                    type: string
+                writeOnly: true
+      title: "Find By Id: Message"
+    links:
+      - key: get-target-folder
+    dependencies: []
+  get-target-folder:
+    type: api-request-to-external-app
+    name: Get Target Folder
+    description: Resolve configured folder (well-known name or ID) to a canonical folder ID
+    config:
+      request:
+        path: /me/mailFolders/{folderId}
+        method: GET
+        pathParameters:
+          folderId:
+            $firstNotEmpty:
+              - $var: $.flowInstance.parameters.folderId
+              - Inbox
+      responseSchema:
+        type: object
+        properties:
+          id:
+            type: string
+    outputSchema:
+      type: object
+      properties:
+        status:
+          type: number
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+      title: Get Target Folder
+    links:
+      - key: transform-message
+        filter:
+          $eval:
+            $var: $.input.find-by-id-message.fields.parentFolderId
+          is:
+            $var: $.output.data.id
+    dependencies: []
+  transform-message:
+    type: transform-data
+    name: Extract Message Data
+    description: Extract message ID and event type for webhook payload
+    config:
+      output:
+        id:
+          $var: $.input.find-by-id-message.fields.id
+        event_type:
+          $plain: message_received
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        event_type:
+          type: string
+      title: Extract Message Data
+    links:
+      - key: send-to-api
+    dependencies: []
+  send-to-api:
+    type: api-request-to-your-app
+    name: Send to Your API
+    description: Send the message event to your API endpoint
+    config:
+      request:
+        uri: /api/flows/webhook
+        method: POST
+        body:
+          data:
+            trigger_id:
+              $var: $.flowInstance.id
+            id:
+              $var: $.input.transform-message.id
+            event_type:
+              $var: $.input.transform-message.event_type
+    outputSchema:
+      type: object
+      properties:
+        response:
+          type: object
+          properties:
+            status:
+              type: integer
+            data: {}
+      title: Send to Your API
+    links: []
+    dependencies: []
+autoCreateInstances: false
+integrationUuid: 625c5388-a122-4fe2-92f3-55d0635d7b85
+externalAppUuid: 692b51bd-0b1b-4136-9a06-399d5972ce65
