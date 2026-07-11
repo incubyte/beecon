@@ -5,12 +5,17 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+// EncryptionKeyBytes is the decoded byte length BEECON_ENCRYPTION_KEY must
+// carry: an AES-256 key (PD12).
+const EncryptionKeyBytes = 32
 
 // DatabaseDriver is the persistence backend Beecon boots against.
 type DatabaseDriver string
@@ -73,6 +78,26 @@ func Load() (*Config, error) {
 func loadEnv() func(string) string {
 	_ = godotenv.Load(".env.local")
 	return os.Getenv
+}
+
+// DecodeEncryptionKey validates raw as PD12's BEECON_ENCRYPTION_KEY: present,
+// valid base64, decoding to exactly EncryptionKeyBytes (AES-256-GCM's key
+// size). Wire calls this at boot, after the database connects, so it fails
+// fast with a clear message naming the problem (AC11) without disturbing the
+// Slice 1 config surface that carries EncryptionKey through unvalidated for
+// callers that don't need token encryption yet.
+func DecodeEncryptionKey(raw string) ([]byte, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("BEECON_ENCRYPTION_KEY is not set")
+	}
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("BEECON_ENCRYPTION_KEY must be valid base64: %w", err)
+	}
+	if len(key) != EncryptionKeyBytes {
+		return nil, fmt.Errorf("BEECON_ENCRYPTION_KEY must decode to exactly %d bytes, got %d", EncryptionKeyBytes, len(key))
+	}
+	return key, nil
 }
 
 func parseDatabaseDriver(raw string) (DatabaseDriver, error) {

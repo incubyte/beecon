@@ -23,6 +23,7 @@ type providerDefinitionFile struct {
 type oauthConfigFile struct {
 	AuthorizeURL string   `yaml:"authorizeUrl"`
 	TokenURL     string   `yaml:"tokenUrl"`
+	UserInfoURL  string   `yaml:"userInfoUrl"`
 	Scopes       []string `yaml:"scopes"`
 }
 
@@ -149,6 +150,7 @@ func providerDefinitionFromFile(file providerDefinitionFile) ProviderDefinition 
 		AuthScheme:   authScheme,
 		AuthorizeURL: file.OAuth.AuthorizeURL,
 		TokenURL:     file.OAuth.TokenURL,
+		UserInfoURL:  file.OAuth.UserInfoURL,
 		Scopes:       file.OAuth.Scopes,
 		Tools:        toolsFromFile(file.Tools),
 	}

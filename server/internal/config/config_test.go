@@ -135,3 +135,66 @@ func TestLoad_MissingBaseURLFailsFastWithClearMessage(t *testing.T) {
 		t.Errorf("error = %q, want it to name BEECON_BASE_URL", err.Error())
 	}
 }
+
+// --- DecodeEncryptionKey (AC11: boot fails fast, naming BEECON_ENCRYPTION_KEY,
+// for a missing, non-base64, or wrong-length token encryption key). ---
+
+// validEncryptionKeyBase64 base64-encodes exactly 32 bytes.
+const validEncryptionKeyBase64 = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+
+func TestDecodeEncryptionKey_ReturnsTheDecoded32ByteKeyForAValidValue(t *testing.T) {
+	key, err := config.DecodeEncryptionKey(validEncryptionKeyBase64)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(key) != config.EncryptionKeyBytes {
+		t.Errorf("len(key) = %d, want %d", len(key), config.EncryptionKeyBytes)
+	}
+}
+
+func TestDecodeEncryptionKey_FailsNamingTheVariableWhenMissing(t *testing.T) {
+	_, err := config.DecodeEncryptionKey("")
+
+	if err == nil {
+		t.Fatal("expected an error for a missing encryption key, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_ENCRYPTION_KEY") {
+		t.Errorf("error = %q, want it to name BEECON_ENCRYPTION_KEY", err.Error())
+	}
+}
+
+func TestDecodeEncryptionKey_FailsNamingTheVariableWhenNotValidBase64(t *testing.T) {
+	_, err := config.DecodeEncryptionKey("not-valid-base64!!!")
+
+	if err == nil {
+		t.Fatal("expected an error for a non-base64 encryption key, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_ENCRYPTION_KEY") {
+		t.Errorf("error = %q, want it to name BEECON_ENCRYPTION_KEY", err.Error())
+	}
+}
+
+func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooShort(t *testing.T) {
+	// base64 of 16 bytes, not 32.
+	_, err := config.DecodeEncryptionKey("MDEyMzQ1Njc4OTAxMjM0NQ==")
+
+	if err == nil {
+		t.Fatal("expected an error for a too-short encryption key, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_ENCRYPTION_KEY") {
+		t.Errorf("error = %q, want it to name BEECON_ENCRYPTION_KEY", err.Error())
+	}
+}
+
+func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooLong(t *testing.T) {
+	// base64 of 48 bytes, not 32.
+	_, err := config.DecodeEncryptionKey("MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3")
+
+	if err == nil {
+		t.Fatal("expected an error for a too-long encryption key, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_ENCRYPTION_KEY") {
+		t.Errorf("error = %q, want it to name BEECON_ENCRYPTION_KEY", err.Error())
+	}
+}

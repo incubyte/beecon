@@ -9,6 +9,10 @@ authScheme: oauth2
 oauth:
   authorizeUrl: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
   tokenUrl: https://login.microsoftonline.com/common/oauth2/v2.0/token
+  # User.Read lets the OAuth callback fetch this endpoint (bearer-
+  # authenticated) to capture account metadata (email/display name) for the
+  # Connection (PD9).
+  userInfoUrl: https://graph.microsoft.com/v1.0/me
   # offline_access yields the refresh token Beecon must store; User.Read lets
   # the OAuth callback capture account metadata (email/display name) for the
   # Connection (PD9).

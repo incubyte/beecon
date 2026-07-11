@@ -68,6 +68,19 @@ func (f *Facade) ListIntegrations(ctx context.Context) ([]IntegrationSummary, er
 	return summaries, nil
 }
 
+// GetProviderDefinition returns the loaded ProviderDefinition for
+// providerSlug: the connections module's OAuth handshake (Slice 4) needs the
+// provider's authorize/token/user-info URLs and scopes to build the consent
+// redirect and complete the token exchange. Translates an unknown slug into
+// ErrUnknownProvider.
+func (f *Facade) GetProviderDefinition(_ context.Context, providerSlug string) (ProviderDefinition, error) {
+	definition, ok := f.definitions[providerSlug]
+	if !ok {
+		return ProviderDefinition{}, ErrUnknownProvider(providerSlug)
+	}
+	return definition, nil
+}
+
 func (f *Facade) summarize(integration Integration) IntegrationSummary {
 	definition := f.definitions[integration.ProviderSlug]
 	return IntegrationSummary{

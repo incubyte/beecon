@@ -12,36 +12,52 @@ import (
 // Facade is the connections module's only public surface.
 type Facade struct {
 	repo         Repository
+	oauthRepo    OAuthRepository
 	orgs         OrganizationReader
 	users        UserReader
 	integrations IntegrationReader
+	providers    ProviderDefinitionReader
+	vault        *Vault
+	oauthClient  OAuthClient
 	newID        func() string
 	newToken     func() string
+	newState     func() string
 	baseURL      string
 	now          func() time.Time
 }
 
-// NewFacade wires the facade with the narrow cross-module reader ports,
-// injected id/token minters, the public base URL used to build connect-page
-// URLs (PD12), and a clock so tests can supply deterministic ids and a fixed
-// time.
+// NewFacade wires the facade with the narrow cross-module reader ports, the
+// vault and OAuth client the handshake (Slice 4) needs, injected
+// id/token/state minters, the public base URL used to build connect-page and
+// callback URLs (PD12), and a clock so tests can supply deterministic ids and
+// a fixed time.
 func NewFacade(
 	repo Repository,
+	oauthRepo OAuthRepository,
 	orgs OrganizationReader,
 	users UserReader,
 	integrations IntegrationReader,
+	providers ProviderDefinitionReader,
+	vault *Vault,
+	oauthClient OAuthClient,
 	newID func() string,
 	newToken func() string,
+	newState func() string,
 	baseURL string,
 	now func() time.Time,
 ) *Facade {
 	return &Facade{
 		repo:         repo,
+		oauthRepo:    oauthRepo,
 		orgs:         orgs,
 		users:        users,
 		integrations: integrations,
+		providers:    providers,
+		vault:        vault,
+		oauthClient:  oauthClient,
 		newID:        newID,
 		newToken:     newToken,
+		newState:     newState,
 		baseURL:      baseURL,
 		now:          now,
 	}

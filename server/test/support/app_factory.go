@@ -17,12 +17,17 @@ import (
 	"testing"
 
 	"beecon/internal/app"
+	"beecon/internal/catalog"
 	"beecon/internal/config"
 )
 
 // AdminAPIKey is the installation admin key every test-booted app is
 // configured with.
 const AdminAPIKey = "test-admin-key"
+
+// EncryptionKeyBase64 is a valid 32-byte base64-encoded token-encryption key
+// (BEECON_ENCRYPTION_KEY, PD12) every test-booted app boots with.
+const EncryptionKeyBase64 = "c3VwcG9ydC10ZXN0LWVuY3J5cHRpb24ta2V5LTMyISE="
 
 // testDSNCounter guarantees a fresh, unshared in-memory database per call to
 // NewTestDSN even when tests run in parallel or share a t.Name() prefix.
@@ -67,6 +72,27 @@ func BootAppAt(t *testing.T, dsn string) *app.Wired {
 	return wired
 }
 
+// BootAppWithProviderDefinitions boots the full app against a fresh SQLite
+// in-memory database, overriding the loaded provider definitions — e.g. to
+// point the Outlook definition's OAuth endpoints at a FakeMicrosoft server
+// instead of the real internet, so the OAuth handshake journey (Slice 4) can
+// run end to end through the real composition root.
+func BootAppWithProviderDefinitions(t *testing.T, definitions []catalog.ProviderDefinition) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              testConfig(NewTestDSN(t)),
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
 // testConfig is the PD12 config a test-booted app runs with: SQLite, the
 // shared AdminAPIKey, and a placeholder public base URL.
 func testConfig(dsn string) *config.Config {
@@ -75,6 +101,7 @@ func testConfig(dsn string) *config.Config {
 		DatabaseURL:    dsn,
 		AdminAPIKey:    AdminAPIKey,
 		BaseURL:        "http://localhost:8080",
+		EncryptionKey:  EncryptionKeyBase64,
 	}
 }
 

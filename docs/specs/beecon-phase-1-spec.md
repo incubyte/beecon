@@ -130,17 +130,17 @@ The end user's journey: popup opens Beecon's page, Microsoft consent, back throu
 Beecon's callback, round-trip to the consumer — with a stable id and tokens that never
 leave the vault.
 
-- [ ] Opening the connect page (the redirectUrl from initiate) shows the provider name/logo and a Connect action, rendered by a Go template, usable inside a popup window
-- [ ] Opening the connect page with an invalid, expired, or already-completed connect link shows an error page and never forwards to the provider
-- [ ] Choosing Connect sends the browser to Microsoft's consent page carrying the Integration's client id, the provider definition's scopes, and a single-use CSRF state parameter
-- [ ] After the user consents, the callback exchanges the code for tokens, the connection becomes ACTIVE, and the browser is redirected to the consumer's redirectUri with the connection id and a success status
-- [ ] The ACTIVE connection keeps the exact id returned by initiate (stable id — never a second id)
-- [ ] The connection records provider account metadata (account email / display name) visible via get-connection
-- [ ] A callback whose state parameter is missing, unknown, expired, or already used shows an error page and the connection does not become ACTIVE
-- [ ] When the user denies consent at Microsoft, the browser is returned to the consumer's redirectUri with an error status and the connection stays INITIATED
-- [ ] When the token exchange fails at the provider, an error page is shown and the connection does not become ACTIVE
-- [ ] Access and refresh tokens are stored encrypted at rest — raw token values appear nowhere in the database, in any API response, or in any log line
-- [ ] Boot fails fast with a clear message when the token encryption key is missing or malformed
+- [x] Opening the connect page (the redirectUrl from initiate) shows the provider name/logo and a Connect action, rendered by a Go template, usable inside a popup window
+- [x] Opening the connect page with an invalid, expired, or already-completed connect link shows an error page and never forwards to the provider
+- [x] Choosing Connect sends the browser to Microsoft's consent page carrying the Integration's client id, the provider definition's scopes, and a single-use CSRF state parameter
+- [x] After the user consents, the callback exchanges the code for tokens, the connection becomes ACTIVE, and the browser is redirected to the consumer's redirectUri with the connection id and a success status
+- [x] The ACTIVE connection keeps the exact id returned by initiate (stable id — never a second id)
+- [x] The connection records provider account metadata (account email / display name) visible via get-connection
+- [x] A callback whose state parameter is missing, unknown, expired, or already used shows an error page and the connection does not become ACTIVE
+- [x] When the user denies consent at Microsoft, the browser is returned to the consumer's redirectUri with an error status and the connection stays INITIATED
+- [x] When the token exchange fails at the provider, an error page is shown and the connection does not become ACTIVE
+- [x] Access and refresh tokens are stored encrypted at rest — raw token values appear nowhere in the database, in any API response, or in any log line
+- [x] Boot fails fast with a clear message when the token encryption key is missing or malformed
 
 ## Slice 5 — It does work: tool execution, logging with redaction
 

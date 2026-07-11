@@ -20,7 +20,10 @@ type ProviderTool struct {
 }
 
 // ProviderDefinition is the parsed, validated form of one provider's
-// declarative definition file.
+// declarative definition file. UserInfoURL is optional: it names the
+// endpoint the OAuth callback calls (bearer-authenticated) to capture
+// account metadata after token exchange (PD9 — for Outlook, Microsoft
+// Graph's GET /v1.0/me); a provider with no such endpoint leaves it empty.
 type ProviderDefinition struct {
 	Slug         string
 	Name         string
@@ -28,6 +31,7 @@ type ProviderDefinition struct {
 	AuthScheme   string
 	AuthorizeURL string
 	TokenURL     string
+	UserInfoURL  string
 	Scopes       []string
 	Tools        []ProviderTool
 }

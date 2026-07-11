@@ -12,6 +12,7 @@ import (
 	cataloghttp "beecon/internal/catalog/driving/httpapi"
 	"beecon/internal/config"
 	connectionshttp "beecon/internal/connections/driving/httpapi"
+	"beecon/internal/connectweb"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
 )
 
@@ -22,6 +23,7 @@ func buildRouter(
 	accessHandler *accesshttp.Handler,
 	catalogHandler *cataloghttp.Handler,
 	connectionsHandler *connectionshttp.Handler,
+	connectWebHandler *connectweb.Handler,
 	verifyOrgKey authmw.Verify,
 ) chi.Router {
 	r := chi.NewRouter()
@@ -30,6 +32,12 @@ func buildRouter(
 	r.Use(middleware.Logger)
 
 	r.Get("/health", healthHandler(database))
+
+	// /connect/* are the middle-man pages the end user's browser visits
+	// directly (AC1-AC9): unauthenticated by an org API key — the single-use
+	// connect token, and later the CSRF state, are the credentials.
+	r.Get("/connect/{token}", connectWebHandler.ConnectPage)
+	r.Get("/connect/oauth/callback", connectWebHandler.Callback)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Route("/organizations", func(r chi.Router) {

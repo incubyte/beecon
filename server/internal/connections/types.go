@@ -26,17 +26,24 @@ const (
 // Connection is the domain aggregate root: one user's attempt to authorize
 // one Integration. ConnectToken is the single-use token embedded in the
 // connect-page redirectUrl minted at Initiate — it is bound to exactly this
-// connection attempt.
+// connection attempt. EncryptedAccessToken and EncryptedRefreshToken hold
+// only Vault ciphertext (AC10: the raw token values are never held on this
+// struct); AccountEmail and AccountDisplayName are populated once the OAuth
+// callback activates the connection (PD9, AC6).
 type Connection struct {
-	ID            ConnectionID
-	OrgID         organizations.OrgID
-	UserID        organizations.UserID
-	IntegrationID catalog.IntegrationID
-	ProviderSlug  string
-	Status        Status
-	RedirectURI   string
-	ConnectToken  string
-	CreatedAt     time.Time
+	ID                    ConnectionID
+	OrgID                 organizations.OrgID
+	UserID                organizations.UserID
+	IntegrationID         catalog.IntegrationID
+	ProviderSlug          string
+	Status                Status
+	RedirectURI           string
+	ConnectToken          string
+	EncryptedAccessToken  string
+	EncryptedRefreshToken string
+	AccountEmail          string
+	AccountDisplayName    string
+	CreatedAt             time.Time
 }
 
 // NewConnection constructs a freshly initiated Connection. Callers are
@@ -63,4 +70,18 @@ func NewConnection(
 		ConnectToken:  connectToken,
 		CreatedAt:     now,
 	}
+}
+
+// Activate returns a copy of c transitioned to ACTIVE, carrying the vault's
+// encrypted tokens and the account metadata the OAuth callback captured
+// (AC4, AC5, AC6). c's id, org, user, integration, and connect token are
+// untouched — activation never mints a second id.
+func (c Connection) Activate(encryptedAccessToken, encryptedRefreshToken, accountEmail, accountDisplayName string) Connection {
+	activated := c
+	activated.Status = StatusActive
+	activated.EncryptedAccessToken = encryptedAccessToken
+	activated.EncryptedRefreshToken = encryptedRefreshToken
+	activated.AccountEmail = accountEmail
+	activated.AccountDisplayName = accountDisplayName
+	return activated
 }

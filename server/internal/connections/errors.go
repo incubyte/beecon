@@ -33,3 +33,67 @@ func ErrValidation(field, issue string) *httpx.DomainError {
 	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
 		WithDetails(map[string]any{"field": field, "issue": issue})
 }
+
+// Machine-readable error codes for the OAuth handshake (Slice 4). These
+// power connectweb's error page (via DomainError.Message), not a JSON API
+// response — the codes stay consistent with the rest of the module even
+// though no consumer switches on them today.
+const (
+	CodeConnectLinkInvalid          = "connect_link_invalid"
+	CodeConnectLinkExpired          = "connect_link_expired"
+	CodeConnectLinkAlreadyCompleted = "connect_link_already_completed"
+	CodeOAuthStateMissing           = "oauth_state_missing"
+	CodeOAuthStateUnknown           = "oauth_state_unknown"
+	CodeOAuthStateExpired           = "oauth_state_expired"
+	CodeOAuthStateAlreadyUsed       = "oauth_state_already_used"
+	CodeOAuthTokenExchangeFailed    = "oauth_token_exchange_failed"
+)
+
+// ErrConnectLinkInvalid is returned when OpenConnectPage is given a connect
+// token that names no connection (AC2).
+func ErrConnectLinkInvalid() *httpx.DomainError {
+	return httpx.New(http.StatusNotFound, CodeConnectLinkInvalid, "this connection link is invalid")
+}
+
+// ErrConnectLinkExpired is returned when OpenConnectPage is given a connect
+// token past its ConnectLinkTTL (AC2).
+func ErrConnectLinkExpired() *httpx.DomainError {
+	return httpx.New(http.StatusGone, CodeConnectLinkExpired, "this connection link has expired — please start again")
+}
+
+// ErrConnectLinkAlreadyCompleted is returned when OpenConnectPage is given a
+// connect token for a connection that is no longer INITIATED (AC2).
+func ErrConnectLinkAlreadyCompleted() *httpx.DomainError {
+	return httpx.New(http.StatusGone, CodeConnectLinkAlreadyCompleted, "this connection has already been completed")
+}
+
+// ErrStateMissing is returned when the OAuth callback carries no state
+// parameter at all (AC7).
+func ErrStateMissing() *httpx.DomainError {
+	return httpx.New(http.StatusBadRequest, CodeOAuthStateMissing, "this connection request is missing its security token")
+}
+
+// ErrStateUnknown is returned when the OAuth callback's state parameter
+// names no CSRF state Beecon minted (AC7).
+func ErrStateUnknown() *httpx.DomainError {
+	return httpx.New(http.StatusBadRequest, CodeOAuthStateUnknown, "this connection request's security token is not recognized")
+}
+
+// ErrStateExpired is returned when the OAuth callback's state parameter has
+// passed its OAuthStateTTL (AC7).
+func ErrStateExpired() *httpx.DomainError {
+	return httpx.New(http.StatusGone, CodeOAuthStateExpired, "this connection request has expired — please start again")
+}
+
+// ErrStateAlreadyUsed is returned when the OAuth callback's state parameter
+// has already been consumed by a previous callback (AC7).
+func ErrStateAlreadyUsed() *httpx.DomainError {
+	return httpx.New(http.StatusGone, CodeOAuthStateAlreadyUsed, "this connection request has already been used")
+}
+
+// ErrTokenExchangeFailed is returned when the provider rejects the
+// authorization code, or the account-info fetch fails, during the OAuth
+// callback (AC9). The connection stays INITIATED (PD11).
+func ErrTokenExchangeFailed() *httpx.DomainError {
+	return httpx.New(http.StatusBadGateway, CodeOAuthTokenExchangeFailed, "we couldn't complete the connection with the provider — please try again")
+}

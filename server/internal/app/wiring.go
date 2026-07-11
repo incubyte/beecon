@@ -21,7 +21,9 @@ import (
 	"beecon/internal/config"
 	"beecon/internal/connections"
 	connectionsbun "beecon/internal/connections/driven/bun"
+	"beecon/internal/connections/driven/oauthhttp"
 	connectionshttp "beecon/internal/connections/driving/httpapi"
+	"beecon/internal/connectweb"
 	"beecon/internal/db"
 	"beecon/internal/httpx"
 	"beecon/internal/idgen"
@@ -31,9 +33,13 @@ import (
 )
 
 // Deps are the externally supplied dependencies main.go hands to Wire.
+// ProviderDefinitions overrides the embedded provider definitions Wire would
+// otherwise load — nil in production; tests use it to point the Outlook
+// definition's OAuth endpoints at a fake Microsoft/Graph httptest server.
 type Deps struct {
-	Config *config.Config
-	Logger *slog.Logger
+	Config              *config.Config
+	Logger              *slog.Logger
+	ProviderDefinitions []catalog.ProviderDefinition
 }
 
 // Wired is the fully assembled application: the router main.go serves, the
@@ -62,10 +68,25 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
-	providerDefinitions, err := catalog.DefaultProviderDefinitions()
+	providerDefinitions := deps.ProviderDefinitions
+	if providerDefinitions == nil {
+		loaded, err := catalog.DefaultProviderDefinitions()
+		if err != nil {
+			_ = database.Close()
+			return nil, fmt.Errorf("load provider definitions: %w", err)
+		}
+		providerDefinitions = loaded
+	}
+
+	encryptionKey, err := config.DecodeEncryptionKey(deps.Config.EncryptionKey)
 	if err != nil {
 		_ = database.Close()
-		return nil, fmt.Errorf("load provider definitions: %w", err)
+		return nil, fmt.Errorf("token encryption key: %w", err)
+	}
+	vault, err := connections.NewVault(encryptionKey)
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("token encryption key: %w", err)
 	}
 
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
@@ -75,10 +96,15 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
 	catalogFacade := buildCatalogFacade(database, providerDefinitions)
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
-	connectionsFacade := buildConnectionsFacade(database, deps.Config.BaseURL, organizationsFacade, catalogFacade)
+	connectionsFacade := buildConnectionsFacade(database, deps.Config.BaseURL, organizationsFacade, catalogFacade, vault, oauthhttp.NewClient(nil))
 	connectionsHandler := connectionshttp.NewHandler(connectionsFacade, errorRenderer)
+	connectWebHandler, err := connectweb.NewHandler(connectionsFacade)
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("parse connect-page templates: %w", err)
+	}
 
-	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, catalogHandler, connectionsHandler, accessFacade.Verify)
+	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, catalogHandler, connectionsHandler, connectWebHandler, accessFacade.Verify)
 
 	return &Wired{
 		Router: router,
@@ -107,14 +133,21 @@ func buildConnectionsFacade(
 	baseURL string,
 	organizationsFacade *organizations.Facade,
 	catalogFacade *catalog.Facade,
+	vault *connections.Vault,
+	oauthClient connections.OAuthClient,
 ) *connections.Facade {
 	repo := connectionsbun.NewRepository(database)
 	return connections.NewFacade(
 		repo,
+		repo,
 		organizationsFacade,
 		organizationsFacade,
 		catalogFacade,
+		catalogFacade,
+		vault,
+		oauthClient,
 		idgen.Prefixed("conn_"),
+		idgen.Prefixed(""),
 		idgen.Prefixed(""),
 		baseURL,
 		systemNow,

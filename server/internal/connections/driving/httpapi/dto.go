@@ -29,21 +29,38 @@ func toInitiatedConnectionDTO(initiated connections.InitiatedConnection) initiat
 }
 
 // connectionDTO is Get's response: status, provider, and user — never the
-// connect token or (from Slice 4) tokens.
+// connect token or the vault-encrypted tokens (AC10). Account is present
+// only once the OAuth callback has activated the connection (AC6); an
+// INITIATED connection carries no "account" key at all.
 type connectionDTO struct {
-	ID           string `json:"id"`
-	Status       string `json:"status"`
-	ProviderSlug string `json:"providerSlug"`
-	UserID       string `json:"userId"`
-	CreatedAt    string `json:"createdAt"`
+	ID           string           `json:"id"`
+	Status       string           `json:"status"`
+	ProviderSlug string           `json:"providerSlug"`
+	UserID       string           `json:"userId"`
+	CreatedAt    string           `json:"createdAt"`
+	Account      *accountFieldDTO `json:"account,omitempty"`
+}
+
+// accountFieldDTO is the provider account metadata the OAuth callback
+// captures via User.Read (PD9): email and display name only — never tokens.
+type accountFieldDTO struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
 }
 
 func toConnectionDTO(connection connections.Connection) connectionDTO {
-	return connectionDTO{
+	dto := connectionDTO{
 		ID:           string(connection.ID),
 		Status:       string(connection.Status),
 		ProviderSlug: connection.ProviderSlug,
 		UserID:       string(connection.UserID),
 		CreatedAt:    connection.CreatedAt.Format(rfc3339Millis),
 	}
+	if connection.AccountEmail != "" || connection.AccountDisplayName != "" {
+		dto.Account = &accountFieldDTO{
+			Email:       connection.AccountEmail,
+			DisplayName: connection.AccountDisplayName,
+		}
+	}
+	return dto
 }

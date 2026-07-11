@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Connect {{.ProviderName}} — Beecon</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #f5f6f8;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      padding: 32px;
+      max-width: 360px;
+      width: 100%;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .logo {
+      width: 56px;
+      height: 56px;
+      margin-bottom: 16px;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+    h1 {
+      font-size: 18px;
+      line-height: 1.3;
+      margin: 0 0 8px;
+      color: #111827;
+    }
+    p {
+      color: #4b5563;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 24px;
+    }
+    .connect-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      min-width: 44px;
+      padding: 12px 24px;
+      background: #2563eb;
+      color: #ffffff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 15px;
+    }
+    .connect-button:hover { background: #1d4ed8; }
+    .connect-button:focus-visible { outline: 3px solid #93c5fd; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    {{if .ProviderLogo}}<img class="logo" src="{{.ProviderLogo}}" alt="{{.ProviderName}} logo">{{end}}
+    <h1>Connect {{.ProviderName}}</h1>
+    <p>Beecon needs your permission to connect your {{.ProviderName}} account.</p>
+    <a class="connect-button" href="{{.AuthorizeURL}}">Connect</a>
+  </main>
+</body>
+</html>
