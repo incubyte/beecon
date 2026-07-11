@@ -46,6 +46,13 @@ func (r *Repository) FindByID(_ context.Context, id organizations.OrgID) (*organ
 	return &copied, nil
 }
 
+func (r *Repository) Update(_ context.Context, org organizations.Organization) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byID[org.ID] = org
+	return nil
+}
+
 func (r *Repository) SaveUser(_ context.Context, user organizations.User) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

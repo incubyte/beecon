@@ -47,3 +47,20 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, toOrganizationDTO(org))
 }
+
+// UpdateAllowedRedirectURIs handles PATCH /api/v1/organizations/{orgId}
+// (PD4): it replaces the organization's redirect-uri allow-list.
+func (h *Handler) UpdateAllowedRedirectURIs(w http.ResponseWriter, r *http.Request) {
+	orgID := organizations.OrgID(chi.URLParam(r, "orgId"))
+	var req updateAllowedRedirectURIsRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		h.errors.WriteError(w, r, organizations.ErrValidation("allowedRedirectUris", "request body must be valid JSON"))
+		return
+	}
+	org, err := h.facade.SetAllowedRedirectURIs(r.Context(), orgID, req.AllowedRedirectUris)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toOrganizationDTO(org))
+}

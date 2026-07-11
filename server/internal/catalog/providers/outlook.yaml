@@ -1,0 +1,39 @@
+# Outlook provider definition (Phase 1, PD8/PD9). This is the locally
+# defined declarative source of truth for the Outlook provider until the
+# Phase 5 registry service exists — good enough for Outlook, not the
+# finalized definition format.
+slug: outlook
+name: Outlook
+logo: https://static.beecon.dev/providers/outlook.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+  tokenUrl: https://login.microsoftonline.com/common/oauth2/v2.0/token
+  # offline_access yields the refresh token Beecon must store; User.Read lets
+  # the OAuth callback capture account metadata (email/display name) for the
+  # Connection (PD9).
+  scopes:
+    - offline_access
+    - Mail.Read
+    - User.Read
+tools:
+  - slug: outlook-list-messages
+    name: List messages
+    description: List messages in the authenticated user's mailbox.
+    method: GET
+    path: /v1.0/me/messages
+    inputSchema:
+      type: object
+      properties:
+        top:
+          type: integer
+          description: Maximum number of messages to return.
+        skip:
+          type: integer
+          description: Number of messages to skip, for pagination.
+        select:
+          type: string
+          description: Comma-separated list of fields to include in the response.
+        filter:
+          type: string
+          description: An OData filter expression restricting which messages are returned.

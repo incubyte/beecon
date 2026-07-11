@@ -23,6 +23,13 @@ func ErrNotFound() *httpx.DomainError {
 
 // ErrInvalidName is returned when the organization name fails validation.
 func ErrInvalidName(field, issue string) *httpx.DomainError {
+	return ErrValidation(field, issue)
+}
+
+// ErrValidation is the shared PD5 validation_failed shape for the
+// organizations module's request-level checks (invalid name, malformed
+// allowedRedirectUris body, ...).
+func ErrValidation(field, issue string) *httpx.DomainError {
 	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
 		WithDetails(map[string]any{"field": field, "issue": issue})
 }

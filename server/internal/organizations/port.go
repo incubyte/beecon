@@ -9,6 +9,7 @@ import "context"
 type Repository interface {
 	Save(ctx context.Context, org Organization) error
 	FindByID(ctx context.Context, id OrgID) (*Organization, error)
+	Update(ctx context.Context, org Organization) error
 }
 
 // UserRepository is the organizations module's driven port for the

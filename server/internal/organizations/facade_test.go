@@ -8,6 +8,7 @@ package organizations_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -146,7 +147,7 @@ func TestGet_ReturnsAPreviouslyCreatedOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != created {
+	if !reflect.DeepEqual(got, created) {
 		t.Errorf("Get() = %+v, want %+v", got, created)
 	}
 }

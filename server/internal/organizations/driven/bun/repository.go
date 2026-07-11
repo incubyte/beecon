@@ -6,6 +6,7 @@ package bun
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,13 +15,16 @@ import (
 	"beecon/internal/organizations"
 )
 
-// OrganizationRow is the organizations table schema.
+// OrganizationRow is the organizations table schema. AllowedRedirectURIs is
+// stored as a JSON-encoded array in a single text column so the same schema
+// works identically across both the Postgres and SQLite dialects.
 type OrganizationRow struct {
 	upstreambun.BaseModel `bun:"table:organizations,alias:o"`
 
-	ID        string    `bun:"id,pk"`
-	Name      string    `bun:"name,notnull"`
-	CreatedAt time.Time `bun:"created_at,notnull"`
+	ID                  string    `bun:"id,pk"`
+	Name                string    `bun:"name,notnull"`
+	AllowedRedirectURIs string    `bun:"allowed_redirect_uris,notnull"`
+	CreatedAt           time.Time `bun:"created_at,notnull"`
 }
 
 // Repository is the bun-backed organizations.Repository.
@@ -35,8 +39,11 @@ func NewRepository(db *upstreambun.DB) *Repository {
 }
 
 func (r *Repository) Save(ctx context.Context, org organizations.Organization) error {
-	row := rowFromOrganization(org)
-	_, err := r.db.NewInsert().Model(&row).Exec(ctx)
+	row, err := rowFromOrganization(org)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.NewInsert().Model(&row).Exec(ctx)
 	return err
 }
 
@@ -53,24 +60,54 @@ func (r *Repository) FindByID(ctx context.Context, id organizations.OrgID) (*org
 		}
 		return nil, err
 	}
-	org := organizationFromRow(row)
+	org, err := organizationFromRow(row)
+	if err != nil {
+		return nil, err
+	}
 	return &org, nil
 }
 
-func rowFromOrganization(org organizations.Organization) OrganizationRow {
-	return OrganizationRow{
-		ID:        string(org.ID),
-		Name:      org.Name,
-		CreatedAt: org.CreatedAt,
+// Update persists a previously created Organization's mutable fields (today,
+// only the redirect-uri allow-list — PD4).
+func (r *Repository) Update(ctx context.Context, org organizations.Organization) error {
+	row, err := rowFromOrganization(org)
+	if err != nil {
+		return err
 	}
+	_, err = r.db.NewUpdate().
+		Model(&row).
+		Column("allowed_redirect_uris").
+		Where("id = ?", row.ID).
+		Exec(ctx)
+	return err
 }
 
-func organizationFromRow(row *OrganizationRow) organizations.Organization {
-	return organizations.Organization{
-		ID:        organizations.OrgID(row.ID),
-		Name:      row.Name,
-		CreatedAt: row.CreatedAt,
+func rowFromOrganization(org organizations.Organization) (OrganizationRow, error) {
+	allowedRedirectURIs, err := json.Marshal(org.AllowedRedirectURIs)
+	if err != nil {
+		return OrganizationRow{}, err
 	}
+	return OrganizationRow{
+		ID:                  string(org.ID),
+		Name:                org.Name,
+		AllowedRedirectURIs: string(allowedRedirectURIs),
+		CreatedAt:           org.CreatedAt,
+	}, nil
+}
+
+func organizationFromRow(row *OrganizationRow) (organizations.Organization, error) {
+	var allowedRedirectURIs []string
+	if row.AllowedRedirectURIs != "" {
+		if err := json.Unmarshal([]byte(row.AllowedRedirectURIs), &allowedRedirectURIs); err != nil {
+			return organizations.Organization{}, err
+		}
+	}
+	return organizations.Organization{
+		ID:                  organizations.OrgID(row.ID),
+		Name:                row.Name,
+		AllowedRedirectURIs: allowedRedirectURIs,
+		CreatedAt:           row.CreatedAt,
+	}, nil
 }
 
 // UserRow is the users table schema.

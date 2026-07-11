@@ -9,7 +9,9 @@ import (
 
 	"beecon/internal/access/driving/authmw"
 	accesshttp "beecon/internal/access/driving/httpapi"
+	cataloghttp "beecon/internal/catalog/driving/httpapi"
 	"beecon/internal/config"
+	connectionshttp "beecon/internal/connections/driving/httpapi"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
 )
 
@@ -18,6 +20,8 @@ func buildRouter(
 	database *upstreambun.DB,
 	organizationsHandler *orgshttp.Handler,
 	accessHandler *accesshttp.Handler,
+	catalogHandler *cataloghttp.Handler,
+	connectionsHandler *connectionshttp.Handler,
 	verifyOrgKey authmw.Verify,
 ) chi.Router {
 	r := chi.NewRouter()
@@ -32,15 +36,27 @@ func buildRouter(
 			r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
 			r.Post("/", organizationsHandler.Create)
 			r.Get("/{orgId}", organizationsHandler.Get)
+			r.Patch("/{orgId}", organizationsHandler.UpdateAllowedRedirectURIs)
 			r.Post("/{orgId}/api-keys", accessHandler.Issue)
 			r.Get("/{orgId}/api-keys", accessHandler.List)
 			r.Delete("/{orgId}/api-keys/{keyId}", accessHandler.Revoke)
+		})
+
+		r.Route("/integrations", func(r chi.Router) {
+			r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
+			r.With(authmw.OrgAuth(verifyOrgKey)).Get("/", catalogHandler.List)
 		})
 
 		r.Route("/users", func(r chi.Router) {
 			r.Use(authmw.OrgAuth(verifyOrgKey))
 			r.Post("/", organizationsHandler.CreateUser)
 			r.Get("/{userId}", organizationsHandler.GetUser)
+		})
+
+		r.Route("/connections", func(r chi.Router) {
+			r.Use(authmw.OrgAuth(verifyOrgKey))
+			r.Post("/initiate", connectionsHandler.Initiate)
+			r.Get("/{connectionId}", connectionsHandler.Get)
 		})
 	})
 

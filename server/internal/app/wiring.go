@@ -15,7 +15,13 @@ import (
 	"beecon/internal/access"
 	accessbun "beecon/internal/access/driven/bun"
 	accesshttp "beecon/internal/access/driving/httpapi"
+	"beecon/internal/catalog"
+	catalogbun "beecon/internal/catalog/driven/bun"
+	cataloghttp "beecon/internal/catalog/driving/httpapi"
 	"beecon/internal/config"
+	"beecon/internal/connections"
+	connectionsbun "beecon/internal/connections/driven/bun"
+	connectionshttp "beecon/internal/connections/driving/httpapi"
 	"beecon/internal/db"
 	"beecon/internal/httpx"
 	"beecon/internal/idgen"
@@ -56,12 +62,23 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
+	providerDefinitions, err := catalog.DefaultProviderDefinitions()
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("load provider definitions: %w", err)
+	}
+
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
-	organizationsHandler := buildOrganizationsHandler(database, errorRenderer)
+	organizationsFacade := buildOrganizationsFacade(database)
+	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer)
 	accessFacade := buildAccessFacade(database)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
+	catalogFacade := buildCatalogFacade(database, providerDefinitions)
+	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
+	connectionsFacade := buildConnectionsFacade(database, deps.Config.BaseURL, organizationsFacade, catalogFacade)
+	connectionsHandler := connectionshttp.NewHandler(connectionsFacade, errorRenderer)
 
-	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, accessFacade.Verify)
+	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, catalogHandler, connectionsHandler, accessFacade.Verify)
 
 	return &Wired{
 		Router: router,
@@ -70,13 +87,36 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	}, nil
 }
 
-func buildOrganizationsHandler(database *upstreambun.DB, errorRenderer *httpx.ErrorRenderer) *orgshttp.Handler {
+func buildOrganizationsFacade(database *upstreambun.DB) *organizations.Facade {
 	repo := orgsbun.NewRepository(database)
-	facade := organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), systemNow)
-	return orgshttp.NewHandler(facade, errorRenderer)
+	return organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), systemNow)
 }
 
 func buildAccessFacade(database *upstreambun.DB) *access.Facade {
 	repo := accessbun.NewRepository(database)
 	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), systemNow)
+}
+
+func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition) *catalog.Facade {
+	repo := catalogbun.NewRepository(database)
+	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), systemNow)
+}
+
+func buildConnectionsFacade(
+	database *upstreambun.DB,
+	baseURL string,
+	organizationsFacade *organizations.Facade,
+	catalogFacade *catalog.Facade,
+) *connections.Facade {
+	repo := connectionsbun.NewRepository(database)
+	return connections.NewFacade(
+		repo,
+		organizationsFacade,
+		organizationsFacade,
+		catalogFacade,
+		idgen.Prefixed("conn_"),
+		idgen.Prefixed(""),
+		baseURL,
+		systemNow,
+	)
 }

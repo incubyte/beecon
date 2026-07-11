@@ -112,17 +112,17 @@ The catalog seed: Outlook described declaratively (registry comes in Phase 5),
 made connectable with the installation's OAuth client credentials, and the connection
 handshake started.
 
-- [ ] The Outlook provider definition loads at boot from a local declarative file (name, logo, OAuth authorize/token endpoints, scopes, tool definitions)
-- [ ] Boot fails with a clear message naming the file and field when a provider definition is invalid
-- [ ] Installation admin can create an Outlook Integration with OAuth client id + client secret; response includes an `intg_`-prefixed id
-- [ ] The OAuth client secret never appears in any API response after creation
-- [ ] Installation admin can set an organization's allowed redirect URIs
-- [ ] Consumer can list integrations (id, provider name, logo, auth scheme) available to its organization
-- [ ] Consumer can initiate a connection with userId + integrationId + redirectUri; response is `{id, status: "INITIATED", redirectUrl}` with a `conn_`-prefixed id
-- [ ] The returned redirectUrl points at Beecon's own connect page and is bound to exactly that connection attempt
-- [ ] Initiating with a redirectUri not on the organization's allow-list is rejected with a validation error
-- [ ] Initiating with an unknown userId or integrationId, or a userId from another organization, is rejected (cross-org as not-found)
-- [ ] Consumer can fetch a connection by id showing status, provider, and user — connections of other organizations return not-found
+- [x] The Outlook provider definition loads at boot from a local declarative file (name, logo, OAuth authorize/token endpoints, scopes, tool definitions)
+- [x] Boot fails with a clear message naming the file and field when a provider definition is invalid
+- [x] Installation admin can create an Outlook Integration with OAuth client id + client secret; response includes an `intg_`-prefixed id
+- [x] The OAuth client secret never appears in any API response after creation
+- [x] Installation admin can set an organization's allowed redirect URIs
+- [x] Consumer can list integrations (id, provider name, logo, auth scheme) available to its organization
+- [x] Consumer can initiate a connection with userId + integrationId + redirectUri; response is `{id, status: "INITIATED", redirectUrl}` with a `conn_`-prefixed id
+- [x] The returned redirectUrl points at Beecon's own connect page and is bound to exactly that connection attempt
+- [x] Initiating with a redirectUri not on the organization's allow-list is rejected with a validation error
+- [x] Initiating with an unknown userId or integrationId, or a userId from another organization, is rejected (cross-org as not-found)
+- [x] Consumer can fetch a connection by id showing status, provider, and user — connections of other organizations return not-found
 
 ## Slice 4 — The handshake: middle-man pages, OAuth callback, ACTIVE connection, encrypted tokens
 

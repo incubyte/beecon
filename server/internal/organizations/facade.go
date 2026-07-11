@@ -58,6 +58,24 @@ func (f *Facade) CreateUser(ctx context.Context, org OrgID, name, externalID str
 	return user, nil
 }
 
+// SetAllowedRedirectURIs replaces org's redirect-uri allow-list (PD4),
+// settable only by the installation admin (PATCH
+// /api/v1/organizations/{orgId}).
+func (f *Facade) SetAllowedRedirectURIs(ctx context.Context, id OrgID, uris []string) (Organization, error) {
+	org, err := f.repo.FindByID(ctx, id)
+	if err != nil {
+		return Organization{}, err
+	}
+	if org == nil {
+		return Organization{}, ErrNotFound()
+	}
+	updated := org.WithAllowedRedirectURIs(uris)
+	if err := f.repo.Update(ctx, updated); err != nil {
+		return Organization{}, err
+	}
+	return updated, nil
+}
+
 // GetUser fetches a User scoped to org, translating a repository miss (or a
 // cross-org match) into ErrUserNotFound.
 func (f *Facade) GetUser(ctx context.Context, org OrgID, id UserID) (User, error) {

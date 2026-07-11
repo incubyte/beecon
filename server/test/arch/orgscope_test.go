@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"beecon/internal/access"
+	"beecon/internal/catalog"
+	"beecon/internal/connections"
 	"beecon/internal/organizations"
 )
 
@@ -109,17 +111,32 @@ func TestOrganizationsUserRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestConnectionsRepository_EveryMethodIsOrgScoped: Slice 3 (BOUNDARIES:
+// connections depends on organizations) — a Connection belongs to exactly one
+// organization, so every persistence-port method must take that organization
+// id.
+func TestConnectionsRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*connections.Repository)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("connections.Repository has org-scope violations: %v", got)
+	}
+}
+
 // TestInstallationLevelPortsAreExplicitlyWhitelisted documents (and pins,
-// via NumMethod, so a rename/removal is noticed) the two ports deliberately
+// via NumMethod, so a rename/removal is noticed) the ports deliberately
 // exempted from org-scoping: access.PrefixLookup authenticates a secret
 // before any organization is known — the lookup prefix is how a caller's
-// organization is discovered in the first place — and organizations.
-// Repository operates on Organization itself, which IS the isolation unit
-// with no wider scope to filter by.
+// organization is discovered in the first place; organizations.Repository
+// operates on Organization itself, which IS the isolation unit with no wider
+// scope to filter by; and catalog.Repository is installation-level by design
+// (PD7: an Integration is visible to every organization in the
+// installation) — there is no organization id to filter by.
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
 		reflect.TypeOf((*organizations.Repository)(nil)).Elem(),
+		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
 	}
 	for _, ifaceType := range whitelisted {
 		if ifaceType.NumMethod() == 0 {
