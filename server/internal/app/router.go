@@ -8,11 +8,18 @@ import (
 	upstreambun "github.com/uptrace/bun"
 
 	"beecon/internal/access/driving/authmw"
+	accesshttp "beecon/internal/access/driving/httpapi"
 	"beecon/internal/config"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
 )
 
-func buildRouter(cfg *config.Config, database *upstreambun.DB, organizationsHandler *orgshttp.Handler) chi.Router {
+func buildRouter(
+	cfg *config.Config,
+	database *upstreambun.DB,
+	organizationsHandler *orgshttp.Handler,
+	accessHandler *accesshttp.Handler,
+	verifyOrgKey authmw.Verify,
+) chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
@@ -25,6 +32,15 @@ func buildRouter(cfg *config.Config, database *upstreambun.DB, organizationsHand
 			r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
 			r.Post("/", organizationsHandler.Create)
 			r.Get("/{orgId}", organizationsHandler.Get)
+			r.Post("/{orgId}/api-keys", accessHandler.Issue)
+			r.Get("/{orgId}/api-keys", accessHandler.List)
+			r.Delete("/{orgId}/api-keys/{keyId}", accessHandler.Revoke)
+		})
+
+		r.Route("/users", func(r chi.Router) {
+			r.Use(authmw.OrgAuth(verifyOrgKey))
+			r.Post("/", organizationsHandler.CreateUser)
+			r.Get("/{userId}", organizationsHandler.GetUser)
 		})
 	})
 

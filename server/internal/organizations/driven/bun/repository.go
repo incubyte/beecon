@@ -72,3 +72,60 @@ func organizationFromRow(row *OrganizationRow) organizations.Organization {
 		CreatedAt: row.CreatedAt,
 	}
 }
+
+// UserRow is the users table schema.
+type UserRow struct {
+	upstreambun.BaseModel `bun:"table:users,alias:u"`
+
+	ID         string    `bun:"id,pk"`
+	OrgID      string    `bun:"org_id,notnull"`
+	Name       string    `bun:"name,notnull"`
+	ExternalID string    `bun:"external_id,notnull"`
+	CreatedAt  time.Time `bun:"created_at,notnull"`
+}
+
+var _ organizations.UserRepository = (*Repository)(nil)
+
+func (r *Repository) SaveUser(ctx context.Context, user organizations.User) error {
+	row := userRowFromUser(user)
+	_, err := r.db.NewInsert().Model(&row).Exec(ctx)
+	return err
+}
+
+func (r *Repository) FindUserByID(ctx context.Context, org organizations.OrgID, id organizations.UserID) (*organizations.User, error) {
+	row := new(UserRow)
+	err := r.db.NewSelect().
+		Model(row).
+		Where("id = ?", string(id)).
+		Where("org_id = ?", string(org)).
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	user := userFromRow(row)
+	return &user, nil
+}
+
+func userRowFromUser(user organizations.User) UserRow {
+	return UserRow{
+		ID:         string(user.ID),
+		OrgID:      string(user.OrgID),
+		Name:       user.Name,
+		ExternalID: user.ExternalID,
+		CreatedAt:  user.CreatedAt,
+	}
+}
+
+func userFromRow(row *UserRow) organizations.User {
+	return organizations.User{
+		ID:         organizations.UserID(row.ID),
+		OrgID:      organizations.OrgID(row.OrgID),
+		Name:       row.Name,
+		ExternalID: row.ExternalID,
+		CreatedAt:  row.CreatedAt,
+	}
+}

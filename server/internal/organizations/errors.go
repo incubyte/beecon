@@ -26,3 +26,10 @@ func ErrInvalidName(field, issue string) *httpx.DomainError {
 	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
 		WithDetails(map[string]any{"field": field, "issue": issue})
 }
+
+// ErrUserNotFound is returned when no user matches the requested id within
+// the caller's organization. A user that belongs to another organization
+// surfaces identically — no existence leak (PD5).
+func ErrUserNotFound() *httpx.DomainError {
+	return httpx.New(http.StatusNotFound, CodeNotFound, "user not found")
+}

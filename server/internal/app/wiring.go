@@ -12,6 +12,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	upstreambun "github.com/uptrace/bun"
 
+	"beecon/internal/access"
+	accessbun "beecon/internal/access/driven/bun"
+	accesshttp "beecon/internal/access/driving/httpapi"
 	"beecon/internal/config"
 	"beecon/internal/db"
 	"beecon/internal/httpx"
@@ -55,8 +58,10 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
 	organizationsHandler := buildOrganizationsHandler(database, errorRenderer)
+	accessFacade := buildAccessFacade(database)
+	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
 
-	router := buildRouter(deps.Config, database, organizationsHandler)
+	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, accessFacade.Verify)
 
 	return &Wired{
 		Router: router,
@@ -67,6 +72,11 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 
 func buildOrganizationsHandler(database *upstreambun.DB, errorRenderer *httpx.ErrorRenderer) *orgshttp.Handler {
 	repo := orgsbun.NewRepository(database)
-	facade := organizations.NewFacade(repo, idgen.Prefixed("org_"), systemNow)
+	facade := organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), systemNow)
 	return orgshttp.NewHandler(facade, errorRenderer)
+}
+
+func buildAccessFacade(database *upstreambun.DB) *access.Facade {
+	repo := accessbun.NewRepository(database)
+	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), systemNow)
 }

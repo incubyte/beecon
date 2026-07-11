@@ -94,17 +94,17 @@ entity with the id scheme, and the installation admin key guarding it.
 The security core: org-scoped keys verified on every request, and isolation that makes
 cross-org reads impossible by construction.
 
-- [ ] Installation admin can issue a server API key for an organization; the full secret is returned exactly once, at creation
-- [ ] Issued key secrets carry an identifiable prefix (`beecon_sk_`) so they are recognizable in config and logs
-- [ ] Listing an organization's keys shows key id, prefix, and created date — never the full secret
-- [ ] The full key secret is not recoverable from the database (stored hashed; a database dump does not contain it)
-- [ ] A request with a valid org key succeeds and operates only on that key's organization
-- [ ] A request with a missing, malformed, or unknown key is rejected as unauthorized
-- [ ] A request with a revoked key is rejected as unauthorized
-- [ ] Consumer can create a user (name + optional consumer-side external id) in its organization; response includes a `user_`-prefixed id
-- [ ] Consumer can fetch its own user by id
-- [ ] Fetching a user that belongs to another organization returns not-found (no existence leak)
-- [ ] Every org-scoped persistence-port operation requires an organization id — a query without org scope cannot be expressed (verified by an architecture/port test)
+- [x] Installation admin can issue a server API key for an organization; the full secret is returned exactly once, at creation
+- [x] Issued key secrets carry an identifiable prefix (`beecon_sk_`) so they are recognizable in config and logs
+- [x] Listing an organization's keys shows key id, prefix, and created date — never the full secret
+- [x] The full key secret is not recoverable from the database (stored hashed; a database dump does not contain it)
+- [x] A request with a valid org key succeeds and operates only on that key's organization
+- [x] A request with a missing, malformed, or unknown key is rejected as unauthorized
+- [x] A request with a revoked key is rejected as unauthorized
+- [x] Consumer can create a user (name + optional consumer-side external id) in its organization; response includes a `user_`-prefixed id
+- [x] Consumer can fetch its own user by id
+- [x] Fetching a user that belongs to another organization returns not-found (no existence leak)
+- [x] Every org-scoped persistence-port operation requires an organization id — a query without org scope cannot be expressed (verified by an architecture/port test)
 
 ## Slice 3 — Outlook exists: provider definition, Integration, initiate
 

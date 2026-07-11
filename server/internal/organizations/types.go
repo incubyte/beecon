@@ -47,3 +47,34 @@ func validateName(trimmed string) error {
 	}
 	return nil
 }
+
+// UserID is minted only by CreateUser. A User always belongs to exactly one
+// organization, carried on the User itself and required as the second
+// parameter of every org-scoped UserRepository method.
+type UserID string
+
+// User is a consumer-provisioned entity scoped to one organization (PD2):
+// the organization's own server creates its users with its org API key.
+type User struct {
+	ID         UserID
+	OrgID      OrgID
+	Name       string
+	ExternalID string
+	CreatedAt  time.Time
+}
+
+// NewUser validates name and constructs a User scoped to org. ExternalID is
+// the consumer's own optional identifier and carries no validation.
+func NewUser(id UserID, org OrgID, name, externalID string, now time.Time) (User, error) {
+	trimmed := strings.TrimSpace(name)
+	if err := validateName(trimmed); err != nil {
+		return User{}, err
+	}
+	return User{
+		ID:         id,
+		OrgID:      org,
+		Name:       trimmed,
+		ExternalID: strings.TrimSpace(externalID),
+		CreatedAt:  now,
+	}, nil
+}
