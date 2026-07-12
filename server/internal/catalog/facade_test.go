@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"beecon/internal/catalog"
 	memory "beecon/internal/catalog/driven/memory"
 	"beecon/internal/httpx"
+	"beecon/internal/organizations"
 )
 
 func fakeDefinitions() []catalog.ProviderDefinition {
@@ -188,4 +190,265 @@ func TestGetIntegration_ReturnsTypedNotFoundForAnUnknownID(t *testing.T) {
 	_, err := f.GetIntegration(context.Background(), catalog.IntegrationID("intg_missing"))
 
 	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+// --- ListTools / ToolDetail (Slice 1's catalog API) ---
+
+const testOrgID = organizations.OrgID("org_1")
+
+func minimalSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+// toolCatalogDefinitions is two providers' worth of tools: enough to prove
+// ListTools' providerSlug filter actually narrows (not just "return
+// everything"), plus one deprecated tool to exercise the deprecation filter.
+func toolCatalogDefinitions() []catalog.ProviderDefinition {
+	return []catalog.ProviderDefinition{
+		{
+			Slug: "outlook", Name: "Outlook", Logo: "https://static.beecon.dev/providers/outlook.png", AuthScheme: "oauth2",
+			AuthorizeURL: "https://example.com/authorize", TokenURL: "https://example.com/token", Scopes: []string{"Mail.Read"},
+			Tools: []catalog.ProviderTool{
+				{Slug: "outlook-get-message", Name: "Get email message", Description: "Retrieves a message by id.", InputSchema: minimalSchema(), OutputSchema: minimalSchema()},
+				{Slug: "outlook-list-messages", Name: "List messages", Description: "Lists mailbox messages.", InputSchema: minimalSchema(), OutputSchema: minimalSchema()},
+				{Slug: "outlook-legacy-tool", Name: "Legacy tool", Description: "Deprecated.", InputSchema: minimalSchema(), OutputSchema: minimalSchema(), Deprecated: true},
+			},
+		},
+		{
+			Slug: "slack", Name: "Slack", Logo: "https://static.beecon.dev/providers/slack.png", AuthScheme: "oauth2",
+			AuthorizeURL: "https://slack.example.com/authorize", TokenURL: "https://slack.example.com/token", Scopes: []string{"chat:write"},
+			Tools: []catalog.ProviderTool{
+				{Slug: "slack-post-message", Name: "Post message", Description: "Posts a chat message.", InputSchema: minimalSchema(), OutputSchema: minimalSchema()},
+			},
+		},
+	}
+}
+
+func newToolCatalogFacade(t *testing.T) *catalog.Facade {
+	t.Helper()
+	f, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: toolCatalogDefinitions()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	return f
+}
+
+func TestListTools_FiltersByProviderSlug(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	page, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{ProviderSlug: "outlook"}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("len(Items) = %d, want 2 (outlook's two non-deprecated tools)", len(page.Items))
+	}
+	for _, item := range page.Items {
+		if item.ProviderSlug != "outlook" {
+			t.Errorf("ProviderSlug = %q, want %q", item.ProviderSlug, "outlook")
+		}
+	}
+}
+
+func TestListTools_FiltersByIntegrationIDResolvedToItsProvider(t *testing.T) {
+	f := newToolCatalogFacade(t)
+	summary, err := f.CreateIntegration(context.Background(), "slack", "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("unexpected error creating the integration: %v", err)
+	}
+
+	page, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{IntegrationID: summary.ID}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(Items) = %d, want 1", len(page.Items))
+	}
+	if page.Items[0].Slug != "slack-post-message" {
+		t.Errorf("Slug = %q, want %q", page.Items[0].Slug, "slack-post-message")
+	}
+}
+
+// TestListTools_UnknownIntegrationIDReturnsNotFound is the coder's flag #1:
+// integrations are installation-level (PD7), so there is no cross-org
+// semantics to invent here — an integrationId that names no integration at
+// all is simply not-found.
+func TestListTools_UnknownIntegrationIDReturnsNotFound(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	_, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{IntegrationID: catalog.IntegrationID("intg_does_not_exist")}, "", 0)
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+func TestListTools_UnknownProviderSlugReturnsNotFound(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	_, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{ProviderSlug: "does-not-exist"}, "", 0)
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+// TestListTools_ExcludesDeprecatedToolsByDefault pins the coder's flag #2:
+// includeDeprecated defaults to excluded.
+func TestListTools_ExcludesDeprecatedToolsByDefault(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	page, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{ProviderSlug: "outlook"}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, item := range page.Items {
+		if item.Slug == "outlook-legacy-tool" {
+			t.Fatalf("deprecated tool %q present, want it excluded by default", item.Slug)
+		}
+	}
+}
+
+func TestListTools_IncludesDeprecatedToolsWhenOptedIn(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	page, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{ProviderSlug: "outlook", IncludeDeprecated: true}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("len(Items) = %d, want 3 (including the deprecated tool)", len(page.Items))
+	}
+	found := false
+	for _, item := range page.Items {
+		if item.Slug == "outlook-legacy-tool" {
+			found = true
+			if !item.Deprecated {
+				t.Error("Deprecated = false, want true for outlook-legacy-tool")
+			}
+		}
+	}
+	if !found {
+		t.Error("outlook-legacy-tool missing from the includeDeprecated=true result")
+	}
+}
+
+func TestListTools_CursorPaginationWalksEveryNonDeprecatedToolSortedBySlugWithoutDuplicatesOrGaps(t *testing.T) {
+	f := newToolCatalogFacade(t)
+	ctx := context.Background()
+
+	var order []string
+	seen := map[string]bool{}
+	cursor := ""
+	for i := 0; i < 10; i++ {
+		page, err := f.ListTools(ctx, testOrgID, catalog.ToolFilter{}, cursor, 1)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, item := range page.Items {
+			if seen[item.Slug] {
+				t.Fatalf("slug %q seen more than once while paginating", item.Slug)
+			}
+			seen[item.Slug] = true
+			order = append(order, item.Slug)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	want := []string{"outlook-get-message", "outlook-list-messages", "slack-post-message"}
+	if len(order) != len(want) {
+		t.Fatalf("walked %d tools across all pages, want exactly %d (no duplicates or gaps): %v", len(order), len(want), order)
+	}
+	for i, slug := range want {
+		if order[i] != slug {
+			t.Errorf("order[%d] = %q, want %q (sorted by slug)", i, order[i], slug)
+		}
+	}
+}
+
+// manyToolDefinitions returns one provider with count non-deprecated tools,
+// sorted-by-slug-friendly names (tool-000, tool-001, ...), so tests can prove
+// normalizeToolLimit's clamp at maxToolPageLimit (200) with an observable
+// page size rather than testing the unexported function directly.
+func manyToolDefinitions(count int) []catalog.ProviderDefinition {
+	tools := make([]catalog.ProviderTool, count)
+	for i := range tools {
+		slug := fmt.Sprintf("tool-%03d", i)
+		tools[i] = catalog.ProviderTool{Slug: slug, Name: slug, Description: "generated", InputSchema: minimalSchema(), OutputSchema: minimalSchema()}
+	}
+	return []catalog.ProviderDefinition{
+		{Slug: "many", Name: "Many", AuthScheme: "oauth2", AuthorizeURL: "https://example.com/authorize", TokenURL: "https://example.com/token", Tools: tools},
+	}
+}
+
+// TestListTools_ClampsARequestedLimitAboveTheMaximumTo200 covers
+// normalizeToolLimit's upper clamp (facade.go): a caller-requested limit
+// above maxToolPageLimit must not be honored as-is.
+func TestListTools_ClampsARequestedLimitAboveTheMaximumTo200(t *testing.T) {
+	f, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: manyToolDefinitions(205)})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+
+	page, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{}, "", 250)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 200 {
+		t.Fatalf("len(Items) = %d, want 200 (a requested limit of 250 must clamp to the maximum)", len(page.Items))
+	}
+	if page.NextCursor == "" {
+		t.Error("NextCursor is empty, want a cursor since 205 tools exceed the clamped page of 200")
+	}
+}
+
+func TestListTools_InvalidCursorReturnsAValidationError(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	_, err := f.ListTools(context.Background(), testOrgID, catalog.ToolFilter{}, "not-valid-base64!!", 0)
+
+	assertDomainError(t, err, catalog.CodeValidationFailed, 422)
+}
+
+func TestToolDetail_ReturnsTheToolBySlugWithItsProviderIdentity(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	tool, err := f.ToolDetail(context.Background(), "outlook-get-message")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tool.Name != "Get email message" {
+		t.Errorf("Name = %q, want %q", tool.Name, "Get email message")
+	}
+	if tool.ProviderSlug != "outlook" {
+		t.Errorf("ProviderSlug = %q, want %q", tool.ProviderSlug, "outlook")
+	}
+	if tool.ProviderName != "Outlook" {
+		t.Errorf("ProviderName = %q, want %q", tool.ProviderName, "Outlook")
+	}
+}
+
+func TestToolDetail_UnknownSlugReturnsNotFound(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	_, err := f.ToolDetail(context.Background(), "does-not-exist")
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+func TestToolDetail_ADeprecatedToolIsStillRetrievableBySlug(t *testing.T) {
+	f := newToolCatalogFacade(t)
+
+	tool, err := f.ToolDetail(context.Background(), "outlook-legacy-tool")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tool.Deprecated {
+		t.Error("Deprecated = false, want true")
+	}
 }

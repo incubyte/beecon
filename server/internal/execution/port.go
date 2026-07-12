@@ -28,12 +28,15 @@ type ConnectionReader interface {
 }
 
 // ToolCallRequest is everything ProviderClient needs to make one HTTP call
-// to a provider on the caller's behalf.
+// to a provider on the caller's behalf. Headers carries a tool's declared
+// header mapping (PD13) — additional headers beyond the standard bearer
+// Authorization/Accept every call already sends.
 type ToolCallRequest struct {
 	Method      string
 	URL         string
 	AccessToken string
 	Query       map[string]string
+	Headers     map[string]string
 }
 
 // ToolCallResponse is a provider's raw HTTP response to a tool call — the

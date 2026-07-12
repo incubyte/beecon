@@ -15,6 +15,7 @@ import (
 )
 
 const validDefinitionYAML = `
+formatVersion: 1
 slug: outlook
 name: Outlook
 logo: https://static.beecon.dev/providers/outlook.png
@@ -25,14 +26,19 @@ oauth:
   scopes:
     - offline_access
     - Mail.Read
+mapping:
+  baseUrl: https://graph.microsoft.com
 tools:
   - slug: outlook-list-messages
     name: List messages
     description: List messages in the mailbox.
-    method: GET
-    path: /v1.0/me/messages
     inputSchema:
       type: object
+    outputSchema:
+      type: object
+    mapping:
+      method: GET
+      path: /v1.0/me/messages
 `
 
 func mapFSWithFile(name, contents string) fstest.MapFS {
@@ -108,6 +114,7 @@ func TestLoadProviderDefinitions_LoadsNameLogoOAuthEndpointsScopesAndTools(t *te
 
 func TestLoadProviderDefinitions_DefaultsAuthSchemeToOAuth2WhenOmitted(t *testing.T) {
 	yamlWithoutAuthScheme := `
+formatVersion: 1
 slug: outlook
 name: Outlook
 logo: https://static.beecon.dev/providers/outlook.png
@@ -116,6 +123,8 @@ oauth:
   tokenUrl: https://example.com/token
   scopes:
     - Mail.Read
+mapping:
+  baseUrl: https://example.com
 `
 	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", yamlWithoutAuthScheme))
 
@@ -206,6 +215,7 @@ func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenTokenURLIsMissing
 
 func TestLoadProviderDefinitions_FailsWhenNoScopesAreDeclared(t *testing.T) {
 	invalid := `
+formatVersion: 1
 slug: outlook
 name: Outlook
 logo: https://static.beecon.dev/providers/outlook.png
@@ -213,6 +223,8 @@ oauth:
   authorizeUrl: https://example.com/authorize
   tokenUrl: https://example.com/token
   scopes: []
+mapping:
+  baseUrl: https://example.com
 `
 	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
 

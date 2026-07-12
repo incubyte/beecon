@@ -7,6 +7,9 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
 
 	"beecon/internal/httpx"
 	"beecon/internal/organizations"
@@ -54,4 +57,61 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, toIntegrationSummaryDTOs(summaries))
+}
+
+// ListTools handles GET /api/v1/tools (org-scoped route): filters by
+// integrationId or providerSlug, optionally includes deprecated tools,
+// cursor-paginated.
+func (h *Handler) ListTools(w http.ResponseWriter, r *http.Request) {
+	org, ok := organizations.OrgIDFromContext(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+
+	query := r.URL.Query()
+	filter := catalog.ToolFilter{
+		IntegrationID:     catalog.IntegrationID(query.Get("integrationId")),
+		ProviderSlug:      query.Get("providerSlug"),
+		IncludeDeprecated: parseBoolQueryParam(query.Get("includeDeprecated")),
+	}
+	limit, err := parseIntQueryParam(query.Get("limit"))
+	if err != nil {
+		h.errors.WriteError(w, r, catalog.ErrValidation("limit", "must be a positive integer"))
+		return
+	}
+
+	page, err := h.facade.ListTools(r.Context(), org, filter, query.Get("cursor"), limit)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toToolsPageDTO(page))
+}
+
+// GetTool handles GET /api/v1/tools/{slug} (org-scoped route): the same
+// detail ListTools carries for one tool, addressed by slug (PD8).
+func (h *Handler) GetTool(w http.ResponseWriter, r *http.Request) {
+	if _, ok := organizations.OrgIDFromContext(r.Context()); !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+	tool, err := h.facade.ToolDetail(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toToolSummaryDTO(tool))
+}
+
+func parseBoolQueryParam(raw string) bool {
+	parsed, _ := strconv.ParseBool(raw)
+	return parsed
+}
+
+func parseIntQueryParam(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	return strconv.Atoi(raw)
 }

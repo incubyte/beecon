@@ -52,6 +52,9 @@ func (c *Client) Call(ctx context.Context, req execution.ToolCallRequest) (execu
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+req.AccessToken)
 	httpReq.Header.Set("Accept", "application/json")
+	for name, value := range req.Headers {
+		httpReq.Header.Set(name, value)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

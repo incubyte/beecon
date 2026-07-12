@@ -8,37 +8,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// providerDefinitionFile is the on-disk YAML shape of one provider
-// definition file (AC1: name, logo, OAuth authorize/token endpoints, scopes,
-// tool definitions).
-type providerDefinitionFile struct {
-	Slug       string             `yaml:"slug"`
-	Name       string             `yaml:"name"`
-	Logo       string             `yaml:"logo"`
-	AuthScheme string             `yaml:"authScheme"`
-	OAuth      oauthConfigFile    `yaml:"oauth"`
-	Tools      []providerToolFile `yaml:"tools"`
-}
+// supportedFormatVersion is the only provider definition format version this
+// build understands. Definitions are embedded in the binary — no deployed
+// user data exists in an older format — so there is deliberately no
+// dual-format support: a future v2 adds a parser and a dispatch arm below,
+// nothing else changes.
+const supportedFormatVersion = 1
 
-type oauthConfigFile struct {
-	AuthorizeURL string   `yaml:"authorizeUrl"`
-	TokenURL     string   `yaml:"tokenUrl"`
-	UserInfoURL  string   `yaml:"userInfoUrl"`
-	Scopes       []string `yaml:"scopes"`
-}
-
-type providerToolFile struct {
-	Slug        string         `yaml:"slug"`
-	Name        string         `yaml:"name"`
-	Description string         `yaml:"description"`
-	Method      string         `yaml:"method"`
-	Path        string         `yaml:"path"`
-	InputSchema map[string]any `yaml:"inputSchema"`
+// formatVersionPeek decodes only the field every provider definition file
+// must carry so LoadProviderDefinitions can dispatch to the right version's
+// parser before attempting to parse anything else.
+type formatVersionPeek struct {
+	FormatVersion int `yaml:"formatVersion"`
 }
 
 // LoadProviderDefinitions reads and validates every *.yaml file directly
 // under fsys, in deterministic (sorted by filename) order. It fails with an
-// error naming the file and the invalid field (AC2) rather than returning a
+// error naming the file and the invalid field rather than returning a
 // partially loaded provider.
 func LoadProviderDefinitions(fsys fs.FS) ([]ProviderDefinition, error) {
 	names, err := yamlFileNames(fsys)
@@ -73,100 +59,47 @@ func yamlFileNames(fsys fs.FS) ([]string, error) {
 	return names, nil
 }
 
+// loadProviderDefinitionFile peeks the file's formatVersion and dispatches to
+// that version's parser. A missing or unsupported formatVersion fails boot
+// naming the file, the version found (0 for missing), and the version this
+// build supports.
 func loadProviderDefinitionFile(fsys fs.FS, name string) (ProviderDefinition, error) {
 	raw, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		return ProviderDefinition{}, fmt.Errorf("read provider definition %s: %w", name, err)
 	}
 
-	var file providerDefinitionFile
-	if err := yaml.Unmarshal(raw, &file); err != nil {
-		return ProviderDefinition{}, fmt.Errorf("parse provider definition %s: %w", name, err)
-	}
-
-	if err := validateProviderDefinitionFile(name, file); err != nil {
+	version, err := peekFormatVersion(name, raw)
+	if err != nil {
 		return ProviderDefinition{}, err
 	}
 
-	return providerDefinitionFromFile(file), nil
+	switch version {
+	case 1:
+		return loadProviderDefinitionFileV1(name, raw)
+	default:
+		return ProviderDefinition{}, unsupportedFormatVersionError(name, version)
+	}
 }
 
-// validateProviderDefinitionFile checks every field AC1 requires a provider
-// definition to carry, returning a *definitionError naming both name (the
-// file) and the missing/invalid field (AC2).
-func validateProviderDefinitionFile(name string, file providerDefinitionFile) error {
-	required := []struct {
-		field string
-		value string
-	}{
-		{"slug", file.Slug},
-		{"name", file.Name},
-		{"logo", file.Logo},
-		{"oauth.authorizeUrl", file.OAuth.AuthorizeURL},
-		{"oauth.tokenUrl", file.OAuth.TokenURL},
+func peekFormatVersion(name string, raw []byte) (int, error) {
+	var peek formatVersionPeek
+	if err := yaml.Unmarshal(raw, &peek); err != nil {
+		return 0, fmt.Errorf("parse provider definition %s: %w", name, err)
 	}
-	for _, r := range required {
-		if r.value == "" {
-			return definitionError(name, r.field, "must not be empty")
-		}
+	if peek.FormatVersion == 0 {
+		return 0, unsupportedFormatVersionError(name, 0)
 	}
-	if len(file.OAuth.Scopes) == 0 {
-		return definitionError(name, "oauth.scopes", "must declare at least one scope")
-	}
-	for i, tool := range file.Tools {
-		if err := validateProviderToolFile(name, i, tool); err != nil {
-			return err
-		}
-	}
-	return nil
+	return peek.FormatVersion, nil
 }
 
-func validateProviderToolFile(fileName string, index int, tool providerToolFile) error {
-	if tool.Slug == "" {
-		return definitionError(fileName, fmt.Sprintf("tools[%d].slug", index), "must not be empty")
-	}
-	if tool.Method == "" {
-		return definitionError(fileName, fmt.Sprintf("tools[%d].method", index), "must not be empty")
-	}
-	if tool.Path == "" {
-		return definitionError(fileName, fmt.Sprintf("tools[%d].path", index), "must not be empty")
-	}
-	return nil
+func unsupportedFormatVersionError(name string, found int) error {
+	return fmt.Errorf(
+		"invalid provider definition %s: formatVersion %d is not supported (supported: %d)",
+		name, found, supportedFormatVersion,
+	)
 }
 
 func definitionError(fileName, field, issue string) error {
 	return fmt.Errorf("invalid provider definition %s: field %q %s", fileName, field, issue)
-}
-
-func providerDefinitionFromFile(file providerDefinitionFile) ProviderDefinition {
-	authScheme := file.AuthScheme
-	if authScheme == "" {
-		authScheme = "oauth2"
-	}
-	return ProviderDefinition{
-		Slug:         file.Slug,
-		Name:         file.Name,
-		Logo:         file.Logo,
-		AuthScheme:   authScheme,
-		AuthorizeURL: file.OAuth.AuthorizeURL,
-		TokenURL:     file.OAuth.TokenURL,
-		UserInfoURL:  file.OAuth.UserInfoURL,
-		Scopes:       file.OAuth.Scopes,
-		Tools:        toolsFromFile(file.Tools),
-	}
-}
-
-func toolsFromFile(files []providerToolFile) []ProviderTool {
-	tools := make([]ProviderTool, 0, len(files))
-	for _, f := range files {
-		tools = append(tools, ProviderTool{
-			Slug:        f.Slug,
-			Name:        f.Name,
-			Description: f.Description,
-			Method:      f.Method,
-			Path:        f.Path,
-			InputSchema: f.InputSchema,
-		})
-	}
-	return tools
 }

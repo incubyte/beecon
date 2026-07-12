@@ -1,7 +1,7 @@
-# Outlook provider definition (Phase 1, PD8/PD9). This is the locally
-# defined declarative source of truth for the Outlook provider until the
-# Phase 5 registry service exists — good enough for Outlook, not the
-# finalized definition format.
+# Outlook provider definition, finalized format v1 (PD13). This is the
+# locally defined declarative source of truth for the Outlook provider until
+# the Phase 5 registry service exists.
+formatVersion: 1
 slug: outlook
 name: Outlook
 logo: https://static.beecon.dev/providers/outlook.png
@@ -20,16 +20,12 @@ oauth:
     - offline_access
     - Mail.Read
     - User.Read
+mapping:
+  baseUrl: https://graph.microsoft.com/v1.0
 tools:
   - slug: outlook-list-messages
     name: List messages
     description: List messages in the authenticated user's mailbox.
-    method: GET
-    # Full URL (not a path relative to some other base) — the execution
-    # module calls this directly (PD8: GET /v1.0/me/messages on Microsoft
-    # Graph). Good enough for Outlook; Phase 5's registry format may split
-    # this into a base URL + path.
-    path: https://graph.microsoft.com/v1.0/me/messages
     inputSchema:
       type: object
       properties:
@@ -45,3 +41,108 @@ tools:
         filter:
           type: string
           description: An OData filter expression restricting which messages are returned.
+    outputSchema:
+      type: object
+      properties:
+        value:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              subject:
+                type: string
+    mapping:
+      method: GET
+      path: /me/messages
+      query:
+        top: "{input.top}"
+        skip: "{input.skip}"
+        select: "{input.select}"
+        filter: "{input.filter}"
+
+  - slug: outlook-get-message
+    name: Get email message
+    description: >-
+      Retrieves a specific email message by its ID from the authenticated
+      user's Outlook mailbox. Use the 'select' input to include specific
+      fields like 'internetMessageHeaders' for filtering automated emails.
+    inputSchema:
+      type: object
+      properties:
+        messageId:
+          title: Message ID
+          description: The unique identifier of the email message to retrieve.
+          type: string
+        select:
+          title: Select Fields
+          description: >-
+            Comma-separated list of fields to include in the response (e.g.
+            'subject,from,receivedDateTime,internetMessageHeaders').
+          type: string
+      required:
+        - messageId
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        bodyPreview:
+          type: string
+        body:
+          type: object
+          properties:
+            contentType:
+              type: string
+            content:
+              type: string
+        from:
+          type: object
+          properties:
+            emailAddress:
+              type: object
+              properties:
+                name:
+                  type: string
+                address:
+                  type: string
+        toRecipients:
+          type: array
+          items:
+            type: object
+            properties:
+              emailAddress:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  address:
+                    type: string
+        receivedDateTime:
+          type: string
+        sentDateTime:
+          type: string
+        hasAttachments:
+          type: boolean
+        internetMessageId:
+          type: string
+        importance:
+          type: string
+        isRead:
+          type: boolean
+        isDraft:
+          type: boolean
+        conversationId:
+          type: string
+    mapping:
+      method: GET
+      # Mirrors temp/outlook-get-message.yaml's default case (the
+      # authenticated user's own mailbox, "/me/..."); the finalized format's
+      # mapping has no conditional path routing, so the userId-scoped
+      # variant (/users/{userId}/messages/{messageId}) is not expressed here.
+      path: /me/messages/{input.messageId}
+      query:
+        $select: "{input.select}"

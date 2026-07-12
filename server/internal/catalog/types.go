@@ -7,16 +7,27 @@ package catalog
 
 import "time"
 
-// ProviderTool describes one tool a Provider exposes. Phase 1 tools are
-// addressed by slug (PD8). Path is the tool's full call URL (not a path
-// relative to some other base) — the execution module calls it directly.
+// ProviderTool describes one tool a Provider exposes. Tools are addressed by
+// slug (PD8/ADR-0006). Path is relative to the owning ProviderDefinition's
+// BaseURL when BaseURL is set (the finalized definition format, PD13); a
+// definition built directly in Go with no BaseURL may still set Path to a
+// full call URL (Phase 1's shape, preserved for existing tests) — the
+// execution module joins BaseURL and Path itself (execution/template.go).
+// OutputSchema is required by the finalized format (PD13) so both vendors'
+// unreliable schemas stop being a problem for Beecon's consumers. Mapping is
+// the tool's declared query/header/body/pagination/file-input mapping — the
+// zero value means "no declared mapping", which execution treats as Phase
+// 1's generic argument pass-through.
 type ProviderTool struct {
-	Slug        string
-	Name        string
-	Description string
-	Method      string
-	Path        string
-	InputSchema map[string]any
+	Slug         string
+	Name         string
+	Description  string
+	Method       string
+	Path         string
+	InputSchema  map[string]any
+	OutputSchema map[string]any
+	Deprecated   bool
+	Mapping      Mapping
 }
 
 // ProviderDefinition is the parsed, validated form of one provider's
@@ -24,11 +35,15 @@ type ProviderTool struct {
 // endpoint the OAuth callback calls (bearer-authenticated) to capture
 // account metadata after token exchange (PD9 — for Outlook, Microsoft
 // Graph's GET /v1.0/me); a provider with no such endpoint leaves it empty.
+// BaseURL is the finalized format's provider-level call URL prefix (PD13);
+// it is empty for a Phase-1-shaped definition built directly in Go, in which
+// case every ProviderTool.Path is treated as a full URL.
 type ProviderDefinition struct {
 	Slug         string
 	Name         string
 	Logo         string
 	AuthScheme   string
+	BaseURL      string
 	AuthorizeURL string
 	TokenURL     string
 	UserInfoURL  string
@@ -72,4 +87,28 @@ func NewIntegration(id IntegrationID, providerSlug, clientID, clientSecret strin
 		ClientSecret: clientSecret,
 		CreatedAt:    now,
 	}
+}
+
+// ToolSummary is one tool as ListTools/ToolDetail return it (Slice 1's
+// catalog API): the tool's own catalog fields plus the identifying details
+// of the ProviderDefinition that owns it, since a consumer addressing tools
+// by slug alone (PD8) still needs to know which provider a tool belongs to.
+type ToolSummary struct {
+	Slug         string
+	Name         string
+	Description  string
+	InputSchema  map[string]any
+	OutputSchema map[string]any
+	Deprecated   bool
+	ProviderSlug string
+	ProviderName string
+	ProviderLogo string
+}
+
+// ToolPage is one cursor-paginated page of tools (PD15's platform-wide
+// convention), sorted by slug (ADR-0006): NextCursor is empty when this was
+// the last page.
+type ToolPage struct {
+	Items      []ToolSummary
+	NextCursor string
 }

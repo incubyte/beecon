@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"beecon/internal/catalog"
@@ -43,7 +44,7 @@ func (f *Facade) Execute(
 	toolSlug string,
 	arguments map[string]any,
 ) (Result, error) {
-	_, tool, err := f.tools.FindToolBySlug(ctx, toolSlug)
+	definition, tool, err := f.tools.FindToolBySlug(ctx, toolSlug)
 	if err != nil {
 		return Result{}, err
 	}
@@ -60,7 +61,7 @@ func (f *Facade) Execute(
 		return FailureResult(CodeInvalidArguments, violation.Error()), nil
 	}
 
-	return f.callProvider(ctx, org, userID, connectionID, toolSlug, tool, access.AccessToken, arguments)
+	return f.callProvider(ctx, org, userID, connectionID, toolSlug, definition, tool, access.AccessToken, arguments)
 }
 
 func connectionNotActiveMessage(status connections.Status) string {
@@ -76,15 +77,22 @@ func (f *Facade) callProvider(
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
 	toolSlug string,
+	definition catalog.ProviderDefinition,
 	tool catalog.ProviderTool,
 	accessToken string,
 	arguments map[string]any,
 ) (Result, error) {
+	requestURL, err := buildToolCallURL(definition.BaseURL, tool.Path, arguments)
+	if err != nil {
+		return FailureResult(CodeInvalidArguments, err.Error()), nil
+	}
+
 	request := ToolCallRequest{
 		Method:      tool.Method,
-		URL:         tool.Path,
+		URL:         requestURL,
 		AccessToken: accessToken,
-		Query:       stringifyArguments(arguments),
+		Query:       buildToolQuery(tool.Mapping, arguments),
+		Headers:     buildToolHeaders(tool.Mapping, arguments),
 	}
 
 	started := f.now()
@@ -144,12 +152,69 @@ func (f *Facade) recordAttempt(
 // values: the tool's input schema (top/skip/select/filter for
 // outlook-list-messages, PD8) already constrains what may be present, so
 // this stays a generic pass-through rather than hardcoding parameter names.
+// It is the fallback buildToolQuery uses for a tool that declares no
+// Mapping.Query (Phase 1's shape, preserved for tests and definitions built
+// directly in Go).
 func stringifyArguments(arguments map[string]any) map[string]string {
 	query := make(map[string]string, len(arguments))
 	for key, value := range arguments {
 		query[key] = fmt.Sprint(value)
 	}
 	return query
+}
+
+// buildToolCallURL renders {input.x}/{params.x} tokens in the tool's mapping
+// path (params is nil until Slice 3), then joins the result onto the
+// provider's BaseURL. A tool built with no BaseURL (Phase 1's shape) treats
+// its Path as the full call URL: RenderPath leaves a token-free path
+// untouched, and joinBaseURLAndPath returns the path as-is when baseURL is
+// empty.
+func buildToolCallURL(baseURL, pathTemplate string, arguments map[string]any) (string, error) {
+	renderedPath, err := RenderPath(pathTemplate, arguments, nil)
+	if err != nil {
+		return "", err
+	}
+	return joinBaseURLAndPath(baseURL, renderedPath), nil
+}
+
+func joinBaseURLAndPath(baseURL, path string) string {
+	if baseURL == "" {
+		return path
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+// buildToolQuery evaluates the tool's declared query mapping against
+// arguments: a mapping entry whose input/param was not supplied is dropped
+// (an optional argument the caller omitted). A tool with no declared query
+// mapping falls back to stringifyArguments (Phase 1's generic pass-through).
+func buildToolQuery(mapping catalog.Mapping, arguments map[string]any) map[string]string {
+	if len(mapping.Query) == 0 {
+		return stringifyArguments(arguments)
+	}
+	query := make(map[string]string, len(mapping.Query))
+	for param, expression := range mapping.Query {
+		if value, ok := RenderMappedValue(expression, arguments, nil); ok {
+			query[param] = value
+		}
+	}
+	return query
+}
+
+// buildToolHeaders evaluates the tool's declared header mapping against
+// arguments the same way buildToolQuery does for query parameters. A tool
+// with no declared header mapping sends no extra headers.
+func buildToolHeaders(mapping catalog.Mapping, arguments map[string]any) map[string]string {
+	if len(mapping.Header) == 0 {
+		return nil
+	}
+	headers := make(map[string]string, len(mapping.Header))
+	for name, expression := range mapping.Header {
+		if value, ok := RenderMappedValue(expression, arguments, nil); ok {
+			headers[name] = value
+		}
+	}
+	return headers
 }
 
 func providerErrorMessage(status int, body string) string {

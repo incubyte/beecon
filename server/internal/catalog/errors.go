@@ -31,6 +31,21 @@ func ErrUnknownProvider(providerSlug string) *httpx.DomainError {
 	return ErrValidation("providerSlug", "unknown provider "+providerSlug)
 }
 
+// ErrProviderNotFound is returned when ListTools is asked to filter by a
+// providerSlug that names no loaded ProviderDefinition — a not-found list
+// target, not a request-validation error (unlike ErrUnknownProvider, which
+// guards a create-time request body field).
+func ErrProviderNotFound() *httpx.DomainError {
+	return httpx.New(http.StatusNotFound, CodeNotFound, "provider not found")
+}
+
+// ErrInvalidCursor is returned when ListTools is given a pagination cursor
+// that is not valid base64 (PD15's platform-wide cursor convention).
+func ErrInvalidCursor() *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
+		WithDetails(map[string]any{"field": "cursor", "issue": "malformed pagination cursor"})
+}
+
 // ErrValidation is the shared PD5 validation_failed shape for the catalog
 // module's request-level checks.
 func ErrValidation(field, issue string) *httpx.DomainError {

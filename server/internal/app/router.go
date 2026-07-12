@@ -77,6 +77,8 @@ func buildRouter(
 
 			r.Route("/tools", func(r chi.Router) {
 				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Get("/", catalogHandler.ListTools)
+				r.Get("/{slug}", catalogHandler.GetTool)
 				r.Post("/{slug}/execute", executionHandler.Execute)
 			})
 

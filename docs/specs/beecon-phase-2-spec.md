@@ -142,15 +142,15 @@ Numbering continues from Phase 1 (PD1–PD12).
 The format every later phase builds on, proven by re-expressing Outlook in it, plus
 the catalog API rolai polls today (with the output schemas both vendors get wrong).
 
-- [ ] Provider definitions load at boot from the finalized format (`formatVersion: 1`); the Phase 1 Outlook definition is re-expressed in it with no change to any existing endpoint's behavior
-- [ ] Boot fails with a clear message naming the file, tool, and field when a definition is invalid — including when any tool lacks an input or output schema
-- [ ] Tool mappings separate the provider base URL from per-tool paths and support path, query, header, and body mapping from tool inputs
-- [ ] Consumer can execute `outlook-get-message` with a messageId and receive the message (proves path-parameter templating runs end-to-end, not just parses)
-- [ ] Consumer can list tools for an integration or provider slug, each with slug, name, description, input schema, output schema, and deprecation flag
-- [ ] Consumer can fetch a single tool by slug with the same detail
-- [ ] Tools marked deprecated in the definition are returned with their flag and can be excluded via a filter parameter
-- [ ] The tool list is cursor-paginated per the platform-wide convention (cursor + limit in, nextCursor out)
-- [ ] Listing tools for an unknown provider slug or an integration of another organization returns not-found
+- [x] Provider definitions load at boot from the finalized format (`formatVersion: 1`); the Phase 1 Outlook definition is re-expressed in it with no change to any existing endpoint's behavior
+- [x] Boot fails with a clear message naming the file, tool, and field when a definition is invalid — including when any tool lacks an input or output schema
+- [x] Tool mappings separate the provider base URL from per-tool paths and support path, query, header, and body mapping from tool inputs
+- [x] Consumer can execute `outlook-get-message` with a messageId and receive the message (proves path-parameter templating runs end-to-end, not just parses)
+- [x] Consumer can list tools for an integration or provider slug, each with slug, name, description, input schema, output schema, and deprecation flag
+- [x] Consumer can fetch a single tool by slug with the same detail
+- [x] Tools marked deprecated in the definition are returned with their flag and can be excluded via a filter parameter
+- [x] The tool list is cursor-paginated per the platform-wide convention (cursor + limit in, nextCursor out)
+- [x] Listing tools for an unknown provider slug or an integration of another organization returns not-found
 
 ## Slice 2 — Hubspot proves it: second provider, encrypted secrets, connect and execute
 

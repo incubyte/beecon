@@ -223,6 +223,54 @@ func TestExecute_CarriesTheConnectionsAccessTokenAsTheBearerToken(t *testing.T) 
 	}
 }
 
+// --- Mapping (Phase 2 Slice 1, PD13): declared header mapping ---
+
+// toolWithHeaderMapping is testTool() plus a declared header mapping, so
+// tests can prove buildToolHeaders actually reaches the provider request
+// rather than just parsing (the input schema declares no
+// additionalProperties, so "preference" is accepted alongside top/skip/
+// select/filter).
+func toolWithHeaderMapping() catalog.ProviderTool {
+	tool := testTool()
+	tool.Mapping = catalog.Mapping{Header: map[string]string{"Prefer": "{input.preference}"}}
+	return tool
+}
+
+func fakeToolReaderWithTool(tool catalog.ProviderTool) fakeToolReader {
+	return fakeToolReader{tools: map[string]catalog.ProviderTool{testToolSlug: tool}}
+}
+
+func TestExecute_ForwardsADeclaredHeaderMappingValueToTheProvider(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithHeaderMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"preference": "return=minimal"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := provider.lastReq.Headers["Prefer"]; got != "return=minimal" {
+		t.Errorf("Headers[%q] = %q, want %q", "Prefer", got, "return=minimal")
+	}
+}
+
+// TestExecute_OmitsAHeaderMappingEntryWhenItsInputIsNotSupplied is the other
+// half: buildToolHeaders must not send an empty or literal "{input.x}" value
+// for an optional argument the caller left out.
+func TestExecute_OmitsAHeaderMappingEntryWhenItsInputIsNotSupplied(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithHeaderMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := provider.lastReq.Headers["Prefer"]; present {
+		t.Errorf("Headers[%q] = %q, want the header omitted entirely when its input was not supplied", "Prefer", provider.lastReq.Headers["Prefer"])
+	}
+}
+
 // --- AC2: invalid arguments ---
 
 func TestExecute_InvalidArgumentsReturnFailureResultAndNeverCallTheProvider(t *testing.T) {

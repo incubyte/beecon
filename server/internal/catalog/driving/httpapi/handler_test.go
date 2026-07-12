@@ -198,3 +198,151 @@ func TestList_Returns401WhenNoOrgContext(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
 	}
 }
+
+// --- ListTools / GetTool (Slice 1's catalog API) ---
+
+func minimalSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+// fakeDefinitionsWithTools is fakeDefinitions' outlook provider plus two
+// tools (one deprecated), so ListTools/GetTool have something to filter and
+// fetch without depending on the real embedded outlook.yaml.
+func fakeDefinitionsWithTools() []catalog.ProviderDefinition {
+	defs := fakeDefinitions()
+	defs[0].Tools = []catalog.ProviderTool{
+		{Slug: "outlook-get-message", Name: "Get email message", Description: "Retrieves a message by id.", InputSchema: minimalSchema(), OutputSchema: minimalSchema()},
+		{Slug: "outlook-legacy-tool", Name: "Legacy tool", Description: "Deprecated.", InputSchema: minimalSchema(), OutputSchema: minimalSchema(), Deprecated: true},
+	}
+	return defs
+}
+
+func newToolsTestRouter(t *testing.T) chi.Router {
+	t.Helper()
+	facade, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: fakeDefinitionsWithTools()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	errorRenderer := httpx.NewErrorRenderer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(facade, errorRenderer)
+
+	r := chi.NewRouter()
+	r.Get("/tools", h.ListTools)
+	r.Get("/tools/{slug}", h.GetTool)
+	return r
+}
+
+func TestListTools_Returns200WithTheToolsPageShapeFilteredByProviderSlug(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools?providerSlug=outlook", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page toolsPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1 (the deprecated tool is excluded by default)", len(page.Items))
+	}
+	item := page.Items[0]
+	if item.Slug != "outlook-get-message" {
+		t.Errorf("slug = %q, want %q", item.Slug, "outlook-get-message")
+	}
+	if item.Provider.Slug != "outlook" {
+		t.Errorf("provider.slug = %q, want %q", item.Provider.Slug, "outlook")
+	}
+	if item.Deprecated {
+		t.Error("deprecated = true, want false")
+	}
+}
+
+func TestListTools_IncludeDeprecatedQueryParamIncludesTheDeprecatedTool(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools?providerSlug=outlook&includeDeprecated=true", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page toolsPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(page.Items))
+	}
+}
+
+func TestListTools_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestGetTool_Returns200WithTheToolDetail(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools/outlook-get-message", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var dto toolSummaryDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if dto.Slug != "outlook-get-message" {
+		t.Errorf("slug = %q, want %q", dto.Slug, "outlook-get-message")
+	}
+	if dto.Provider.Slug != "outlook" {
+		t.Errorf("provider.slug = %q, want %q", dto.Provider.Slug, "outlook")
+	}
+}
+
+// TestListTools_Returns422ForANonNumericLimit covers handler.go's
+// parseIntQueryParam failure branch: a limit that cannot be parsed as an
+// integer must fail loudly rather than silently falling back to the default.
+func TestListTools_Returns422ForANonNumericLimit(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools?limit=not-a-number", "org_1", "")
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "validation_failed" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "validation_failed")
+	}
+}
+
+func TestGetTool_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools/outlook-get-message", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestGetTool_Returns404ForAnUnknownSlug(t *testing.T) {
+	r := newToolsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/tools/does-not-exist", "org_1", "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
+	}
+}
