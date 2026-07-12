@@ -69,6 +69,36 @@ func TestRedact_RedactsClientSecretField(t *testing.T) {
 	}
 }
 
+func TestRedact_RedactsAnOAuthAuthorizationCodeInATokenExchangeRequestBody(t *testing.T) {
+	body := `{"grant_type":"authorization_code","code":"M.C123-secret-auth-code","redirect_uri":"https://consumer.example.com/callback"}`
+
+	got := decodeJSONObject(t, logging.Redact(body))
+
+	if got["code"] != logging.RedactedPlaceholder {
+		t.Errorf("code = %v, want %q", got["code"], logging.RedactedPlaceholder)
+	}
+	if got["grant_type"] != "authorization_code" {
+		t.Errorf("grant_type = %v, want it left untouched", got["grant_type"])
+	}
+	if got["redirect_uri"] != "https://consumer.example.com/callback" {
+		t.Errorf("redirect_uri = %v, want it left untouched", got["redirect_uri"])
+	}
+}
+
+func TestRedact_MatchesTheCodeKeyCaseInsensitively(t *testing.T) {
+	for _, key := range []string{"code", "Code", "CODE", "CoDe"} {
+		t.Run(key, func(t *testing.T) {
+			body := `{"` + key + `":"M.C123-secret-auth-code"}`
+
+			got := decodeJSONObject(t, logging.Redact(body))
+
+			if got[key] != logging.RedactedPlaceholder {
+				t.Errorf("%s = %v, want %q", key, got[key], logging.RedactedPlaceholder)
+			}
+		})
+	}
+}
+
 func TestRedact_RedactsSensitiveFieldsNestedInsideAnObject(t *testing.T) {
 	body := `{"request":{"headers":{"Authorization":"Bearer nested-token"}}}`
 

@@ -12,7 +12,7 @@ const RedactedPlaceholder = "[REDACTED]"
 // sensitiveKeys are the JSON object keys AC9 requires Redact to strip,
 // matched case-insensitively so "Authorization", "authorization", and
 // "AUTHORIZATION" are all caught: Authorization headers, access/refresh
-// tokens, and OAuth client secrets.
+// tokens, OAuth client secrets, and OAuth authorization codes.
 var sensitiveKeys = map[string]bool{
 	"authorization": true,
 	"access_token":  true,
@@ -21,6 +21,7 @@ var sensitiveKeys = map[string]bool{
 	"refreshtoken":  true,
 	"client_secret": true,
 	"clientsecret":  true,
+	"code":          true,
 }
 
 // Redact returns body with every sensitive field's value replaced by

@@ -1,5 +1,5 @@
 # Bee session-local state (regenerated per session)
-.claude/*.local.md
+**/.claude/*.local.md
 
 # Environment / secrets
 .env

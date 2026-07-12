@@ -33,52 +33,57 @@ func buildRouter(
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
-
-	r.Get("/health", healthHandler(database))
 
 	// /connect/* are the middle-man pages the end user's browser visits
 	// directly (AC1-AC9): unauthenticated by an org API key — the single-use
-	// connect token, and later the CSRF state, are the credentials.
+	// connect token, and later the CSRF state, are the credentials. They sit
+	// outside the logged group below so the connect token and the OAuth
+	// authorization code never land in the chi request log's path/query.
 	r.Get("/connect/{token}", connectWebHandler.ConnectPage)
 	r.Get("/connect/oauth/callback", connectWebHandler.Callback)
 
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Route("/organizations", func(r chi.Router) {
-			r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
-			r.Post("/", organizationsHandler.Create)
-			r.Get("/{orgId}", organizationsHandler.Get)
-			r.Patch("/{orgId}", organizationsHandler.UpdateAllowedRedirectURIs)
-			r.Post("/{orgId}/api-keys", accessHandler.Issue)
-			r.Get("/{orgId}/api-keys", accessHandler.List)
-			r.Delete("/{orgId}/api-keys/{keyId}", accessHandler.Revoke)
-		})
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Logger)
 
-		r.Route("/integrations", func(r chi.Router) {
-			r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
-			r.With(authmw.OrgAuth(verifyOrgKey)).Get("/", catalogHandler.List)
-		})
+		r.Get("/health", healthHandler(database))
 
-		r.Route("/users", func(r chi.Router) {
-			r.Use(authmw.OrgAuth(verifyOrgKey))
-			r.Post("/", organizationsHandler.CreateUser)
-			r.Get("/{userId}", organizationsHandler.GetUser)
-		})
+		r.Route("/api/v1", func(r chi.Router) {
+			r.Route("/organizations", func(r chi.Router) {
+				r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
+				r.Post("/", organizationsHandler.Create)
+				r.Get("/{orgId}", organizationsHandler.Get)
+				r.Patch("/{orgId}", organizationsHandler.UpdateAllowedRedirectURIs)
+				r.Post("/{orgId}/api-keys", accessHandler.Issue)
+				r.Get("/{orgId}/api-keys", accessHandler.List)
+				r.Delete("/{orgId}/api-keys/{keyId}", accessHandler.Revoke)
+			})
 
-		r.Route("/connections", func(r chi.Router) {
-			r.Use(authmw.OrgAuth(verifyOrgKey))
-			r.Post("/initiate", connectionsHandler.Initiate)
-			r.Get("/{connectionId}", connectionsHandler.Get)
-		})
+			r.Route("/integrations", func(r chi.Router) {
+				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/", catalogHandler.List)
+			})
 
-		r.Route("/tools", func(r chi.Router) {
-			r.Use(authmw.OrgAuth(verifyOrgKey))
-			r.Post("/{slug}/execute", executionHandler.Execute)
-		})
+			r.Route("/users", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Post("/", organizationsHandler.CreateUser)
+				r.Get("/{userId}", organizationsHandler.GetUser)
+			})
 
-		r.Route("/logs", func(r chi.Router) {
-			r.Use(authmw.OrgAuth(verifyOrgKey))
-			r.Get("/", loggingHandler.List)
+			r.Route("/connections", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Post("/initiate", connectionsHandler.Initiate)
+				r.Get("/{connectionId}", connectionsHandler.Get)
+			})
+
+			r.Route("/tools", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Post("/{slug}/execute", executionHandler.Execute)
+			})
+
+			r.Route("/logs", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Get("/", loggingHandler.List)
+			})
 		})
 	})
 
