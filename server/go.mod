@@ -6,6 +6,7 @@ require (
 	github.com/akshayvadher/cuid2 v0.0.0-20241212114603-8aba656b70dc
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.18
@@ -30,6 +31,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	mellium.im/sasl v0.3.2 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

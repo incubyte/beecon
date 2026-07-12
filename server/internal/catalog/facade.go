@@ -81,6 +81,21 @@ func (f *Facade) GetProviderDefinition(_ context.Context, providerSlug string) (
 	return definition, nil
 }
 
+// FindToolBySlug returns the ProviderDefinition and ProviderTool for a tool
+// addressed by slug (PD8: tools are addressed by slug in Phase 1, across
+// every loaded provider). Translates an unknown slug into ErrToolNotFound
+// (AC3 of Slice 5).
+func (f *Facade) FindToolBySlug(_ context.Context, slug string) (ProviderDefinition, ProviderTool, error) {
+	for _, definition := range f.definitions {
+		for _, tool := range definition.Tools {
+			if tool.Slug == slug {
+				return definition, tool, nil
+			}
+		}
+	}
+	return ProviderDefinition{}, ProviderTool{}, ErrToolNotFound()
+}
+
 func (f *Facade) summarize(integration Integration) IntegrationSummary {
 	definition := f.definitions[integration.ProviderSlug]
 	return IntegrationSummary{

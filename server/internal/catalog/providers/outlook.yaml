@@ -25,7 +25,11 @@ tools:
     name: List messages
     description: List messages in the authenticated user's mailbox.
     method: GET
-    path: /v1.0/me/messages
+    # Full URL (not a path relative to some other base) — the execution
+    # module calls this directly (PD8: GET /v1.0/me/messages on Microsoft
+    # Graph). Good enough for Outlook; Phase 5's registry format may split
+    # this into a base URL + path.
+    path: https://graph.microsoft.com/v1.0/me/messages
     inputSchema:
       type: object
       properties:

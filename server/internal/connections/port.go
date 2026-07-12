@@ -99,3 +99,24 @@ type OAuthClient interface {
 	ExchangeCode(ctx context.Context, req TokenExchangeRequest) (TokenExchangeResult, error)
 	FetchAccount(ctx context.Context, userInfoURL, accessToken string) (AccountInfo, error)
 }
+
+// LogEntry is what the OAuth token exchange hands to a Recorder after
+// completing (or failing) an authorization_code exchange with the provider
+// (Slice 5, AC8).
+type LogEntry struct {
+	OrgID        organizations.OrgID
+	UserID       organizations.UserID
+	ConnectionID ConnectionID
+	Status       int
+	DurationMs   int64
+	RequestBody  string
+	ResponseBody string
+}
+
+// Recorder is a narrow, consumer-defined port for writing an OAuth
+// token-exchange log entry (AC8), so tests can substitute a fake instead of
+// depending on the logging module directly (BOUNDARIES: connections does not
+// depend on logging — the composition root wires a logging-backed adapter).
+type Recorder interface {
+	Record(ctx context.Context, entry LogEntry) error
+}

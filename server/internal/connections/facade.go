@@ -19,6 +19,7 @@ type Facade struct {
 	providers    ProviderDefinitionReader
 	vault        *Vault
 	oauthClient  OAuthClient
+	recorder     Recorder
 	newID        func() string
 	newToken     func() string
 	newState     func() string
@@ -27,7 +28,9 @@ type Facade struct {
 }
 
 // NewFacade wires the facade with the narrow cross-module reader ports, the
-// vault and OAuth client the handshake (Slice 4) needs, injected
+// vault and OAuth client the handshake (Slice 4) needs, the narrow Recorder
+// port every token exchange logs through (Slice 5, AC8 — nil is safe: a
+// facade built without a recorder simply skips logging), injected
 // id/token/state minters, the public base URL used to build connect-page and
 // callback URLs (PD12), and a clock so tests can supply deterministic ids and
 // a fixed time.
@@ -40,6 +43,7 @@ func NewFacade(
 	providers ProviderDefinitionReader,
 	vault *Vault,
 	oauthClient OAuthClient,
+	recorder Recorder,
 	newID func() string,
 	newToken func() string,
 	newState func() string,
@@ -55,6 +59,7 @@ func NewFacade(
 		providers:    providers,
 		vault:        vault,
 		oauthClient:  oauthClient,
+		recorder:     recorder,
 		newID:        newID,
 		newToken:     newToken,
 		newState:     newState,

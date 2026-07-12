@@ -30,6 +30,7 @@ type Overrides struct {
 	Integrations  connections.IntegrationReader
 	Providers     connections.ProviderDefinitionReader
 	OAuthClient   connections.OAuthClient
+	Recorder      connections.Recorder
 	Vault         *connections.Vault
 	NewID         func() string
 	NewToken      func() string
@@ -77,6 +78,7 @@ func NewFacadeWithOverrides(o Overrides) *connections.Facade {
 		o.Providers,
 		vault,
 		o.OAuthClient,
+		o.Recorder,
 		newID,
 		newToken,
 		newState,

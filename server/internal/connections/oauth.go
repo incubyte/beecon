@@ -6,6 +6,8 @@ package connections
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -175,7 +177,11 @@ func (f *Facade) consumeState(ctx context.Context, state string) (*Connection, e
 // profile, and returns connection activated with the vault's ciphertext and
 // the captured metadata. Any failure (exchange or account fetch) surfaces
 // uniformly as ErrTokenExchangeFailed (AC9) — the connection this returns is
-// never persisted on error.
+// never persisted on error. Every attempt — success or failure — writes one
+// log entry (Slice 5, AC8) with the request/response bodies the token
+// exchange sent and received; the logging module redacts them before
+// persistence (AC9), so this function passes the raw values through
+// in-memory only.
 func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection, code string) (Connection, error) {
 	integration, err := f.integrations.GetIntegration(ctx, connection.IntegrationID)
 	if err != nil {
@@ -186,19 +192,18 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 		return Connection{}, err
 	}
 
-	tokens, err := f.oauthClient.ExchangeCode(ctx, TokenExchangeRequest{
+	request := TokenExchangeRequest{
 		TokenURL:     definition.TokenURL,
 		ClientID:     integration.ClientID,
 		ClientSecret: integration.ClientSecret,
 		Code:         code,
 		RedirectURI:  buildCallbackURL(f.baseURL),
-	})
-	if err != nil {
-		return Connection{}, ErrTokenExchangeFailed()
 	}
 
-	account, err := f.oauthClient.FetchAccount(ctx, definition.UserInfoURL, tokens.AccessToken)
-	if err != nil {
+	started := f.now()
+	tokens, account, exchangeErr := f.exchangeTokensAndFetchAccount(ctx, request, definition.UserInfoURL)
+	f.recordTokenExchange(ctx, connection, started, request, tokens, exchangeErr)
+	if exchangeErr != nil {
 		return Connection{}, ErrTokenExchangeFailed()
 	}
 
@@ -212,6 +217,70 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 	}
 
 	return connection.Activate(encryptedAccessToken, encryptedRefreshToken, account.Email, account.DisplayName), nil
+}
+
+// exchangeTokensAndFetchAccount performs the two upstream calls the token
+// exchange needs in sequence: the authorization_code grant, then the
+// account-profile fetch using the token it returned.
+func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request TokenExchangeRequest, userInfoURL string) (TokenExchangeResult, AccountInfo, error) {
+	tokens, err := f.oauthClient.ExchangeCode(ctx, request)
+	if err != nil {
+		return TokenExchangeResult{}, AccountInfo{}, err
+	}
+	account, err := f.oauthClient.FetchAccount(ctx, userInfoURL, tokens.AccessToken)
+	if err != nil {
+		return tokens, AccountInfo{}, err
+	}
+	return tokens, account, nil
+}
+
+// recordTokenExchange writes one log entry for a completed or failed token
+// exchange (AC8). A nil recorder (no logging module wired) is a silent
+// no-op; a recorder error never fails the OAuth handshake itself — logging
+// is observability, not a precondition of the primary operation.
+func (f *Facade) recordTokenExchange(ctx context.Context, connection Connection, started time.Time, request TokenExchangeRequest, tokens TokenExchangeResult, exchangeErr error) {
+	if f.recorder == nil {
+		return
+	}
+	status := http.StatusOK
+	responseBody := tokenExchangeResponseLogBody(tokens)
+	if exchangeErr != nil {
+		status = http.StatusBadGateway
+		responseBody = exchangeErr.Error()
+	}
+	_ = f.recorder.Record(ctx, LogEntry{
+		OrgID:        connection.OrgID,
+		UserID:       connection.UserID,
+		ConnectionID: connection.ID,
+		Status:       status,
+		DurationMs:   f.now().Sub(started).Milliseconds(),
+		RequestBody:  tokenExchangeRequestLogBody(request),
+		ResponseBody: responseBody,
+	})
+}
+
+// tokenExchangeRequestLogBody and tokenExchangeResponseLogBody build a JSON
+// representation of the token exchange's request/response for logging
+// (AC8). They carry client_secret and access/refresh tokens in cleartext —
+// this stays in memory only; the logging module redacts every sensitive
+// field before the entry is ever persisted (AC9).
+func tokenExchangeRequestLogBody(request TokenExchangeRequest) string {
+	body, _ := json.Marshal(map[string]string{
+		"grant_type":    "authorization_code",
+		"client_id":     request.ClientID,
+		"client_secret": request.ClientSecret,
+		"code":          request.Code,
+		"redirect_uri":  request.RedirectURI,
+	})
+	return string(body)
+}
+
+func tokenExchangeResponseLogBody(tokens TokenExchangeResult) string {
+	body, _ := json.Marshal(map[string]string{
+		"access_token":  tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+	})
+	return string(body)
 }
 
 // buildAuthorizeURL builds the Microsoft consent link the connect page's

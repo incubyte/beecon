@@ -13,6 +13,8 @@ import (
 	"beecon/internal/config"
 	connectionshttp "beecon/internal/connections/driving/httpapi"
 	"beecon/internal/connectweb"
+	executionhttp "beecon/internal/execution/driving/httpapi"
+	logginghttp "beecon/internal/logging/driving/httpapi"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
 )
 
@@ -24,6 +26,8 @@ func buildRouter(
 	catalogHandler *cataloghttp.Handler,
 	connectionsHandler *connectionshttp.Handler,
 	connectWebHandler *connectweb.Handler,
+	executionHandler *executionhttp.Handler,
+	loggingHandler *logginghttp.Handler,
 	verifyOrgKey authmw.Verify,
 ) chi.Router {
 	r := chi.NewRouter()
@@ -65,6 +69,16 @@ func buildRouter(
 			r.Use(authmw.OrgAuth(verifyOrgKey))
 			r.Post("/initiate", connectionsHandler.Initiate)
 			r.Get("/{connectionId}", connectionsHandler.Get)
+		})
+
+		r.Route("/tools", func(r chi.Router) {
+			r.Use(authmw.OrgAuth(verifyOrgKey))
+			r.Post("/{slug}/execute", executionHandler.Execute)
+		})
+
+		r.Route("/logs", func(r chi.Router) {
+			r.Use(authmw.OrgAuth(verifyOrgKey))
+			r.Get("/", loggingHandler.List)
 		})
 	})
 

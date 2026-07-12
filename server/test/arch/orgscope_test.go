@@ -15,6 +15,7 @@ import (
 	"beecon/internal/access"
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
+	"beecon/internal/logging"
 	"beecon/internal/organizations"
 )
 
@@ -123,20 +124,39 @@ func TestConnectionsRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestLoggingRepository_EveryMethodIsOrgScoped: Slice 5 (BOUNDARIES: logging
+// depends on organizations) — an EventLog belongs to exactly one
+// organization, and AC10 requires that a caller can never see another
+// organization's log entries. Save takes the whole EventLog (which itself
+// carries OrgID); Query takes organizations.OrgID directly — a query without
+// org scope cannot be expressed.
+func TestLoggingRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*logging.Repository)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("logging.Repository has org-scope violations: %v", got)
+	}
+}
+
 // TestInstallationLevelPortsAreExplicitlyWhitelisted documents (and pins,
 // via NumMethod, so a rename/removal is noticed) the ports deliberately
 // exempted from org-scoping: access.PrefixLookup authenticates a secret
 // before any organization is known — the lookup prefix is how a caller's
 // organization is discovered in the first place; organizations.Repository
 // operates on Organization itself, which IS the isolation unit with no wider
-// scope to filter by; and catalog.Repository is installation-level by design
+// scope to filter by; catalog.Repository is installation-level by design
 // (PD7: an Integration is visible to every organization in the
-// installation) — there is no organization id to filter by.
+// installation) — there is no organization id to filter by; and
+// connections.OAuthRepository is deliberately pre-auth (Slice 4): the
+// connect page and OAuth callback authenticate a connection attempt through
+// its single-use connect token or CSRF state, arriving in the end user's
+// browser before any organization API key is ever presented.
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
 		reflect.TypeOf((*organizations.Repository)(nil)).Elem(),
 		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
+		reflect.TypeOf((*connections.OAuthRepository)(nil)).Elem(),
 	}
 	for _, ifaceType := range whitelisted {
 		if ifaceType.NumMethod() == 0 {

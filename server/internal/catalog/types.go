@@ -8,8 +8,8 @@ package catalog
 import "time"
 
 // ProviderTool describes one tool a Provider exposes. Phase 1 tools are
-// addressed by slug (PD8); the shapes here are parsed and validated at boot
-// but not yet exercised until Slice 5's execution module reads them.
+// addressed by slug (PD8). Path is the tool's full call URL (not a path
+// relative to some other base) — the execution module calls it directly.
 type ProviderTool struct {
 	Slug        string
 	Name        string

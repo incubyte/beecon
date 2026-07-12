@@ -147,16 +147,16 @@ leave the vault.
 The payoff call: one Outlook tool runs against a live connection, and every provider
 exchange is written down — minus the secrets.
 
-- [ ] Consumer can execute `outlook-list-messages` with `{userId, connectionId, arguments}` and receive `{successful: true, error: null, data}` containing the mailbox messages
-- [ ] Arguments are validated against the tool's input JSON Schema; invalid arguments return `{successful: false, error, data: null}` without calling the provider
-- [ ] Executing an unknown tool slug returns not-found
-- [ ] Executing against a connection that is not ACTIVE returns `{successful: false, error, data: null}` with a status-explaining error
-- [ ] Executing against a connection of another organization returns not-found
-- [ ] Executing with a connectionId that does not belong to the given userId returns an error without calling the provider
-- [ ] An upstream provider error (4xx/5xx from Graph) returns `{successful: false, error, data: null}` surfacing the provider's status and message
-- [ ] Every tool execution and OAuth token exchange writes a log entry with organization/user/connection ids, tool slug (where applicable), duration, and status
-- [ ] Authorization headers, tokens, and OAuth client secrets are redacted from logged request/response bodies before persistence
-- [ ] Consumer can query logs filtered by connectionId, userId, toolSlug, and time range, cursor-paginated, seeing only its own organization's entries
+- [x] Consumer can execute `outlook-list-messages` with `{userId, connectionId, arguments}` and receive `{successful: true, error: null, data}` containing the mailbox messages
+- [x] Arguments are validated against the tool's input JSON Schema; invalid arguments return `{successful: false, error, data: null}` without calling the provider
+- [x] Executing an unknown tool slug returns not-found
+- [x] Executing against a connection that is not ACTIVE returns `{successful: false, error, data: null}` with a status-explaining error
+- [x] Executing against a connection of another organization returns not-found
+- [x] Executing with a connectionId that does not belong to the given userId returns an error without calling the provider
+- [x] An upstream provider error (4xx/5xx from Graph) returns `{successful: false, error, data: null}` surfacing the provider's status and message
+- [x] Every tool execution and OAuth token exchange writes a log entry with organization/user/connection ids, tool slug (where applicable), duration, and status
+- [x] Authorization headers, tokens, and OAuth client secrets are redacted from logged request/response bodies before persistence
+- [x] Consumer can query logs filtered by connectionId, userId, toolSlug, and time range, cursor-paginated, seeing only its own organization's entries
 
 ## Slice 6 — The consumer's hands: TypeScript SDK
 

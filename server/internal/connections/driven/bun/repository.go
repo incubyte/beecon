@@ -169,14 +169,30 @@ func (r *Repository) FindState(ctx context.Context, state string) (*connections.
 	return result, nil
 }
 
+// MarkStateConsumed marks state consumed via a compare-and-set update
+// (WHERE consumed_at IS NULL): if two callbacks race on the same state, only
+// the first update affects a row. The second sees zero rows affected and
+// gets ErrStateAlreadyUsed, so a state can never be consumed twice even
+// under concurrent callbacks.
 func (r *Repository) MarkStateConsumed(ctx context.Context, state string, consumedAt time.Time) error {
 	row := OAuthStateRow{State: state, ConsumedAt: &consumedAt}
-	_, err := r.db.NewUpdate().
+	result, err := r.db.NewUpdate().
 		Model(&row).
 		Column("consumed_at").
 		Where("state = ?", state).
+		Where("consumed_at IS NULL").
 		Exec(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return connections.ErrStateAlreadyUsed()
+	}
+	return nil
 }
 
 func rowFromConnection(connection connections.Connection) ConnectionRow {

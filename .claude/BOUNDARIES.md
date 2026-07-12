@@ -9,7 +9,7 @@
 - `access/` — owns: ServerApiKey, UserToken, WebhookSigningSecret, key verification and rotation. Depends on: organizations
 - `catalog/` — owns: Provider, Integration, Tool, Mapping, TriggerDefinition, definition bundles and versions, registry-sync (import/diff/activate). Depends on: organizations
 - `connections/` — owns: Connection, CredentialVault (encrypted tokens), OAuth flows, token auto-refresh, reconciliation. Depends on: organizations, access, catalog
-- `execution/` — owns: ToolExecution, rate-limit normalization, retry policy, pagination, FileUpload. Depends on: connections, catalog
+- `execution/` — owns: ToolExecution, rate-limit normalization, retry policy, pagination, FileUpload. Depends on: connections, catalog, organizations (org-scoping every execution the same way connections and catalog do)
 - `triggers/` — owns: TriggerInstance, subscription lifecycle, inbound provider event normalization (push + poll). Depends on: connections, catalog
 - `delivery/` — owns: Outbox, WebhookDelivery (signing, retries, idempotency), ServiceBusDelivery, reverse messages. Depends on: access, organizations
 - `logging/` — owns: EventLog, redaction rules, retention. Depends on: organizations

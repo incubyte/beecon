@@ -25,8 +25,14 @@ import (
 	connectionshttp "beecon/internal/connections/driving/httpapi"
 	"beecon/internal/connectweb"
 	"beecon/internal/db"
+	"beecon/internal/execution"
+	"beecon/internal/execution/driven/providerhttp"
+	executionhttp "beecon/internal/execution/driving/httpapi"
 	"beecon/internal/httpx"
 	"beecon/internal/idgen"
+	"beecon/internal/logging"
+	loggingbun "beecon/internal/logging/driven/bun"
+	logginghttp "beecon/internal/logging/driving/httpapi"
 	"beecon/internal/organizations"
 	orgsbun "beecon/internal/organizations/driven/bun"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
@@ -96,15 +102,38 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
 	catalogFacade := buildCatalogFacade(database, providerDefinitions)
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
-	connectionsFacade := buildConnectionsFacade(database, deps.Config.BaseURL, organizationsFacade, catalogFacade, vault, oauthhttp.NewClient(nil))
+	loggingFacade := buildLoggingFacade(database)
+	loggingHandler := logginghttp.NewHandler(loggingFacade, errorRenderer)
+	connectionsFacade := buildConnectionsFacade(
+		database,
+		deps.Config.BaseURL,
+		organizationsFacade,
+		catalogFacade,
+		vault,
+		oauthhttp.NewClient(nil),
+		connectionsLogRecorder{logs: loggingFacade},
+	)
 	connectionsHandler := connectionshttp.NewHandler(connectionsFacade, errorRenderer)
 	connectWebHandler, err := connectweb.NewHandler(connectionsFacade)
 	if err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("parse connect-page templates: %w", err)
 	}
+	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder{logs: loggingFacade})
+	executionHandler := executionhttp.NewHandler(executionFacade, errorRenderer)
 
-	router := buildRouter(deps.Config, database, organizationsHandler, accessHandler, catalogHandler, connectionsHandler, connectWebHandler, accessFacade.Verify)
+	router := buildRouter(
+		deps.Config,
+		database,
+		organizationsHandler,
+		accessHandler,
+		catalogHandler,
+		connectionsHandler,
+		connectWebHandler,
+		executionHandler,
+		loggingHandler,
+		accessFacade.Verify,
+	)
 
 	return &Wired{
 		Router: router,
@@ -135,6 +164,7 @@ func buildConnectionsFacade(
 	catalogFacade *catalog.Facade,
 	vault *connections.Vault,
 	oauthClient connections.OAuthClient,
+	recorder connections.Recorder,
 ) *connections.Facade {
 	repo := connectionsbun.NewRepository(database)
 	return connections.NewFacade(
@@ -146,10 +176,25 @@ func buildConnectionsFacade(
 		catalogFacade,
 		vault,
 		oauthClient,
+		recorder,
 		idgen.Prefixed("conn_"),
 		idgen.Prefixed(""),
 		idgen.Prefixed(""),
 		baseURL,
 		systemNow,
 	)
+}
+
+func buildLoggingFacade(database *upstreambun.DB) *logging.Facade {
+	repo := loggingbun.NewRepository(database)
+	return logging.NewFacade(repo, idgen.Prefixed("log_"), systemNow)
+}
+
+func buildExecutionFacade(
+	catalogFacade *catalog.Facade,
+	connectionsFacade *connections.Facade,
+	provider execution.ProviderClient,
+	recorder execution.Recorder,
+) *execution.Facade {
+	return execution.NewFacade(catalogFacade, connectionsFacade, provider, recorder, systemNow)
 }
