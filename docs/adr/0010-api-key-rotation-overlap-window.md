@@ -15,5 +15,5 @@ immediate and kills both secrets. Storage/verification follow ADR-0005 unchanged
 ## Consequences
 - Zero-downtime secret rolls for consumers; at most two secrets are live per key
   during the window.
-- The 24h default is a constant in Phase 2; making it caller-configurable is a small
-  later extension if deploy cadence demands it.
+- The overlap is settable per rotation call (`{overlapHours?}` per the Phase 2 spec's
+  API shape), with 24h as the default when omitted.
