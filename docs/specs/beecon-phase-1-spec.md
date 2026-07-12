@@ -162,16 +162,16 @@ exchange is written down — minus the secrets.
 
 The contract rolai will actually code against: constructor-injected, mockable, typed.
 
-- [ ] `new Beecon({ apiKey, baseUrl })` constructs a client; the client's surface is exported as an interface so consumers can inject a mock (vi.fn-style)
-- [ ] `beecon.users.create({ name, externalId? })` creates a user and returns its id
-- [ ] `beecon.integrations.list()` returns the integrations available to the organization
-- [ ] `beecon.connections.initiate({ userId, integrationId, redirectUri })` returns `{ id, status, redirectUrl }`
-- [ ] `beecon.connections.get(id)` returns status and provider account metadata — never tokens
-- [ ] `beecon.tools.execute(slug, { userId, connectionId, arguments })` returns a typed `{ successful, error, data }`
-- [ ] `beecon.logs.list(filters)` returns redacted log entries with cursor pagination
-- [ ] Platform HTTP errors surface as typed SDK errors carrying the API's error code and message
-- [ ] The SDK never writes the API key to logs, errors, or serialized output
-- [ ] A quickstart document walks the popup connect flow end-to-end: initiate on the server, open redirectUrl in a popup, receive the redirectUri round-trip, execute the first tool
+- [x] `new Beecon({ apiKey, baseUrl })` constructs a client; the client's surface is exported as an interface so consumers can inject a mock (vi.fn-style)
+- [x] `beecon.users.create({ name, externalId? })` creates a user and returns its id
+- [x] `beecon.integrations.list()` returns the integrations available to the organization
+- [x] `beecon.connections.initiate({ userId, integrationId, redirectUri })` returns `{ id, status, redirectUrl }`
+- [x] `beecon.connections.get(id)` returns status and provider account metadata — never tokens
+- [x] `beecon.tools.execute(slug, { userId, connectionId, arguments })` returns a typed `{ successful, error, data }`
+- [x] `beecon.logs.list(filters)` returns redacted log entries with cursor pagination
+- [x] Platform HTTP errors surface as typed SDK errors carrying the API's error code and message
+- [x] The SDK never writes the API key to logs, errors, or serialized output
+- [x] A quickstart document walks the popup connect flow end-to-end: initiate on the server, open redirectUrl in a popup, receive the redirectUri round-trip, execute the first tool
 
 ---
 
