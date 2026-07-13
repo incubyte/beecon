@@ -18,6 +18,7 @@ type logEntryDTO struct {
 	DurationMs   int64  `json:"durationMs"`
 	RequestBody  string `json:"requestBody"`
 	ResponseBody string `json:"responseBody"`
+	RateLimited  bool   `json:"rateLimited"`
 	CreatedAt    string `json:"createdAt"`
 }
 
@@ -40,6 +41,7 @@ func toLogEntryDTO(entry logging.EventLog) logEntryDTO {
 		DurationMs:   entry.DurationMs,
 		RequestBody:  entry.RequestBody,
 		ResponseBody: entry.ResponseBody,
+		RateLimited:  entry.RateLimited,
 		CreatedAt:    entry.CreatedAt.Format(rfc3339Millis),
 	}
 }

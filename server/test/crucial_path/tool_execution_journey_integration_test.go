@@ -52,6 +52,7 @@ type logEntryDTO struct {
 	DurationMs   int64  `json:"durationMs"`
 	RequestBody  string `json:"requestBody"`
 	ResponseBody string `json:"responseBody"`
+	RateLimited  bool   `json:"rateLimited"`
 	CreatedAt    string `json:"createdAt"`
 }
 

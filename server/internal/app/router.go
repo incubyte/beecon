@@ -27,8 +27,11 @@ func buildRouter(
 	connectionsHandler *connectionshttp.Handler,
 	connectWebHandler *connectweb.Handler,
 	executionHandler *executionhttp.Handler,
+	filesHandler *executionhttp.FilesHandler,
 	loggingHandler *logginghttp.Handler,
+	metricsHandler http.Handler,
 	verifyOrgKey authmw.Verify,
+	verifyUserToken authmw.VerifyUserToken,
 ) chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -43,10 +46,23 @@ func buildRouter(
 	r.Post("/connect/{token}/params", connectWebHandler.SubmitParams)
 	r.Get("/connect/oauth/callback", connectWebHandler.Callback)
 
+	// orgOrUser guards the browser-facing subset of the API (PD20): tools
+	// list, expected-params, initiate connection, list/get own connections,
+	// and reconnect own connection all accept either an org API key or a
+	// user-scoped browser token. Every other route below stays
+	// org-key/admin-only — including tool execution, file upload, user
+	// creation, and logs (Slice 5, AC9).
+	orgOrUser := authmw.OrgOrUser(verifyOrgKey, verifyUserToken)
+
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Logger)
 
 		r.Get("/health", healthHandler(database))
+
+		// /metrics is PD24's operability endpoint: a Prometheus text-format
+		// scrape target, admin-guarded (never an org API key) since it exposes
+		// cross-organization operational signals, not a tenant's own data.
+		r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Method(http.MethodGet, "/metrics", metricsHandler)
 
 		r.Route("/api/v1", func(r chi.Router) {
 			r.Route("/organizations", func(r chi.Router) {
@@ -57,12 +73,15 @@ func buildRouter(
 				r.Post("/{orgId}/api-keys", accessHandler.Issue)
 				r.Get("/{orgId}/api-keys", accessHandler.List)
 				r.Delete("/{orgId}/api-keys/{keyId}", accessHandler.Revoke)
+				r.Post("/{orgId}/api-keys/{keyId}/rotate", accessHandler.Rotate)
+				r.Post("/{orgId}/signing-secrets", accessHandler.IssueSigningSecret)
+				r.Get("/{orgId}/signing-secrets", accessHandler.ListSigningSecrets)
 			})
 
 			r.Route("/integrations", func(r chi.Router) {
 				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
-				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/", catalogHandler.List)
-				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/{intgId}/expected-params", catalogHandler.GetExpectedParams)
+				r.With(orgOrUser).Get("/", catalogHandler.List)
+				r.With(orgOrUser).Get("/{intgId}/expected-params", catalogHandler.GetExpectedParams)
 			})
 
 			r.Route("/users", func(r chi.Router) {
@@ -72,20 +91,27 @@ func buildRouter(
 			})
 
 			r.Route("/connections", func(r chi.Router) {
-				r.Use(authmw.OrgAuth(verifyOrgKey))
-				r.Post("/initiate", connectionsHandler.Initiate)
-				r.Get("/", connectionsHandler.List)
-				r.Get("/{connectionId}", connectionsHandler.Get)
-				r.Post("/{connectionId}/disable", connectionsHandler.Disable)
-				r.Delete("/{connectionId}", connectionsHandler.Delete)
-				r.Post("/{connectionId}/reconnect", connectionsHandler.Reconnect)
+				r.With(orgOrUser).Post("/initiate", connectionsHandler.Initiate)
+				r.With(orgOrUser).Get("/", connectionsHandler.List)
+				r.With(orgOrUser).Get("/{connectionId}", connectionsHandler.Get)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Post("/{connectionId}/disable", connectionsHandler.Disable)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Delete("/{connectionId}", connectionsHandler.Delete)
+				r.With(orgOrUser).Post("/{connectionId}/reconnect", connectionsHandler.Reconnect)
 			})
 
 			r.Route("/tools", func(r chi.Router) {
+				r.With(orgOrUser).Get("/", catalogHandler.ListTools)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/{slug}", catalogHandler.GetTool)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Post("/{slug}/execute", executionHandler.Execute)
+			})
+
+			// /files is org-key-only (PD22, Slice 7): never mounted under
+			// orgOrUser — a user token must be rejected (closes Slice 5's
+			// deferred AC9).
+			r.Route("/files", func(r chi.Router) {
 				r.Use(authmw.OrgAuth(verifyOrgKey))
-				r.Get("/", catalogHandler.ListTools)
-				r.Get("/{slug}", catalogHandler.GetTool)
-				r.Post("/{slug}/execute", executionHandler.Execute)
+				r.Post("/", filesHandler.Upload)
+				r.Get("/{fileId}/download", filesHandler.Download)
 			})
 
 			r.Route("/logs", func(r chi.Router) {

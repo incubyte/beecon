@@ -4,11 +4,13 @@
 // the package header). This file covers the Slice 2 AC "The full key secret
 // is not recoverable from the database (stored hashed; a database dump does
 // not contain it)" literally: it issues a key through the real API, then
-// dumps every column of every row of server_api_keys straight from the
-// booted database and asserts the secret's post-prefix remainder appears
-// nowhere. The 12-char lookup prefix is stored in plaintext by design (PD3),
-// so the assertion targets the remainder — the part an attacker with a DB
-// dump would need to authenticate.
+// dumps every column of every row of server_api_key_secrets — where a key's
+// secret material has lived since migration 0012 (Slice 8, PD23) split it
+// off server_api_keys — straight from the booted database and asserts the
+// secret's post-prefix remainder appears nowhere. The 12-char lookup prefix
+// is stored in plaintext by design (PD3), so the assertion targets the
+// remainder — the part an attacker with a DB dump would need to
+// authenticate.
 package crucial_path
 
 import (
@@ -50,22 +52,22 @@ func TestIssuedKeySecret_IsNotRecoverableFromADatabaseDump(t *testing.T) {
 	}
 
 	rows, err := wired.DB.QueryContext(context.Background(),
-		"SELECT id, org_id, lookup_prefix, secret_hash FROM server_api_keys")
+		"SELECT id, key_id, lookup_prefix, secret_hash FROM server_api_key_secrets")
 	if err != nil {
-		t.Fatalf("dump server_api_keys: %v", err)
+		t.Fatalf("dump server_api_key_secrets: %v", err)
 	}
 	defer rows.Close()
 
 	rowCount := 0
 	for rows.Next() {
 		rowCount++
-		var id, orgID, lookupPrefix, secretHash string
-		if err := rows.Scan(&id, &orgID, &lookupPrefix, &secretHash); err != nil {
+		var id, keyID, lookupPrefix, secretHash string
+		if err := rows.Scan(&id, &keyID, &lookupPrefix, &secretHash); err != nil {
 			t.Fatalf("scan dumped row: %v", err)
 		}
 		for column, value := range map[string]string{
 			"id":            id,
-			"org_id":        orgID,
+			"key_id":        keyID,
 			"lookup_prefix": lookupPrefix,
 			"secret_hash":   secretHash,
 		} {
@@ -87,6 +89,6 @@ func TestIssuedKeySecret_IsNotRecoverableFromADatabaseDump(t *testing.T) {
 		t.Fatalf("iterate dumped rows: %v", err)
 	}
 	if rowCount != 1 {
-		t.Fatalf("dumped %d server_api_keys rows, want exactly 1", rowCount)
+		t.Fatalf("dumped %d server_api_key_secrets rows, want exactly 1", rowCount)
 	}
 }

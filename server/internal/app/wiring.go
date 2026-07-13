@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +28,8 @@ import (
 	"beecon/internal/connectweb"
 	"beecon/internal/db"
 	"beecon/internal/execution"
+	executionbun "beecon/internal/execution/driven/bun"
+	"beecon/internal/execution/driven/filestore"
 	"beecon/internal/execution/driven/providerhttp"
 	executionhttp "beecon/internal/execution/driving/httpapi"
 	"beecon/internal/httpx"
@@ -33,6 +37,7 @@ import (
 	"beecon/internal/logging"
 	loggingbun "beecon/internal/logging/driven/bun"
 	logginghttp "beecon/internal/logging/driving/httpapi"
+	"beecon/internal/metrics"
 	"beecon/internal/organizations"
 	orgsbun "beecon/internal/organizations/driven/bun"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
@@ -46,12 +51,17 @@ import (
 // overrides every module's clock — nil in production (falls back to
 // systemNow); tests use it to travel time past a connect link's TTL, a
 // connection's token expiry, or an api-key rotation's overlap window without
-// a real sleep.
+// a real sleep. Sleep overrides the execution facade's retry-loop sleep
+// (PD21, Slice 6) — nil in production (execution.NewFacade already defaults
+// to a real timer); rate-limit journeys inject a recording no-op sleep so
+// callWithRetry's Retry-After/backoff waits run — and can be asserted on —
+// without a real delay.
 type Deps struct {
 	Config              *config.Config
 	Logger              *slog.Logger
 	ProviderDefinitions []catalog.ProviderDefinition
 	Now                 func() time.Time
+	Sleep               func(ctx context.Context, d time.Duration) error
 }
 
 // Wired is the fully assembled application: the router main.go serves, the
@@ -107,9 +117,10 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	}
 
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
+	metricsRegistry := metrics.New()
 	organizationsFacade := buildOrganizationsFacade(database, now)
 	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer)
-	accessFacade := buildAccessFacade(database, now)
+	accessFacade := buildAccessFacade(database, tokenVault, now)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
 	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now)
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
@@ -128,15 +139,25 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		oauthhttp.NewClient(nil),
 		connectionsLogRecorder{logs: loggingFacade},
 		now,
-	)
+	).WithMetrics(metricsRegistry)
 	connectionsHandler := connectionshttp.NewHandler(connectionsFacade, errorRenderer)
 	connectWebHandler, err := connectweb.NewHandler(connectionsFacade)
 	if err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("parse connect-page templates: %w", err)
 	}
-	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder{logs: loggingFacade}, now)
+	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder{logs: loggingFacade}, now).WithMetrics(metricsRegistry)
+	if deps.Sleep != nil {
+		executionFacade = executionFacade.WithSleep(deps.Sleep)
+	}
+	fileStore, err := buildFileStore(deps.Config.FilesDir)
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("file store: %w", err)
+	}
+	executionFacade = executionFacade.WithFiles(executionbun.NewFilesRepository(database), fileStore, fileMaxBytesOrDefault(deps.Config.FileMaxBytes), idgen.Prefixed("file_"))
 	executionHandler := executionhttp.NewHandler(executionFacade, errorRenderer)
+	filesHandler := executionhttp.NewFilesHandler(executionFacade, errorRenderer, deps.Config.BaseURL)
 
 	router := buildRouter(
 		deps.Config,
@@ -147,8 +168,11 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		connectionsHandler,
 		connectWebHandler,
 		executionHandler,
+		filesHandler,
 		loggingHandler,
+		metricsRegistry.Handler(),
 		accessFacade.Verify,
+		accessFacade.VerifyUserToken,
 	)
 
 	return &Wired{
@@ -163,9 +187,10 @@ func buildOrganizationsFacade(database *upstreambun.DB, now func() time.Time) *o
 	return organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), now)
 }
 
-func buildAccessFacade(database *upstreambun.DB, now func() time.Time) *access.Facade {
+func buildAccessFacade(database *upstreambun.DB, secretVault *vault.Vault, now func() time.Time) *access.Facade {
 	repo := accessbun.NewRepository(database)
-	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), now)
+	signingSecrets := accessbun.NewSigningSecretRepository(database)
+	return access.NewFacade(repo, repo, repo, signingSecrets, signingSecrets, secretVault, idgen.Prefixed("key_"), idgen.Prefixed("sks_"), idgen.Prefixed("usk_"), now)
 }
 
 func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault, now func() time.Time) *catalog.Facade {
@@ -215,4 +240,31 @@ func buildExecutionFacade(
 	now func() time.Time,
 ) *execution.Facade {
 	return execution.NewFacade(catalogFacade, connectionsFacade, provider, recorder, now)
+}
+
+// defaultFilesDir is where local files land when BEECON_FILES_DIR is unset —
+// a same-machine deployment (or a test) still boots without one; a
+// production installation that cares about files surviving past the host's
+// temp-cleanup policy sets BEECON_FILES_DIR explicitly (PD22).
+func defaultFilesDir() string {
+	return filepath.Join(os.TempDir(), "beecon-files")
+}
+
+// buildFileStore builds the execution module's local-disk FileStore (PD22),
+// falling back to defaultFilesDir when dir is unset.
+func buildFileStore(dir string) (*filestore.Local, error) {
+	if dir == "" {
+		dir = defaultFilesDir()
+	}
+	return filestore.NewLocal(dir)
+}
+
+// fileMaxBytesOrDefault falls back to config.DefaultFileMaxBytes when
+// configured is unset (zero) — config.Load already applies this default, but
+// Deps.Config may also be built directly (tests) without going through Load.
+func fileMaxBytesOrDefault(configured int64) int64 {
+	if configured <= 0 {
+		return config.DefaultFileMaxBytes
+	}
+	return configured
 }

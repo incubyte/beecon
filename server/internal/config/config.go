@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -16,6 +17,10 @@ import (
 // EncryptionKeyBytes is the decoded byte length BEECON_ENCRYPTION_KEY must
 // carry: an AES-256 key (PD12).
 const EncryptionKeyBytes = 32
+
+// DefaultFileMaxBytes is BEECON_FILE_MAX_BYTES's fallback when unset (PD22,
+// Slice 7, AC3): 20 MB.
+const DefaultFileMaxBytes int64 = 20 * 1024 * 1024
 
 // DatabaseDriver is the persistence backend Beecon boots against.
 type DatabaseDriver string
@@ -32,6 +37,8 @@ type Config struct {
 	AdminAPIKey    string
 	EncryptionKey  string
 	BaseURL        string
+	FilesDir       string
+	FileMaxBytes   int64
 }
 
 // Load reads .env.local (if present) then the process environment, and
@@ -64,13 +71,40 @@ func Load() (*Config, error) {
 	// raw value through.
 	encryptionKey := strings.TrimSpace(env("BEECON_ENCRYPTION_KEY"))
 
+	// BEECON_FILES_DIR (PD22, Slice 7) is carried through unvalidated here —
+	// the same pattern as BEECON_ENCRYPTION_KEY: filestore.NewLocal validates
+	// it at boot (wiring.go), where a missing value names the exact problem.
+	filesDir := strings.TrimSpace(env("BEECON_FILES_DIR"))
+
+	fileMaxBytes, err := parseFileMaxBytes(env("BEECON_FILE_MAX_BYTES"))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		DatabaseDriver: driver,
 		DatabaseURL:    databaseURL,
 		AdminAPIKey:    adminKey,
 		EncryptionKey:  encryptionKey,
 		BaseURL:        baseURL,
+		FilesDir:       filesDir,
+		FileMaxBytes:   fileMaxBytes,
 	}, nil
+}
+
+// parseFileMaxBytes reads BEECON_FILE_MAX_BYTES (PD22, AC3): unset falls
+// back to DefaultFileMaxBytes (20 MB); set, it must parse as a positive
+// integer.
+func parseFileMaxBytes(raw string) (int64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return DefaultFileMaxBytes, nil
+	}
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("BEECON_FILE_MAX_BYTES must be a positive integer, got %q", raw)
+	}
+	return parsed, nil
 }
 
 // loadEnv loads .env.local into the process environment (without overriding

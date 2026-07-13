@@ -187,6 +187,73 @@ func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooShort(t
 	}
 }
 
+// --- BEECON_FILE_MAX_BYTES (PD22, Slice 7, AC3): unset falls back to
+// DefaultFileMaxBytes (20 MB); a set value must parse as a positive
+// integer. ---
+
+func TestLoad_UnsetFileMaxBytesFallsBackToTheDefault20MB(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_FILE_MAX_BYTES", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FileMaxBytes != config.DefaultFileMaxBytes {
+		t.Errorf("FileMaxBytes = %d, want the default %d (20 MB)", cfg.FileMaxBytes, config.DefaultFileMaxBytes)
+	}
+	if config.DefaultFileMaxBytes != 20*1024*1024 {
+		t.Fatalf("DefaultFileMaxBytes = %d, want exactly 20 MB (20*1024*1024)", config.DefaultFileMaxBytes)
+	}
+}
+
+func TestLoad_ASetFileMaxBytesValueIsUsedVerbatim(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_FILE_MAX_BYTES", "5242880")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FileMaxBytes != 5242880 {
+		t.Errorf("FileMaxBytes = %d, want %d", cfg.FileMaxBytes, 5242880)
+	}
+}
+
+func TestLoad_NonIntegerFileMaxBytesFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_FILE_MAX_BYTES", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_FILE_MAX_BYTES, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_FILE_MAX_BYTES") {
+		t.Errorf("error = %q, want it to name BEECON_FILE_MAX_BYTES", err.Error())
+	}
+}
+
+func TestLoad_NonPositiveFileMaxBytesFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_FILE_MAX_BYTES", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_FILE_MAX_BYTES=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_FILE_MAX_BYTES") {
+				t.Errorf("error = %q, want it to name BEECON_FILE_MAX_BYTES", err.Error())
+			}
+		})
+	}
+}
+
 func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooLong(t *testing.T) {
 	// base64 of 48 bytes, not 32.
 	_, err := config.DecodeEncryptionKey("MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3")

@@ -22,6 +22,17 @@ type FakeGraphScript struct {
 	// Body is the raw response body FakeGraph returns; empty defaults to a
 	// minimal messages payload when StatusCode is 200 (or unset).
 	Body string
+
+	// RateLimitedAttempts is the number of leading calls to
+	// GET /v1.0/me/messages that respond as Graph's normalized rate limit
+	// (PD21, Slice 6) — an HTTP 429 carrying Graph's nested
+	// error.innerError.code throttle shape — before falling through to
+	// StatusCode/Body. 0 (default) never rate-limits.
+	RateLimitedAttempts int
+	// RateLimitRetryAfter is the Retry-After header value sent on each
+	// rate-limited attempt; empty sends no header at all, exercising
+	// retry.go's jittered-backoff fallback instead.
+	RateLimitRetryAfter string
 }
 
 // FakeGraph is a running fake Microsoft Graph server plus the request
@@ -43,6 +54,11 @@ type FakeGraph struct {
 	LastAuthorizationHeader string
 	LastQuery               map[string][]string
 	LastMessageIDPath       string
+
+	// MessagesCallCount counts every call to GET /v1.0/me/messages,
+	// including rate-limited ones, so a retry journey can assert exactly how
+	// many attempts the platform-side retry loop made.
+	MessagesCallCount int
 }
 
 // NewFakeGraph starts a FakeGraph server scripted per script, and registers
@@ -71,6 +87,11 @@ func NewFakeGraph(t *testing.T, script FakeGraphScript) *FakeGraph {
 	mux.HandleFunc("/v1.0/me/messages", func(w http.ResponseWriter, r *http.Request) {
 		fg.LastAuthorizationHeader = r.Header.Get("Authorization")
 		fg.LastQuery = r.URL.Query()
+		fg.MessagesCallCount++
+		if fg.MessagesCallCount <= script.RateLimitedAttempts {
+			respondGraphRateLimited(w, script.RateLimitRetryAfter)
+			return
+		}
 		respond(w, func() any {
 			return map[string]any{
 				"value": []map[string]string{
@@ -97,4 +118,16 @@ func NewFakeGraph(t *testing.T, script FakeGraphScript) *FakeGraph {
 	fg.BaseURL = server.URL + "/v1.0"
 	fg.MessagesURL = server.URL + "/v1.0/me/messages"
 	return fg
+}
+
+// respondGraphRateLimited writes Graph's normalized rate-limit shape (PD21):
+// an HTTP 429 carrying the nested error.innerError.code throttle code, with
+// Retry-After set when retryAfter is non-empty.
+func respondGraphRateLimited(w http.ResponseWriter, retryAfter string) {
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write([]byte(`{"error":{"code":"TooManyRequests","innerError":{"code":"activityLimitReached"}}}`))
 }

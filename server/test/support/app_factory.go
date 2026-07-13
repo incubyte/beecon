@@ -64,7 +64,7 @@ func BootAppAt(t *testing.T, dsn string) *app.Wired {
 	ctx := context.Background()
 
 	wired, err := app.Wire(ctx, app.Deps{
-		Config: testConfig(dsn),
+		Config: testConfig(t, dsn),
 		Logger: testLogger(),
 	})
 	if err != nil {
@@ -84,7 +84,7 @@ func BootAppWithProviderDefinitions(t *testing.T, definitions []catalog.Provider
 	ctx := context.Background()
 
 	wired, err := app.Wire(ctx, app.Deps{
-		Config:              testConfig(NewTestDSN(t)),
+		Config:              testConfig(t, NewTestDSN(t)),
 		Logger:              testLogger(),
 		ProviderDefinitions: definitions,
 	})
@@ -132,7 +132,7 @@ func BootAppWithProviderDefinitionsAndClock(t *testing.T, definitions []catalog.
 	ctx := context.Background()
 
 	wired, err := app.Wire(ctx, app.Deps{
-		Config:              testConfig(NewTestDSN(t)),
+		Config:              testConfig(t, NewTestDSN(t)),
 		Logger:              testLogger(),
 		ProviderDefinitions: definitions,
 		Now:                 now,
@@ -144,15 +144,91 @@ func BootAppWithProviderDefinitionsAndClock(t *testing.T, definitions []catalog.
 	return wired
 }
 
+// BootAppWithProviderDefinitionsAndSleep is BootAppWithProviderDefinitions
+// plus an injected retry-loop sleep override (PD21, Slice 6): rate-limit
+// journeys substitute a SleepSpy (sleep_spy.go) so callWithRetry's
+// Retry-After/jittered-backoff waits are captured and asserted on without a
+// real delay.
+func BootAppWithProviderDefinitionsAndSleep(t *testing.T, definitions []catalog.ProviderDefinition, sleep func(ctx context.Context, d time.Duration) error) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              testConfig(t, NewTestDSN(t)),
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+		Sleep:               sleep,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
+// BootAppWithProviderDefinitionsClockAndSleep combines
+// BootAppWithProviderDefinitionsAndClock and BootAppWithProviderDefinitionsAndSleep
+// — the metrics journey needs both a movable clock (to force a token
+// refresh) and a recording sleep (to keep a rate-limited retry fast and
+// deterministic) in the same boot.
+func BootAppWithProviderDefinitionsClockAndSleep(t *testing.T, definitions []catalog.ProviderDefinition, now func() time.Time, sleep func(ctx context.Context, d time.Duration) error) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              testConfig(t, NewTestDSN(t)),
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+		Now:                 now,
+		Sleep:               sleep,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
+// BootAppWithProviderDefinitionsAndFileLimits is BootAppWithProviderDefinitions
+// plus a configured files directory and max upload size (PD22, Slice 7): the
+// oversize-rejection journey injects a small fileMaxBytes so it never has to
+// allocate a real 20 MB payload just to exceed the limit.
+func BootAppWithProviderDefinitionsAndFileLimits(t *testing.T, definitions []catalog.ProviderDefinition, filesDir string, fileMaxBytes int64) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg := testConfig(t, NewTestDSN(t))
+	cfg.FilesDir = filesDir
+	cfg.FileMaxBytes = fileMaxBytes
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              cfg,
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
 // testConfig is the PD12 config a test-booted app runs with: SQLite, the
-// shared AdminAPIKey, and a placeholder public base URL.
-func testConfig(dsn string) *config.Config {
+// shared AdminAPIKey, a placeholder public base URL, and a files directory
+// scoped to the calling test's own t.TempDir() (PD22, Slice 7) — so journeys
+// that upload files clean up after themselves instead of accumulating in the
+// shared os.TempDir()/beecon-files fallback. Callers that need a specific
+// files directory/size limit (e.g. BootAppWithProviderDefinitionsAndFileLimits)
+// overwrite these fields afterward.
+func testConfig(t *testing.T, dsn string) *config.Config {
+	t.Helper()
 	return &config.Config{
 		DatabaseDriver: config.DriverSQLite,
 		DatabaseURL:    dsn,
 		AdminAPIKey:    AdminAPIKey,
 		BaseURL:        "http://localhost:8080",
 		EncryptionKey:  EncryptionKeyBase64,
+		FilesDir:       t.TempDir(),
 	}
 }
 

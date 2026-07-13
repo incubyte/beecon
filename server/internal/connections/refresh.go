@@ -68,7 +68,7 @@ func (f *Facade) refreshConnection(ctx context.Context, connection Connection) (
 
 	started := f.now()
 	result, refreshErr := f.oauthClient.RefreshGrant(ctx, request)
-	f.recordExchange(ctx, connection, started, refreshGrantRequestLogBody(request), result, refreshErr)
+	f.recordExchange(ctx, connection, started, refreshGrantRequestLogBody(request), result, refreshErr, true)
 
 	if refreshErr != nil {
 		return f.persistConnection(ctx, connection.MarkExpired())

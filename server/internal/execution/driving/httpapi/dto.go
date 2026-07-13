@@ -33,3 +33,23 @@ func toExecutionResultDTO(result execution.Result) executionResultDTO {
 	}
 	return dto
 }
+
+// uploadedFileDTO is the response to FilesHandler.Upload (PD22, AC1):
+// {id, name, mimeType, size, downloadUrl}.
+type uploadedFileDTO struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	MimeType    string `json:"mimeType"`
+	Size        int64  `json:"size"`
+	DownloadURL string `json:"downloadUrl"`
+}
+
+func toUploadedFileDTO(uploaded execution.UploadedFile, downloadURL string) uploadedFileDTO {
+	return uploadedFileDTO{
+		ID:          string(uploaded.ID),
+		Name:        uploaded.Name,
+		MimeType:    uploaded.MimeType,
+		Size:        uploaded.Size,
+		DownloadURL: downloadURL,
+	}
+}

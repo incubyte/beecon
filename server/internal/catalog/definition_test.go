@@ -7,6 +7,7 @@
 package catalog_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -347,6 +348,15 @@ func TestDefaultProviderDefinitions_LoadsTheEmbeddedHubspotDefinition(t *testing
 		if tool.Slug == "hubspot-create-contact" {
 			if tool.Mapping.Body["properties.email"] != "{input.email}" {
 				t.Errorf(`Mapping.Body["properties.email"] = %q, want %q`, tool.Mapping.Body["properties.email"], "{input.email}")
+			}
+		}
+		// hubspot-upload-file (Slice 7, PD22): pins the YAML parse actually
+		// carries its file-typed input through to Mapping.FileInputs — a
+		// parsing regression here would silently drop file support from the
+		// shipped definition without failing any other assertion.
+		if tool.Slug == "hubspot-upload-file" {
+			if !slices.Equal(tool.Mapping.FileInputs, []string{"file"}) {
+				t.Errorf("Mapping.FileInputs = %v, want %v", tool.Mapping.FileInputs, []string{"file"})
 			}
 		}
 	}

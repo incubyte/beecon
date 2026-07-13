@@ -95,8 +95,8 @@ func TestList_ReturnsIDPrefixAndCreatedAtForEveryKeyIssuedToTheOrg(t *testing.T)
 	if keys[0].ID != issued.ID {
 		t.Errorf("ID = %q, want %q", keys[0].ID, issued.ID)
 	}
-	if keys[0].LookupPrefix != issued.Prefix {
-		t.Errorf("LookupPrefix = %q, want %q", keys[0].LookupPrefix, issued.Prefix)
+	if keys[0].Prefix != issued.Prefix {
+		t.Errorf("Prefix = %q, want %q", keys[0].Prefix, issued.Prefix)
 	}
 	if !keys[0].CreatedAt.Equal(issued.CreatedAt) {
 		t.Errorf("CreatedAt = %v, want %v", keys[0].CreatedAt, issued.CreatedAt)

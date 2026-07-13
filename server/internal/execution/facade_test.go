@@ -8,7 +8,10 @@ package execution_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -532,8 +535,14 @@ func TestExecute_ASuccessfulExecutionWritesALogEntryWithOrgUserConnectionToolAnd
 	}
 }
 
+// TestExecute_AFailedUpstreamCallStillWritesALogEntryWithItsStatus uses a
+// non-retriable status (500), not 429: since Slice 6 (PD21) normalizes and
+// retries a 429 upstream response (see the "Slice 6" tests below), a bare 429
+// is no longer a one-shot upstream failure — this AC8 test only needs to
+// prove a failed-but-not-rate-limited call still writes exactly one log entry
+// carrying its status.
 func TestExecute_AFailedUpstreamCallStillWritesALogEntryWithItsStatus(t *testing.T) {
-	provider := &fakeProviderClient{response: execution.ToolCallResponse{StatusCode: 429, Body: "rate limited"}}
+	provider := &fakeProviderClient{response: execution.ToolCallResponse{StatusCode: 500, Body: "internal server error"}}
 	recorder := &fakeRecorder{}
 	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, recorder, fixedClock(time.Now()))
 
@@ -545,8 +554,8 @@ func TestExecute_AFailedUpstreamCallStillWritesALogEntryWithItsStatus(t *testing
 	if len(recorder.entries) != 1 {
 		t.Fatalf("recorded %d entries, want exactly 1", len(recorder.entries))
 	}
-	if recorder.entries[0].Status != 429 {
-		t.Errorf("Status = %d, want %d", recorder.entries[0].Status, 429)
+	if recorder.entries[0].Status != 500 {
+		t.Errorf("Status = %d, want %d", recorder.entries[0].Status, 500)
 	}
 }
 
@@ -773,5 +782,145 @@ func TestExecute_TheRawAccessTokenNeverAppearsInAFailureResultsErrorMessage(t *t
 	}
 	if result.Error != nil && strings.Contains(result.Error.Message, rawAccessToken) {
 		t.Fatalf("Error.Message contains the raw access token: %q", result.Error.Message)
+	}
+}
+
+// --- Slice 6 (PD21, ADR-0009): rate-limit normalization + platform retry ---
+
+// noOpSleep is the sleepFunc these tests drive the retry loop with: it never
+// actually waits, so a scripted rate-limit-then-retry never makes a test
+// slow or flaky on timing.
+func noOpSleep(_ context.Context, _ time.Duration) error { return nil }
+
+// rateLimitedResponse is a normalized-rate-limit ToolCallResponse (a bare
+// HTTP 429) carrying retryAfter verbatim as its Retry-After header value;
+// empty exercises retry.go's jittered-backoff fallback instead.
+func rateLimitedResponse(retryAfter string) execution.ToolCallResponse {
+	return execution.ToolCallResponse{StatusCode: http.StatusTooManyRequests, Body: "{}", RetryAfter: retryAfter}
+}
+
+// AC1/AC2: a rate-limited attempt that then succeeds surfaces as a normal
+// successful envelope, with no rate-limit detail (status code, "rate_limited")
+// leaked anywhere in it.
+func TestExecute_ARateLimitedAttemptThatThenSucceedsReturnsANormalSuccessfulEnvelopeWithNoLeakedDetail(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		rateLimitedResponse("1"),
+		messagesResponse(),
+	}}
+	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, nil, fixedClock(time.Now())).WithSleep(noOpSleep)
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true once the retried call succeeds; Error = %+v", result.Error)
+	}
+	if provider.callCount != 2 {
+		t.Errorf("provider was called %d times, want exactly 2 (one rate-limited attempt, one retried success)", provider.callCount)
+	}
+	raw, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		t.Fatalf("marshal result: %v", marshalErr)
+	}
+	if strings.Contains(string(raw), "rate_limited") || strings.Contains(string(raw), "429") {
+		t.Fatalf("successful envelope %s leaks rate-limit detail", raw)
+	}
+}
+
+// AC3: retries exhausted (every attempt stayed rate-limited) is reported as a
+// platform-level *httpx.DomainError — the carve-out the HTTP handler renders
+// as 429 with a Retry-After header — never as a tool-level Result.
+func TestExecute_RetriesExhaustedReturnsARateLimitedDomainErrorWithARetryAfterHeader(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		rateLimitedResponse("2"), rateLimitedResponse("2"), rateLimitedResponse("2"),
+	}}
+	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, nil, fixedClock(time.Now())).WithSleep(noOpSleep)
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	de := assertDomainError(t, err, execution.CodeRateLimited, http.StatusTooManyRequests)
+	if de.Headers["Retry-After"] != "2" {
+		t.Errorf(`Headers["Retry-After"] = %q, want %q`, de.Headers["Retry-After"], "2")
+	}
+	if provider.callCount != 3 {
+		t.Errorf("provider was called %d times, want exactly 3 (PD21's retry ceiling)", provider.callCount)
+	}
+}
+
+// AC4: a non-retriable upstream status (400, 404, ...) is never retried and
+// surfaces once as the usual tool-level failure.
+func TestExecute_NonRetriableUpstreamStatusesAreNotRetriedAndSurfaceOnce(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound} {
+		t.Run(fmt.Sprintf("status %d", status), func(t *testing.T) {
+			provider := &fakeProviderClient{response: execution.ToolCallResponse{StatusCode: status, Body: "not a rate limit"}}
+			f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, nil, fixedClock(time.Now())).WithSleep(noOpSleep)
+
+			result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+			if err != nil {
+				t.Fatalf("unexpected platform-level error: %v", err)
+			}
+			if result.Successful {
+				t.Fatal("Successful = true, want false for a non-retriable upstream error")
+			}
+			if result.Error == nil || result.Error.Code != execution.CodeProviderError {
+				t.Fatalf("Error = %+v, want code %q", result.Error, execution.CodeProviderError)
+			}
+			if provider.callCount != 1 {
+				t.Errorf("provider was called %d times, want exactly 1 — a non-retriable status must never be retried", provider.callCount)
+			}
+		})
+	}
+}
+
+// AC5: every upstream attempt — including rate-limited ones — writes its own
+// log entry, marked RateLimited where IsRateLimited normalized it as one.
+func TestExecute_EveryRateLimitedAttemptWritesItsOwnLogEntryMarkedRateLimited(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		rateLimitedResponse("1"),
+		messagesResponse(),
+	}}
+	recorder := &fakeRecorder{}
+	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, recorder, fixedClock(time.Now())).WithSleep(noOpSleep)
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(recorder.entries) != 2 {
+		t.Fatalf("recorded %d entries, want exactly 2 (one per attempt)", len(recorder.entries))
+	}
+	if !recorder.entries[0].RateLimited || recorder.entries[0].Status != http.StatusTooManyRequests {
+		t.Errorf("entries[0] = %+v, want RateLimited=true, Status=429", recorder.entries[0])
+	}
+	if recorder.entries[1].RateLimited || recorder.entries[1].Status != http.StatusOK {
+		t.Errorf("entries[1] = %+v, want RateLimited=false, Status=200", recorder.entries[1])
+	}
+}
+
+// TestExecute_ExhaustedRetriesLogsEveryAttemptAsRateLimited is AC5's
+// exhaustion half: even though the platform-level error carve-out means
+// Execute itself returns an error rather than a Result, every attempt the
+// retry loop made along the way still wrote its own marked log entry.
+func TestExecute_ExhaustedRetriesLogsEveryAttemptAsRateLimited(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		rateLimitedResponse("1"), rateLimitedResponse("1"), rateLimitedResponse("1"),
+	}}
+	recorder := &fakeRecorder{}
+	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, recorder, fixedClock(time.Now())).WithSleep(noOpSleep)
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	assertDomainError(t, err, execution.CodeRateLimited, http.StatusTooManyRequests)
+	if len(recorder.entries) != 3 {
+		t.Fatalf("recorded %d entries, want exactly 3 (one per exhausted attempt)", len(recorder.entries))
+	}
+	for i, entry := range recorder.entries {
+		if !entry.RateLimited {
+			t.Errorf("entries[%d].RateLimited = false, want true", i)
+		}
 	}
 }

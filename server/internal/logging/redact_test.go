@@ -24,7 +24,7 @@ func decodeJSONObject(t *testing.T, raw string) map[string]any {
 func TestRedact_RedactsAnAuthorizationHeaderValue(t *testing.T) {
 	body := `{"headers":{"Authorization":"Bearer raw-access-token-value"}}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	headers := got["headers"].(map[string]any)
 	if headers["Authorization"] != logging.RedactedPlaceholder {
@@ -37,7 +37,7 @@ func TestRedact_MatchesTheAuthorizationKeyCaseInsensitively(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			body := `{"` + key + `":"Bearer secret-value"}`
 
-			got := decodeJSONObject(t, logging.Redact(body))
+			got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 			if got[key] != logging.RedactedPlaceholder {
 				t.Errorf("%s = %v, want %q", key, got[key], logging.RedactedPlaceholder)
@@ -49,7 +49,7 @@ func TestRedact_MatchesTheAuthorizationKeyCaseInsensitively(t *testing.T) {
 func TestRedact_RedactsAccessAndRefreshTokenFields(t *testing.T) {
 	body := `{"access_token":"raw-access-token","refresh_token":"raw-refresh-token"}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	if got["access_token"] != logging.RedactedPlaceholder {
 		t.Errorf("access_token = %v, want %q", got["access_token"], logging.RedactedPlaceholder)
@@ -62,7 +62,7 @@ func TestRedact_RedactsAccessAndRefreshTokenFields(t *testing.T) {
 func TestRedact_RedactsClientSecretField(t *testing.T) {
 	body := `{"client_secret":"the-outlook-client-secret"}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	if got["client_secret"] != logging.RedactedPlaceholder {
 		t.Errorf("client_secret = %v, want %q", got["client_secret"], logging.RedactedPlaceholder)
@@ -72,7 +72,7 @@ func TestRedact_RedactsClientSecretField(t *testing.T) {
 func TestRedact_RedactsAnOAuthAuthorizationCodeInATokenExchangeRequestBody(t *testing.T) {
 	body := `{"grant_type":"authorization_code","code":"M.C123-secret-auth-code","redirect_uri":"https://consumer.example.com/callback"}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	if got["code"] != logging.RedactedPlaceholder {
 		t.Errorf("code = %v, want %q", got["code"], logging.RedactedPlaceholder)
@@ -90,7 +90,7 @@ func TestRedact_MatchesTheCodeKeyCaseInsensitively(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			body := `{"` + key + `":"M.C123-secret-auth-code"}`
 
-			got := decodeJSONObject(t, logging.Redact(body))
+			got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 			if got[key] != logging.RedactedPlaceholder {
 				t.Errorf("%s = %v, want %q", key, got[key], logging.RedactedPlaceholder)
@@ -102,7 +102,7 @@ func TestRedact_MatchesTheCodeKeyCaseInsensitively(t *testing.T) {
 func TestRedact_RedactsSensitiveFieldsNestedInsideAnObject(t *testing.T) {
 	body := `{"request":{"headers":{"Authorization":"Bearer nested-token"}}}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	request := got["request"].(map[string]any)
 	headers := request["headers"].(map[string]any)
@@ -114,7 +114,7 @@ func TestRedact_RedactsSensitiveFieldsNestedInsideAnObject(t *testing.T) {
 func TestRedact_RedactsSensitiveFieldsInsideAnArray(t *testing.T) {
 	body := `{"attempts":[{"access_token":"first-token"},{"access_token":"second-token"}]}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	attempts := got["attempts"].([]any)
 	for i, attempt := range attempts {
@@ -128,7 +128,7 @@ func TestRedact_RedactsSensitiveFieldsInsideAnArray(t *testing.T) {
 func TestRedact_LeavesNonSensitiveFieldsUntouched(t *testing.T) {
 	body := `{"method":"GET","url":"https://graph.microsoft.com/v1.0/me/messages","status":200}`
 
-	got := decodeJSONObject(t, logging.Redact(body))
+	got := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, body))
 
 	if got["method"] != "GET" {
 		t.Errorf("method = %v, want %q", got["method"], "GET")
@@ -145,7 +145,7 @@ func TestRedact_NeverLeavesTheRawSensitiveValueAnywhereInTheOutput(t *testing.T)
 	const rawSecret = "super-secret-raw-value-12345"
 	body := `{"headers":{"Authorization":"Bearer ` + rawSecret + `"},"access_token":"` + rawSecret + `"}`
 
-	got := logging.Redact(body)
+	got := logging.Redact(logging.KindOAuthTokenExchange, body)
 
 	if strings.Contains(got, rawSecret) {
 		t.Fatalf("Redact output %q still contains the raw secret %q", got, rawSecret)
@@ -155,7 +155,7 @@ func TestRedact_NeverLeavesTheRawSensitiveValueAnywhereInTheOutput(t *testing.T)
 func TestRedact_ReturnsANonJSONBodyUnchanged(t *testing.T) {
 	const plainMessage = "the provider could not be reached"
 
-	got := logging.Redact(plainMessage)
+	got := logging.Redact(logging.KindOAuthTokenExchange, plainMessage)
 
 	if got != plainMessage {
 		t.Errorf("Redact(%q) = %q, want it returned unchanged (nothing structured to redact)", plainMessage, got)
@@ -163,9 +163,69 @@ func TestRedact_ReturnsANonJSONBodyUnchanged(t *testing.T) {
 }
 
 func TestRedact_ReturnsAnEmptyStringUnchanged(t *testing.T) {
-	got := logging.Redact("")
+	got := logging.Redact(logging.KindOAuthTokenExchange, "")
 
 	if got != "" {
 		t.Errorf("Redact(\"\") = %q, want \"\"", got)
+	}
+}
+
+// --- PD25/AC7 (Slice 6): "code" redaction is scoped by Kind ---
+
+func TestRedact_LeavesATopLevelCodeFieldUntouchedInAToolExecutionEntry(t *testing.T) {
+	body := `{"code":"invalid_arguments","message":"top is not a number"}`
+
+	got := decodeJSONObject(t, logging.Redact(logging.KindToolExecution, body))
+
+	if got["code"] != "invalid_arguments" {
+		t.Errorf("code = %v, want %q left untouched for a tool-execution entry (PD25)", got["code"], "invalid_arguments")
+	}
+}
+
+func TestRedact_LeavesANestedCodeFieldUntouchedInAToolExecutionEntry(t *testing.T) {
+	body := `{"status":429,"body":{"error":{"code":"TooManyRequests"}}}`
+
+	got := decodeJSONObject(t, logging.Redact(logging.KindToolExecution, body))
+
+	nested := got["body"].(map[string]any)
+	errObj := nested["error"].(map[string]any)
+	if errObj["code"] != "TooManyRequests" {
+		t.Errorf("nested code = %v, want it left untouched for a tool-execution entry (PD25)", errObj["code"])
+	}
+}
+
+// TestRedact_StillRedactsCodeForAnOAuthTokenExchangeEntryAlongsideAToolExecutionEntry
+// proves the scoping is per-kind, not a global toggle: an oauth_token_exchange
+// entry's own "code" is still redacted regardless of a tool_execution entry's
+// own untouched "code" field.
+func TestRedact_StillRedactsCodeForAnOAuthTokenExchangeEntryAlongsideAToolExecutionEntry(t *testing.T) {
+	oauthBody := `{"grant_type":"authorization_code","code":"M.C123-secret-auth-code"}`
+	toolBody := `{"code":"provider_error"}`
+
+	gotOAuth := decodeJSONObject(t, logging.Redact(logging.KindOAuthTokenExchange, oauthBody))
+	gotTool := decodeJSONObject(t, logging.Redact(logging.KindToolExecution, toolBody))
+
+	if gotOAuth["code"] != logging.RedactedPlaceholder {
+		t.Errorf("oauth_token_exchange code = %v, want %q", gotOAuth["code"], logging.RedactedPlaceholder)
+	}
+	if gotTool["code"] != "provider_error" {
+		t.Errorf("tool_execution code = %v, want it left untouched", gotTool["code"])
+	}
+}
+
+// TestRedact_StillRedactsAuthorizationAndTokensForAToolExecutionEntry proves
+// only "code"'s scoping changed (PD25): the always-redacted set (AC9) still
+// applies to a tool-execution entry.
+func TestRedact_StillRedactsAuthorizationAndTokensForAToolExecutionEntry(t *testing.T) {
+	body := `{"headers":{"Authorization":"Bearer raw-access-token"},"code":"provider_error"}`
+
+	got := decodeJSONObject(t, logging.Redact(logging.KindToolExecution, body))
+
+	headers := got["headers"].(map[string]any)
+	if headers["Authorization"] != logging.RedactedPlaceholder {
+		t.Errorf("Authorization = %v, want %q even for a tool-execution entry", headers["Authorization"], logging.RedactedPlaceholder)
+	}
+	if got["code"] != "provider_error" {
+		t.Errorf("code = %v, want it left untouched for a tool-execution entry", got["code"])
 	}
 }

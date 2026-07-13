@@ -7,12 +7,16 @@ import "net/http"
 
 // DomainError is the error type facades return for expected failures; the
 // ErrorRenderer maps it to the PD5 envelope. Errors that are not
-// DomainErrors default to 500 internal_error.
+// DomainErrors default to 500 internal_error. Headers carries extra HTTP
+// response headers WriteDomainError must set before writing the status/body
+// — PD21's 429 carve-out (execution.ErrRateLimited's Retry-After) is its only
+// user today.
 type DomainError struct {
 	Status  int
 	Code    string
 	Message string
 	Details map[string]any
+	Headers map[string]string
 }
 
 // Error implements the error interface.
@@ -39,6 +43,17 @@ func (e *DomainError) WithDetails(d map[string]any) *DomainError {
 	}
 	clone := *e
 	clone.Details = d
+	return &clone
+}
+
+// WithHeader returns a copy of e that sets one extra HTTP response header
+// (e.g. PD21's Retry-After).
+func (e *DomainError) WithHeader(key, value string) *DomainError {
+	if e == nil {
+		return nil
+	}
+	clone := *e
+	clone.Headers = map[string]string{key: value}
 	return &clone
 }
 

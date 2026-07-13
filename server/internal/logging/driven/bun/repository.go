@@ -27,6 +27,7 @@ type EventLogRow struct {
 	DurationMs   int64     `bun:"duration_ms,notnull"`
 	RequestBody  string    `bun:"request_body,notnull"`
 	ResponseBody string    `bun:"response_body,notnull"`
+	RateLimited  bool      `bun:"rate_limited,notnull"`
 	CreatedAt    time.Time `bun:"created_at,notnull"`
 }
 
@@ -101,6 +102,7 @@ func rowFromEventLog(entry logging.EventLog) EventLogRow {
 		DurationMs:   entry.DurationMs,
 		RequestBody:  entry.RequestBody,
 		ResponseBody: entry.ResponseBody,
+		RateLimited:  entry.RateLimited,
 		CreatedAt:    entry.CreatedAt,
 	}
 }
@@ -117,6 +119,7 @@ func eventLogFromRow(row *EventLogRow) logging.EventLog {
 		DurationMs:   row.DurationMs,
 		RequestBody:  row.RequestBody,
 		ResponseBody: row.ResponseBody,
+		RateLimited:  row.RateLimited,
 		CreatedAt:    row.CreatedAt,
 	}
 }

@@ -130,8 +130,9 @@ tools:
     mapping:
       method: POST
       path: /files/v3/files
-      # file-typed input: the multipart upload/file-resolution wiring itself
-      # is a Slice 7 concern (FileUpload behind execution's storage port);
-      # this definition only needs to parse and validate today (Slice 2, PD22).
+      # file-typed input: resolved to a previously uploaded Beecon file_ id
+      # and streamed to Hubspot as multipart form data (Slice 7, PD22) —
+      # execution/facade.go resolves it org-scoped before this call is ever
+      # made.
       fileInputs:
         - file

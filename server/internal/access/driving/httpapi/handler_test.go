@@ -30,6 +30,7 @@ func newTestRouter() chi.Router {
 	r.Post("/{orgId}/api-keys", h.Issue)
 	r.Get("/{orgId}/api-keys", h.List)
 	r.Delete("/{orgId}/api-keys/{keyId}", h.Revoke)
+	r.Post("/{orgId}/api-keys/{keyId}/rotate", h.Rotate)
 	return r
 }
 

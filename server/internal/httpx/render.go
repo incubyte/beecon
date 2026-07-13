@@ -35,6 +35,9 @@ func WriteDomainError(w http.ResponseWriter, err *DomainError) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	for key, value := range err.Headers {
+		w.Header().Set(key, value)
+	}
 	w.WriteHeader(err.Status)
 	_ = json.NewEncoder(w).Encode(errorEnvelope{Error: errorBody{
 		Code:    err.Code,

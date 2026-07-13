@@ -52,5 +52,6 @@ func (a executionLogRecorder) Record(ctx context.Context, entry execution.LogEnt
 		DurationMs:   entry.DurationMs,
 		RequestBody:  entry.RequestBody,
 		ResponseBody: entry.ResponseBody,
+		RateLimited:  entry.RateLimited,
 	})
 }

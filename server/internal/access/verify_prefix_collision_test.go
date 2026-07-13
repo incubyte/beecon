@@ -7,10 +7,10 @@
 // isn't practical (astronomically unlikely), so this test builds the
 // fixture directly with the package's own lookupPrefix/hashSecretRemainder
 // helpers — the same ones Verify uses — rather than re-implementing the
-// hashing scheme. A local fake Repository/PrefixLookup is defined here
-// (rather than importing driven/memory) because driven/memory imports
-// access, and importing it from an in-package test file would be an import
-// cycle.
+// hashing scheme. A local fake Repository/PrefixLookup/ApiKeySecrets is
+// defined here (rather than importing driven/memory) because driven/memory
+// imports access, and importing it from an in-package test file would be an
+// import cycle.
 package access
 
 import (
@@ -24,10 +24,11 @@ import (
 )
 
 type collisionFixtureRepo struct {
-	keys []ServerApiKey
+	keys    []ServerApiKey
+	secrets []ApiKeySecret
 }
 
-func (r *collisionFixtureRepo) Save(_ context.Context, key ServerApiKey) error {
+func (r *collisionFixtureRepo) SaveKey(_ context.Context, key ServerApiKey) error {
 	r.keys = append(r.keys, key)
 	return nil
 }
@@ -44,23 +45,55 @@ func (r *collisionFixtureRepo) MarkRevoked(context.Context, organizations.OrgID,
 	return nil
 }
 
-func (r *collisionFixtureRepo) FindByPrefix(_ context.Context, prefix string) ([]ServerApiKey, error) {
-	matches := make([]ServerApiKey, 0)
-	for _, k := range r.keys {
-		if k.LookupPrefix == prefix {
-			matches = append(matches, k)
+func (r *collisionFixtureRepo) Save(_ context.Context, _ organizations.OrgID, secret ApiKeySecret) error {
+	r.secrets = append(r.secrets, secret)
+	return nil
+}
+
+func (r *collisionFixtureRepo) ListByKeyID(_ context.Context, _ organizations.OrgID, keyID KeyID) ([]ApiKeySecret, error) {
+	matches := make([]ApiKeySecret, 0)
+	for _, s := range r.secrets {
+		if s.KeyID == keyID {
+			matches = append(matches, s)
 		}
 	}
 	return matches, nil
 }
 
-func newKeyWithSecret(id KeyID, org organizations.OrgID, secret string) ServerApiKey {
-	return ServerApiKey{
-		ID:           id,
-		OrgID:        org,
+func (r *collisionFixtureRepo) MarkExpiring(context.Context, organizations.OrgID, ApiKeySecretID, time.Time) error {
+	return nil
+}
+
+func (r *collisionFixtureRepo) FindByPrefix(_ context.Context, prefix string) ([]ApiKeySecretCandidate, error) {
+	matches := make([]ApiKeySecretCandidate, 0)
+	for _, s := range r.secrets {
+		if s.LookupPrefix != prefix {
+			continue
+		}
+		for _, k := range r.keys {
+			if k.ID == s.KeyID {
+				matches = append(matches, ApiKeySecretCandidate{
+					KeyID:     k.ID,
+					OrgID:     k.OrgID,
+					RevokedAt: k.RevokedAt,
+					Secret:    s,
+				})
+				break
+			}
+		}
+	}
+	return matches, nil
+}
+
+func newKeyAndSecretWithSecret(id KeyID, org organizations.OrgID, secret string) (ServerApiKey, ApiKeySecret) {
+	key := ServerApiKey{ID: id, OrgID: org}
+	apiKeySecret := ApiKeySecret{
+		ID:           ApiKeySecretID(string(id) + "_secret"),
+		KeyID:        id,
 		LookupPrefix: lookupPrefix(secret),
 		SecretHash:   hashSecretRemainder(secret),
 	}
+	return key, apiKeySecret
 }
 
 func TestVerify_PicksTheCorrectOrgByHashWhenTwoKeysShareALookupPrefix(t *testing.T) {
@@ -68,15 +101,16 @@ func TestVerify_PicksTheCorrectOrgByHashWhenTwoKeysShareALookupPrefix(t *testing
 	secretA := sharedPrefix + "-secret-belonging-to-org-a"
 	secretB := sharedPrefix + "-secret-belonging-to-org-b"
 
-	repo := &collisionFixtureRepo{}
-	repo.keys = []ServerApiKey{
-		newKeyWithSecret("key_a", "org_a", secretA),
-		newKeyWithSecret("key_b", "org_b", secretB),
+	keyA, secretRowA := newKeyAndSecretWithSecret("key_a", "org_a", secretA)
+	keyB, secretRowB := newKeyAndSecretWithSecret("key_b", "org_b", secretB)
+	repo := &collisionFixtureRepo{
+		keys:    []ServerApiKey{keyA, keyB},
+		secrets: []ApiKeySecret{secretRowA, secretRowB},
 	}
-	if repo.keys[0].LookupPrefix != repo.keys[1].LookupPrefix {
-		t.Fatalf("test fixture bug: keys do not actually share a lookup prefix (%q vs %q)", repo.keys[0].LookupPrefix, repo.keys[1].LookupPrefix)
+	if repo.secrets[0].LookupPrefix != repo.secrets[1].LookupPrefix {
+		t.Fatalf("test fixture bug: secrets do not actually share a lookup prefix (%q vs %q)", repo.secrets[0].LookupPrefix, repo.secrets[1].LookupPrefix)
 	}
-	facade := NewFacade(repo, repo, func() string { return "unused" }, func() time.Time { return time.Time{} })
+	facade := NewFacade(repo, repo, repo, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
 
 	gotOrgForA, err := facade.Verify(context.Background(), secretA)
 	if err != nil {
@@ -101,12 +135,13 @@ func TestVerify_RejectsAThirdSecretSharingTheLookupPrefixOfTwoOtherKeys(t *testi
 	secretB := sharedPrefix + "-secret-belonging-to-org-b"
 	secretC := sharedPrefix + "-secret-never-issued-to-anyone"
 
-	repo := &collisionFixtureRepo{}
-	repo.keys = []ServerApiKey{
-		newKeyWithSecret("key_a", "org_a", secretA),
-		newKeyWithSecret("key_b", "org_b", secretB),
+	keyA, secretRowA := newKeyAndSecretWithSecret("key_a", "org_a", secretA)
+	keyB, secretRowB := newKeyAndSecretWithSecret("key_b", "org_b", secretB)
+	repo := &collisionFixtureRepo{
+		keys:    []ServerApiKey{keyA, keyB},
+		secrets: []ApiKeySecret{secretRowA, secretRowB},
 	}
-	facade := NewFacade(repo, repo, func() string { return "unused" }, func() time.Time { return time.Time{} })
+	facade := NewFacade(repo, repo, repo, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
 
 	_, err := facade.Verify(context.Background(), secretC)
 

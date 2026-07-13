@@ -111,6 +111,43 @@ func TestRecord_PersistsAnOAuthTokenExchangeEntryWithNoToolSlug(t *testing.T) {
 	}
 }
 
+// TestRecord_PersistsTheRateLimitedFlagOntoTheStoredEntry is Slice 6's (PD21)
+// half of AC8/AC5: RecordInput.RateLimited must actually reach the stored
+// EventLog, not just exist as an unused field — proven from both sides (a
+// rate-limited attempt persists true, a normal one persists false).
+func TestRecord_PersistsTheRateLimitedFlagOntoTheStoredEntry(t *testing.T) {
+	f := newFacade()
+	mustRecord(t, f, recordInput(testOrg, func(in *logging.RecordInput) {
+		in.Status = 429
+		in.RateLimited = true
+	}))
+	mustRecord(t, f, recordInput(testOrg, func(in *logging.RecordInput) {
+		in.Status = 200
+		in.RateLimited = false
+	}))
+
+	result, err := f.Query(context.Background(), testOrg, logging.QueryParams{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(result.Entries))
+	}
+	for _, entry := range result.Entries {
+		switch entry.Status {
+		case 429:
+			if !entry.RateLimited {
+				t.Errorf("entry %+v has RateLimited = false, want true for a rate-limited attempt", entry)
+			}
+		case 200:
+			if entry.RateLimited {
+				t.Errorf("entry %+v has RateLimited = true, want false for a normal attempt", entry)
+			}
+		}
+	}
+}
+
 // --- AC9: redaction happens before persistence ---
 
 func TestRecord_RedactsTheRequestAndResponseBodiesBeforePersistence(t *testing.T) {

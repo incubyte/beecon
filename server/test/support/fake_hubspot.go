@@ -15,6 +15,7 @@ package support
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,6 +55,17 @@ type FakeHubspotScript struct {
 	// creation — proves upstream errors surface as tool-level failures.
 	CreateStatus int
 	CreateBody   string
+
+	// RateLimitedAttempts is the number of leading calls to
+	// /crm/v3/objects/contacts (list or create) that respond as Hubspot's
+	// normalized rate limit (PD21, Slice 6) — an HTTP 429 carrying Hubspot's
+	// RATE_LIMITS error category — before falling through to the script's
+	// normal list/create behavior. 0 (default) never rate-limits.
+	RateLimitedAttempts int
+	// RateLimitRetryAfter is the Retry-After header value sent on each
+	// rate-limited attempt; empty sends no header at all, exercising
+	// retry.go's jittered-backoff fallback instead.
+	RateLimitRetryAfter string
 }
 
 // FakeHubspot is a running fake Hubspot server plus the request details it
@@ -75,6 +87,32 @@ type FakeHubspot struct {
 	LastTokenForm         url.Values
 	LastContactsQuery     url.Values
 	LastCreateContactBody map[string]any
+
+	// ContactsCallCount counts every call to /crm/v3/objects/contacts
+	// (list or create), including rate-limited ones, so a retry journey can
+	// assert exactly how many attempts the platform-side retry loop made.
+	ContactsCallCount int
+
+	// LastFileUpload is the most recent multipart file part FakeHubspot's
+	// /files/v3/files endpoint received (PD22, Slice 7, AC4) — the field
+	// name, filename, content type, and the raw bytes, so a test can assert
+	// Beecon actually streamed the stored file's own bytes/filename/mime
+	// rather than something synthesized.
+	LastFileUpload *FakeHubspotUpload
+	// FilesCallCount counts every call to /files/v3/files, so a test can
+	// assert the fake provider was never called at all (AC5: an unknown or
+	// cross-organization file_ id must short-circuit before any provider
+	// call).
+	FilesCallCount int
+}
+
+// FakeHubspotUpload is one multipart file part FakeHubspot's /files/v3/files
+// endpoint accepted (PD22, Slice 7).
+type FakeHubspotUpload struct {
+	FieldName string
+	FileName  string
+	MimeType  string
+	Content   []byte
 }
 
 // NewFakeHubspot starts a FakeHubspot server scripted per script, and
@@ -87,6 +125,7 @@ func NewFakeHubspot(t *testing.T, script FakeHubspotScript) *FakeHubspot {
 	mux.HandleFunc("/oauth/v1/token", fh.tokenHandler(script))
 	mux.HandleFunc("/oauth/v1/access-tokens/", fh.userInfoHandler(script))
 	mux.HandleFunc("/crm/v3/objects/contacts", fh.contactsHandler(script))
+	mux.HandleFunc("/files/v3/files", fh.filesHandler(script))
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -132,6 +171,11 @@ func (fh *FakeHubspot) userInfoHandler(script FakeHubspotScript) http.HandlerFun
 
 func (fh *FakeHubspot) contactsHandler(script FakeHubspotScript) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		fh.ContactsCallCount++
+		if fh.ContactsCallCount <= script.RateLimitedAttempts {
+			respondHubspotRateLimited(w, script.RateLimitRetryAfter)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			fh.LastContactsQuery = r.URL.Query()
@@ -142,6 +186,18 @@ func (fh *FakeHubspot) contactsHandler(script FakeHubspotScript) http.HandlerFun
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	}
+}
+
+// respondHubspotRateLimited writes Hubspot's normalized rate-limit shape
+// (PD21): an HTTP 429 carrying the RATE_LIMITS error category, with
+// Retry-After set when retryAfter is non-empty.
+func respondHubspotRateLimited(w http.ResponseWriter, retryAfter string) {
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write([]byte(`{"category":"RATE_LIMITS","message":"You have reached your secondly limit."}`))
 }
 
 func (fh *FakeHubspot) handleCreateContact(w http.ResponseWriter, r *http.Request, script FakeHubspotScript) {
@@ -198,6 +254,54 @@ func respondPagedContacts(w http.ResponseWriter, contacts []FakeHubspotContact, 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// filesHandler serves /files/v3/files (PD22, Slice 7, AC4): accepts one
+// multipart file part and echoes back Hubspot's own file-record shape
+// ({id, name, url}) so hubspot-upload-file's execution can prove it returns
+// the provider's record, not Beecon's own file metadata.
+func (fh *FakeHubspot) filesHandler(_ FakeHubspotScript) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fh.FilesCallCount++
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		reader, err := r.MultipartReader()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			if part.FileName() == "" {
+				_ = part.Close()
+				continue
+			}
+			content, _ := io.ReadAll(part)
+			fh.LastFileUpload = &FakeHubspotUpload{
+				FieldName: part.FormName(),
+				FileName:  part.FileName(),
+				MimeType:  part.Header.Get("Content-Type"),
+				Content:   content,
+			}
+			_ = part.Close()
+		}
+		if fh.LastFileUpload == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":   "hubspot-file-1",
+			"name": fh.LastFileUpload.FileName,
+			"url":  "https://api.hubapi.com/filemanager/api/v3/files/hubspot-file-1/signed-url-redirect",
+		})
+	}
 }
 
 func parseIntDefault(raw string, fallback int) int {

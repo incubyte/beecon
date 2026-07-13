@@ -27,7 +27,9 @@ const (
 // (not organizations.UserID / connections.ConnectionID) — logging does not
 // depend on the connections module (BOUNDARIES), and carrying the raw id
 // value is all a log entry ever needs. ToolSlug is empty for an OAuth
-// token-exchange entry ("tool slug (where applicable)", AC8).
+// token-exchange entry ("tool slug (where applicable)", AC8). RateLimited
+// marks a tool-execution attempt IsRateLimited normalized as a rate limit
+// (PD21, Slice 6) — always false for an OAuth token-exchange entry.
 type EventLog struct {
 	ID           LogID
 	OrgID        organizations.OrgID
@@ -39,6 +41,7 @@ type EventLog struct {
 	DurationMs   int64
 	RequestBody  string
 	ResponseBody string
+	RateLimited  bool
 	CreatedAt    time.Time
 }
 
@@ -57,12 +60,13 @@ type RecordInput struct {
 	DurationMs   int64
 	RequestBody  string
 	ResponseBody string
+	RateLimited  bool
 }
 
 // newEventLog builds the EventLog Record persists: id and CreatedAt come
 // from the facade's injected minter/clock, and RequestBody/ResponseBody are
 // redacted here — the single place every entry passes through before
-// Save (AC9).
+// Save (AC9) — scoped by in.Kind (PD25).
 func newEventLog(id LogID, in RecordInput, now time.Time) EventLog {
 	return EventLog{
 		ID:           id,
@@ -73,8 +77,9 @@ func newEventLog(id LogID, in RecordInput, now time.Time) EventLog {
 		Kind:         in.Kind,
 		Status:       in.Status,
 		DurationMs:   in.DurationMs,
-		RequestBody:  Redact(in.RequestBody),
-		ResponseBody: Redact(in.ResponseBody),
+		RequestBody:  Redact(in.Kind, in.RequestBody),
+		ResponseBody: Redact(in.Kind, in.ResponseBody),
+		RateLimited:  in.RateLimited,
 		CreatedAt:    now,
 	}
 }

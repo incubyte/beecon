@@ -310,7 +310,7 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 
 	started := f.now()
 	tokens, account, exchangeErr := f.exchangeTokensAndFetchAccount(ctx, request, definition)
-	f.recordExchange(ctx, connection, started, tokenExchangeRequestLogBody(request), tokens, exchangeErr)
+	f.recordExchange(ctx, connection, started, tokenExchangeRequestLogBody(request), tokens, exchangeErr, false)
 	if exchangeErr != nil {
 		return Connection{}, ErrTokenExchangeFailed()
 	}
@@ -355,10 +355,14 @@ func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request Toke
 // — the authorization_code exchange (oauth.go) or a refresh_token grant
 // (refresh.go, PD18) — under the same Recorder port (AC8; Slice 4's refresh
 // reuses it as an oauth_token_exchange entry too, so the same code/token
-// redaction applies). A nil recorder (no logging module wired) is a silent
-// no-op; a recorder error never fails the operation itself — logging is
-// observability, not a precondition of the primary operation.
-func (f *Facade) recordExchange(ctx context.Context, connection Connection, started time.Time, requestBody string, tokens TokenExchangeResult, exchangeErr error) {
+// redaction applies), and records the matching PD24 metric (Slice 6):
+// isRefresh routes to the token-refresh counter instead of the OAuth
+// handshake counter, even though both share one Recorder kind. A nil
+// recorder (no logging module wired) is a silent no-op; a recorder error
+// never fails the operation itself — logging is observability, not a
+// precondition of the primary operation.
+func (f *Facade) recordExchange(ctx context.Context, connection Connection, started time.Time, requestBody string, tokens TokenExchangeResult, exchangeErr error, isRefresh bool) {
+	f.recordExchangeMetric(connection.ProviderSlug, isRefresh, exchangeErr == nil)
 	if f.recorder == nil {
 		return
 	}
@@ -377,6 +381,19 @@ func (f *Facade) recordExchange(ctx context.Context, connection Connection, star
 		RequestBody:  requestBody,
 		ResponseBody: responseBody,
 	})
+}
+
+// recordExchangeMetric records PD24's OAuth handshake/token-refresh outcome
+// counters (Slice 6).
+func (f *Facade) recordExchangeMetric(providerSlug string, isRefresh, success bool) {
+	if f.metrics == nil {
+		return
+	}
+	if isRefresh {
+		f.metrics.RecordTokenRefresh(providerSlug, success)
+		return
+	}
+	f.metrics.RecordOAuthHandshake(providerSlug, success)
 }
 
 // tokenExchangeRequestLogBody and tokenExchangeResponseLogBody build a JSON

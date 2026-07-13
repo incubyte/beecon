@@ -15,6 +15,7 @@ import (
 	"beecon/internal/access"
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
+	"beecon/internal/execution"
 	"beecon/internal/logging"
 	"beecon/internal/organizations"
 )
@@ -104,6 +105,38 @@ func TestAccessRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestAccessSigningSecretsRepository_EveryMethodIsOrgScoped: Slice 5 (PD20) —
+// a SigningSecret belongs to exactly one organization, so every
+// persistence-port operation on it must be scoped by that organization's id.
+// Save takes the whole SigningSecret (which itself carries OrgID);
+// ListByOrg takes organizations.OrgID directly.
+func TestAccessSigningSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*access.SigningSecrets)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("access.SigningSecrets has org-scope violations: %v", got)
+	}
+}
+
+// TestAccessApiKeySecretsRepository_EveryMethodIsOrgScoped: Slice 8 (PD23) —
+// an ApiKeySecret belongs to exactly one ServerApiKey, which itself belongs
+// to exactly one organization, so every persistence-port operation on it
+// must still be scoped by that organization's id (the same rule
+// access.Repository itself is held to). Every ApiKeySecrets method takes
+// organizations.OrgID directly as its second parameter — Save's own entity
+// argument (ApiKeySecret) carries no OrgID field of its own (a secret is
+// identified by the key it belongs to, not an organization directly), which
+// is exactly why the port shape takes OrgID as an explicit parameter instead
+// of relying on isOrgScopedParam's "struct carrying its own OrgID field"
+// path.
+func TestAccessApiKeySecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*access.ApiKeySecrets)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("access.ApiKeySecrets has org-scope violations: %v", got)
+	}
+}
+
 func TestOrganizationsUserRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	got := orgScopeViolations(reflect.TypeOf((*organizations.UserRepository)(nil)).Elem())
 
@@ -138,25 +171,51 @@ func TestLoggingRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestExecutionFilesRepository_EveryMethodIsOrgScoped: Slice 7 (PD22,
+// ADR-0011) — an uploaded file belongs to exactly one organization, and
+// AC2/AC5 require that a file_ id can never be resolved (for download or as
+// a file-typed tool argument) across organizations. Save takes the whole
+// FileMetadata (which itself carries OrgID); FindByID takes
+// organizations.OrgID directly.
+func TestExecutionFilesRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*execution.Files)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("execution.Files has org-scope violations: %v", got)
+	}
+}
+
 // TestInstallationLevelPortsAreExplicitlyWhitelisted documents (and pins,
 // via NumMethod, so a rename/removal is noticed) the ports deliberately
 // exempted from org-scoping: access.PrefixLookup authenticates a secret
 // before any organization is known — the lookup prefix is how a caller's
-// organization is discovered in the first place; organizations.Repository
-// operates on Organization itself, which IS the isolation unit with no wider
-// scope to filter by; catalog.Repository is installation-level by design
-// (PD7: an Integration is visible to every organization in the
-// installation) — there is no organization id to filter by; and
-// connections.OAuthRepository is deliberately pre-auth (Slice 4): the
-// connect page and OAuth callback authenticate a connection attempt through
-// its single-use connect token or CSRF state, arriving in the end user's
-// browser before any organization API key is ever presented.
+// organization is discovered in the first place; access.SigningSecretLookup
+// is the same shape for user tokens (Slice 5, PD20) — VerifyUserToken
+// discovers a JWT's signing secret (and so its organization) by the token's
+// "kid" header before any organization is known, pre-auth exactly like
+// PrefixLookup; organizations.Repository operates on Organization itself,
+// which IS the isolation unit with no wider scope to filter by;
+// catalog.Repository is installation-level by design (PD7: an Integration is
+// visible to every organization in the installation) — there is no
+// organization id to filter by; connections.OAuthRepository is deliberately
+// pre-auth (Slice 4): the connect page and OAuth callback authenticate a
+// connection attempt through its single-use connect token or CSRF state,
+// arriving in the end user's browser before any organization API key is
+// ever presented; and execution.FileStore (Slice 7, PD22) is deliberately
+// key-addressed byte storage, not org-scoped queryable state — it only ever
+// takes an opaque storageKey minted internally as a FileID, and every caller
+// reaches it strictly after execution.Files' own org-scoped FindByID has
+// already confirmed the file belongs to the caller's organization (AC2,
+// AC5), the same "authorize before the pre-auth lookup" spirit as
+// PrefixLookup/SigningSecretLookup above.
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
+		reflect.TypeOf((*access.SigningSecretLookup)(nil)).Elem(),
 		reflect.TypeOf((*organizations.Repository)(nil)).Elem(),
 		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
 		reflect.TypeOf((*connections.OAuthRepository)(nil)).Elem(),
+		reflect.TypeOf((*execution.FileStore)(nil)).Elem(),
 	}
 	for _, ifaceType := range whitelisted {
 		if ifaceType.NumMethod() == 0 {

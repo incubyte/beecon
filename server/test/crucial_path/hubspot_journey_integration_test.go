@@ -118,6 +118,27 @@ func hubspotDefinitionAgainst(fh *support.FakeHubspot) []catalog.ProviderDefinit
 						},
 					},
 				},
+				{
+					// hubspot-upload-file (Slice 7, PD22, AC4): the file input
+					// resolves org-scoped to previously uploaded bytes and streams
+					// to fh as multipart form data.
+					Slug:        "hubspot-upload-file",
+					Name:        "Upload file",
+					Description: "Upload a file to Hubspot's file manager.",
+					Method:      "POST",
+					Path:        "/files/v3/files",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"file": map[string]any{"type": "string"},
+						},
+						"required": []any{"file"},
+					},
+					OutputSchema: map[string]any{"type": "object"},
+					Mapping: catalog.Mapping{
+						FileInputs: []string{"file"},
+					},
+				},
 			},
 		},
 	}

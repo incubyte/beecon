@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"io"
 
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
@@ -36,7 +37,10 @@ type ConnectionReader interface {
 // header mapping (PD13) — additional headers beyond the standard bearer
 // Authorization/Accept every call already sends. Body is the tool's declared
 // JSON body mapping (PD13, Hubspot's create-contact), already rendered and
-// encoded; empty for a tool with no body mapping (e.g. every GET tool).
+// encoded; empty for a tool with no body mapping (e.g. every GET tool). Files
+// carries the tool's resolved file-typed inputs (PD22, Slice 7): a Call with
+// a non-empty Files sends a multipart request instead of a JSON body — empty
+// for every tool whose mapping declares no file-typed inputs.
 type ToolCallRequest struct {
 	Method      string
 	URL         string
@@ -44,14 +48,57 @@ type ToolCallRequest struct {
 	Query       map[string]string
 	Headers     map[string]string
 	Body        string
+	Files       []ToolCallFile
+}
+
+// ToolCallFile is one file-typed tool argument resolved to its stored bytes
+// (PD22, Slice 7, AC4): FieldName is the tool input name the definition
+// declared as file-typed (catalog.Mapping.FileInputs) and becomes the
+// multipart form field's name. FileID and Size are carried alongside Content
+// only so a log entry can record them without ever touching the bytes
+// themselves (AC6). Content is read once already, in memory: files are
+// capped at the facade's configured maximum size (AC3), and a
+// ToolCallRequest is replayed verbatim across PD21's retry attempts, so a
+// one-shot stream would send an empty body on any retry past the first.
+type ToolCallFile struct {
+	FieldName string
+	FileID    string
+	FileName  string
+	MimeType  string
+	Size      int64
+	Content   []byte
+}
+
+// Files is the execution module's driven persistence port for uploaded file
+// metadata (PD22, Slice 7): org-scoped the same way every other domain
+// repository is, so FindByID enforces cross-organization not-found (AC2,
+// AC5) without the facade having to check OrgID itself.
+type Files interface {
+	Save(ctx context.Context, file FileMetadata) error
+	FindByID(ctx context.Context, org organizations.OrgID, id FileID) (*FileMetadata, error)
+}
+
+// FileStore is the execution module's driven byte-storage port (PD22): the
+// Phase 2 adapter is local disk (driven/filestore/local.go); a real
+// deployment moving off a single disk swaps in an S3/Azure-blob adapter
+// behind this same port, unchanged (evolution trigger, no code built for it
+// yet). StorageKey is FileMetadata's opaque handle — callers never construct
+// one themselves.
+type FileStore interface {
+	Save(ctx context.Context, storageKey string, content io.Reader) error
+	Open(ctx context.Context, storageKey string) (io.ReadCloser, error)
+	Delete(ctx context.Context, storageKey string) error
 }
 
 // ToolCallResponse is a provider's raw HTTP response to a tool call — the
 // status code and body, before Execute turns a non-2xx status into a
-// tool-level failure (AC7).
+// tool-level failure (AC7). RetryAfter carries the response's own
+// Retry-After header verbatim (PD21) — empty when the provider sent none, in
+// which case retry.go falls back to a jittered backoff.
 type ToolCallResponse struct {
 	StatusCode int
 	Body       string
+	RetryAfter string
 }
 
 // ProviderClient is a narrow driven port for calling a provider's tool
@@ -64,7 +111,10 @@ type ProviderClient interface {
 }
 
 // LogEntry is what Execute hands to a Recorder after completing (or failing)
-// one tool call (AC8).
+// one tool call (AC8). RateLimited marks an attempt that IsRateLimited
+// normalized as a rate limit (PD21, Slice 6) — every attempt writes its own
+// entry, retried or not, so a rate-limited attempt that later succeeds still
+// has its own marked entry alongside the successful one.
 type LogEntry struct {
 	OrgID        organizations.OrgID
 	UserID       organizations.UserID
@@ -74,6 +124,7 @@ type LogEntry struct {
 	DurationMs   int64
 	RequestBody  string
 	ResponseBody string
+	RateLimited  bool
 }
 
 // Recorder is a narrow, consumer-defined port for writing a tool-execution

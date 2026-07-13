@@ -58,3 +58,48 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// Rotate handles POST /api/v1/organizations/{orgId}/api-keys/{keyId}/rotate
+// (Slice 8, PD23): the new secret is returned exactly once, and the old
+// secret keeps authenticating until the response's overlapExpiresAt.
+func (h *Handler) Rotate(w http.ResponseWriter, r *http.Request) {
+	org := organizations.OrgID(chi.URLParam(r, "orgId"))
+	keyID := access.KeyID(chi.URLParam(r, "keyId"))
+	var body rotateRequestDTO
+	if err := httpx.DecodeJSON(r, &body); err != nil {
+		h.errors.WriteError(w, r, access.ErrValidation("overlapHours", "request body must be valid JSON"))
+		return
+	}
+	rotated, err := h.facade.Rotate(r.Context(), org, keyID, body.OverlapHours)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, toRotatedKeyDTO(rotated))
+}
+
+// IssueSigningSecret handles POST
+// /api/v1/organizations/{orgId}/signing-secrets (PD20): the full secret is
+// returned exactly once, at creation.
+func (h *Handler) IssueSigningSecret(w http.ResponseWriter, r *http.Request) {
+	org := organizations.OrgID(chi.URLParam(r, "orgId"))
+	issued, err := h.facade.IssueSigningSecret(r.Context(), org)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, toIssuedSigningSecretDTO(issued))
+}
+
+// ListSigningSecrets handles GET
+// /api/v1/organizations/{orgId}/signing-secrets (PD20): id, display prefix,
+// and created date only — never the raw secret.
+func (h *Handler) ListSigningSecrets(w http.ResponseWriter, r *http.Request) {
+	org := organizations.OrgID(chi.URLParam(r, "orgId"))
+	secrets, err := h.facade.ListSigningSecrets(r.Context(), org)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toSigningSecretDTOs(secrets))
+}

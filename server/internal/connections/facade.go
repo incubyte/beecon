@@ -7,6 +7,7 @@ import (
 
 	"beecon/internal/catalog"
 	"beecon/internal/httpx"
+	"beecon/internal/metrics"
 	"beecon/internal/organizations"
 	"beecon/internal/vault"
 )
@@ -22,6 +23,7 @@ type Facade struct {
 	vault        *vault.Vault
 	oauthClient  OAuthClient
 	recorder     Recorder
+	metrics      *metrics.Registry
 	newID        func() string
 	newToken     func() string
 	newState     func() string
@@ -68,6 +70,15 @@ func NewFacade(
 		baseURL:      baseURL,
 		now:          now,
 	}
+}
+
+// WithMetrics wires this facade's Prometheus recording (PD24): OAuth
+// handshake and token-refresh outcomes. A facade built without one (the nil
+// zero value NewFacade leaves it at) makes every metrics call a silent
+// no-op, exactly like a nil Recorder already does for logging.
+func (f *Facade) WithMetrics(registry *metrics.Registry) *Facade {
+	f.metrics = registry
+	return f
 }
 
 // InitiatedConnection is Initiate's result: the newly created Connection and
