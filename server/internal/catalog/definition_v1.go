@@ -26,10 +26,20 @@ type definitionFileV1 struct {
 }
 
 type oauthConfigFileV1 struct {
-	AuthorizeURL string   `yaml:"authorizeUrl"`
-	TokenURL     string   `yaml:"tokenUrl"`
-	UserInfoURL  string   `yaml:"userInfoUrl"`
-	Scopes       []string `yaml:"scopes"`
+	AuthorizeURL    string         `yaml:"authorizeUrl"`
+	TokenURL        string         `yaml:"tokenUrl"`
+	UserInfoURL     string         `yaml:"userInfoUrl"`
+	Scopes          []string       `yaml:"scopes"`
+	CredentialStyle string         `yaml:"credentialStyle"`
+	UserInfo        userInfoFileV1 `yaml:"userInfo"`
+}
+
+// userInfoFileV1 is PD13's userInfo field mapping: which field of the
+// provider's user-info/token-metadata response names the account's email and
+// display name (Outlook: mail/displayName; Hubspot: user/hub_domain, PD16).
+type userInfoFileV1 struct {
+	Email       string `yaml:"email"`
+	DisplayName string `yaml:"displayName"`
 }
 
 // providerMappingFileV1 is the provider-level half of PD13's mapping block:
@@ -108,12 +118,27 @@ func validateDefinitionFileV1(name string, file definitionFileV1) error {
 	if len(file.OAuth.Scopes) == 0 {
 		return definitionError(name, "oauth.scopes", "must declare at least one scope")
 	}
+	if err := validateCredentialStyle(name, file.OAuth.CredentialStyle); err != nil {
+		return err
+	}
 	for i, tool := range file.Tools {
 		if err := validateProviderToolFileV1(name, i, tool); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// validateCredentialStyle accepts an omitted style (defaulted to
+// CredentialStyleFormBody by definitionFromFileV1) or either declared enum
+// value, and rejects anything else field-precisely.
+func validateCredentialStyle(fileName, style string) error {
+	switch style {
+	case "", CredentialStyleFormBody, CredentialStyleBasicAuth:
+		return nil
+	default:
+		return definitionError(fileName, "oauth.credentialStyle", `must be "formBody" or "basicAuth"`)
+	}
 }
 
 func validateProviderToolFileV1(fileName string, index int, tool providerToolFileV1) error {
@@ -141,17 +166,26 @@ func definitionFromFileV1(file definitionFileV1) ProviderDefinition {
 	if authScheme == "" {
 		authScheme = "oauth2"
 	}
+	credentialStyle := file.OAuth.CredentialStyle
+	if credentialStyle == "" {
+		credentialStyle = CredentialStyleFormBody
+	}
 	return ProviderDefinition{
-		Slug:         file.Slug,
-		Name:         file.Name,
-		Logo:         file.Logo,
-		AuthScheme:   authScheme,
-		BaseURL:      file.Mapping.BaseURL,
-		AuthorizeURL: file.OAuth.AuthorizeURL,
-		TokenURL:     file.OAuth.TokenURL,
-		UserInfoURL:  file.OAuth.UserInfoURL,
-		Scopes:       file.OAuth.Scopes,
-		Tools:        toolsFromFileV1(file.Tools),
+		Slug:            file.Slug,
+		Name:            file.Name,
+		Logo:            file.Logo,
+		AuthScheme:      authScheme,
+		BaseURL:         file.Mapping.BaseURL,
+		AuthorizeURL:    file.OAuth.AuthorizeURL,
+		TokenURL:        file.OAuth.TokenURL,
+		UserInfoURL:     file.OAuth.UserInfoURL,
+		Scopes:          file.OAuth.Scopes,
+		CredentialStyle: credentialStyle,
+		UserInfo: UserInfoMapping{
+			EmailField:       file.OAuth.UserInfo.Email,
+			DisplayNameField: file.OAuth.UserInfo.DisplayName,
+		},
+		Tools: toolsFromFileV1(file.Tools),
 	}
 }
 

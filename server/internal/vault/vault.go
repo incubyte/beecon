@@ -1,4 +1,12 @@
-package connections
+// Package vault is Beecon's shared AES-256-GCM encryption primitive (PD12):
+// a leaf infrastructure package, like internal/httpx or internal/idgen, that
+// imports no domain module and may be imported by any of them. It started
+// inside connections/ (Phase 1, tokens only); Phase 2 adds a second and
+// third consumer — catalog (Integration client secrets, PD17) and, later,
+// access (user-token signing secrets) — which is what justified lifting it
+// out to shared infra (the "rule of three" for extraction, applied to a
+// module boundary rather than a function).
+package vault
 
 import (
 	"crypto/aes"
@@ -9,18 +17,19 @@ import (
 	"io"
 )
 
-// Vault encrypts and decrypts OAuth tokens for storage (PD12: AES-256-GCM).
-// It is the only place a raw token value is ever held outside the provider
-// exchange itself — every other layer (Connection, DTOs, logs) only ever
-// sees the ciphertext Encrypt returns.
+// Vault encrypts and decrypts secrets for storage. It is the only place a
+// raw secret value (an OAuth token, an Integration's client secret, a
+// signing secret) is ever held outside the moment it is minted or used —
+// every other layer (domain structs, DTOs, logs) only ever sees the
+// ciphertext Encrypt returns.
 type Vault struct {
 	aead cipher.AEAD
 }
 
 // NewVault builds a Vault from a 32-byte AES-256 key. Callers get the key
 // via config.DecodeEncryptionKey, which already validates its length and
-// encoding (AC11); NewVault re-checks the length so it can never be
-// constructed with a key AES-256-GCM can't use.
+// encoding; NewVault re-checks the length so it can never be constructed
+// with a key AES-256-GCM can't use.
 func NewVault(key []byte) (*Vault, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("vault key must be 32 bytes, got %d", len(key))

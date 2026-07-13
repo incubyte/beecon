@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"beecon/internal/catalog"
 	memory "beecon/internal/catalog/driven/memory"
@@ -190,6 +191,118 @@ func TestGetIntegration_ReturnsTypedNotFoundForAnUnknownID(t *testing.T) {
 	_, err := f.GetIntegration(context.Background(), catalog.IntegrationID("intg_missing"))
 
 	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+// --- Client-secret encryption (PD17, Slice 2) ---
+
+// newCatalogFacadeWithRepo is newCatalogFacade plus a handle on the
+// in-memory Repository itself, so a test can seed a row directly (bypassing
+// the facade's own encryption, to simulate a Phase 1 row created before the
+// vault existed) or inspect exactly what landed in storage rather than what
+// the facade chooses to decrypt back out.
+func newCatalogFacadeWithRepo(t *testing.T) (*catalog.Facade, *memory.Repository) {
+	t.Helper()
+	repo := memory.NewRepository()
+	f, err := memory.NewFacadeWithOverrides(memory.Overrides{Repository: repo, Definitions: fakeDefinitions()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	return f, repo
+}
+
+// TestCreateIntegration_PersistsTheClientSecretEncryptedNeverInPlaintext is
+// PD17's write-path half: the repository row CreateIntegration hands to
+// storage must already be vault ciphertext, not the plaintext the caller
+// supplied — asserted directly against the repository, independent of
+// GetIntegration's own decryption.
+func TestCreateIntegration_PersistsTheClientSecretEncryptedNeverInPlaintext(t *testing.T) {
+	f, repo := newCatalogFacadeWithRepo(t)
+	const secret = "super-secret-oauth-client-secret"
+
+	created, err := f.CreateIntegration(context.Background(), "outlook", "client-id", secret)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stored, err := repo.FindByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if !stored.ClientSecretEncrypted {
+		t.Error("ClientSecretEncrypted = false, want true — CreateIntegration must persist ciphertext")
+	}
+	if stored.ClientSecret == secret || strings.Contains(stored.ClientSecret, secret) {
+		t.Errorf("stored ClientSecret %q contains the raw secret — it must be vault ciphertext", stored.ClientSecret)
+	}
+}
+
+// TestEncryptPlaintextClientSecrets_EncryptsAPlaintextRowAndPersistsItsCiphertext
+// is AC3/PD17's boot backfill: a row persisted before the vault existed
+// (ClientSecretEncrypted: false, a plaintext ClientSecret — Phase 1's
+// Outlook rows) must come out of the backfill re-sealed as ciphertext, still
+// decryptable back to the exact original plaintext via GetIntegration.
+func TestEncryptPlaintextClientSecrets_EncryptsAPlaintextRowAndPersistsItsCiphertext(t *testing.T) {
+	f, repo := newCatalogFacadeWithRepo(t)
+	const legacyID = catalog.IntegrationID("intg_phase1_legacy")
+	const legacySecret = "phase1-plaintext-outlook-client-secret"
+	if err := repo.Save(context.Background(), catalog.Integration{
+		ID: legacyID, ProviderSlug: "outlook", ClientID: "legacy-client-id",
+		ClientSecret: legacySecret, ClientSecretEncrypted: false, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed legacy plaintext row: %v", err)
+	}
+
+	if err := f.EncryptPlaintextClientSecrets(context.Background()); err != nil {
+		t.Fatalf("EncryptPlaintextClientSecrets: %v", err)
+	}
+
+	stored, err := repo.FindByID(context.Background(), legacyID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if !stored.ClientSecretEncrypted {
+		t.Error("ClientSecretEncrypted = false after backfill, want true")
+	}
+	if stored.ClientSecret == legacySecret || strings.Contains(stored.ClientSecret, legacySecret) {
+		t.Errorf("stored ClientSecret %q contains the raw legacy secret after backfill — it must be ciphertext", stored.ClientSecret)
+	}
+
+	got, err := f.GetIntegration(context.Background(), legacyID)
+	if err != nil {
+		t.Fatalf("GetIntegration after backfill: %v", err)
+	}
+	if got.ClientSecret != legacySecret {
+		t.Errorf("GetIntegration.ClientSecret after backfill = %q, want the original plaintext %q", got.ClientSecret, legacySecret)
+	}
+}
+
+// TestEncryptPlaintextClientSecrets_IsIdempotentAndLeavesAnAlreadyEncryptedRowsCiphertextUntouched
+// is the backfill's idempotency guarantee (PD17): every boot calls this, so a
+// row already marked ClientSecretEncrypted must be left exactly as it was —
+// re-sealing it again would still be correct but is wasted work the facade
+// deliberately skips.
+func TestEncryptPlaintextClientSecrets_IsIdempotentAndLeavesAnAlreadyEncryptedRowsCiphertextUntouched(t *testing.T) {
+	f, repo := newCatalogFacadeWithRepo(t)
+	created, err := f.CreateIntegration(context.Background(), "outlook", "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	before, err := repo.FindByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+
+	if err := f.EncryptPlaintextClientSecrets(context.Background()); err != nil {
+		t.Fatalf("EncryptPlaintextClientSecrets: %v", err)
+	}
+
+	after, err := repo.FindByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if after.ClientSecret != before.ClientSecret {
+		t.Errorf("ClientSecret changed after a no-op backfill: before=%q after=%q, want it left untouched", before.ClientSecret, after.ClientSecret)
+	}
 }
 
 // --- ListTools / ToolDetail (Slice 1's catalog API) ---

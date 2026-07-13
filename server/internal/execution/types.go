@@ -12,21 +12,25 @@ type ExecutionError struct {
 	Message string
 }
 
-// Result is the {successful, error, data} envelope every tool execution
-// returns (PD6, AC1). A tool-level failure — invalid arguments, a
-// non-ACTIVE connection, an upstream provider error — carries a nil Data and
-// a non-nil Error; success carries a nil Error and the provider's response
-// as Data.
+// Result is the {successful, error, data, nextCursor} envelope every tool
+// execution returns (PD6, AC1; NextCursor added PD15b). A tool-level failure
+// — invalid arguments, a non-ACTIVE connection, an upstream provider error —
+// carries a nil Data and a non-nil Error; success carries a nil Error and the
+// provider's response as Data. NextCursor is only ever set on a successful
+// result for a tool whose mapping declares pagination, and is empty when the
+// provider's response carried no further page.
 type Result struct {
 	Successful bool
 	Error      *ExecutionError
 	Data       any
+	NextCursor string
 }
 
-// SuccessResult builds the {successful: true, error: null, data} envelope
-// (AC1).
-func SuccessResult(data any) Result {
-	return Result{Successful: true, Data: data}
+// SuccessResult builds the {successful: true, error: null, data, nextCursor}
+// envelope (AC1, PD15b). nextCursor is "" for a non-paginated tool, or a
+// paginated tool's response that carried no further page.
+func SuccessResult(data any, nextCursor string) Result {
+	return Result{Successful: true, Data: data, NextCursor: nextCursor}
 }
 
 // FailureResult builds the {successful: false, error, data: null} envelope

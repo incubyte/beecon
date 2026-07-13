@@ -193,15 +193,16 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 	}
 
 	request := TokenExchangeRequest{
-		TokenURL:     definition.TokenURL,
-		ClientID:     integration.ClientID,
-		ClientSecret: integration.ClientSecret,
-		Code:         code,
-		RedirectURI:  buildCallbackURL(f.baseURL),
+		TokenURL:        definition.TokenURL,
+		ClientID:        integration.ClientID,
+		ClientSecret:    integration.ClientSecret,
+		Code:            code,
+		RedirectURI:     buildCallbackURL(f.baseURL),
+		CredentialStyle: definition.CredentialStyle,
 	}
 
 	started := f.now()
-	tokens, account, exchangeErr := f.exchangeTokensAndFetchAccount(ctx, request, definition.UserInfoURL)
+	tokens, account, exchangeErr := f.exchangeTokensAndFetchAccount(ctx, request, definition)
 	f.recordTokenExchange(ctx, connection, started, request, tokens, exchangeErr)
 	if exchangeErr != nil {
 		return Connection{}, ErrTokenExchangeFailed()
@@ -221,13 +222,21 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 
 // exchangeTokensAndFetchAccount performs the two upstream calls the token
 // exchange needs in sequence: the authorization_code grant, then the
-// account-profile fetch using the token it returned.
-func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request TokenExchangeRequest, userInfoURL string) (TokenExchangeResult, AccountInfo, error) {
+// account-profile fetch using the token it returned, read via the
+// definition's own declared userInfo field mapping (PD13) — generic across
+// providers, so Hubspot's differently-shaped token-metadata response needs no
+// provider-specific Go code here (AC1).
+func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request TokenExchangeRequest, definition catalog.ProviderDefinition) (TokenExchangeResult, AccountInfo, error) {
 	tokens, err := f.oauthClient.ExchangeCode(ctx, request)
 	if err != nil {
 		return TokenExchangeResult{}, AccountInfo{}, err
 	}
-	account, err := f.oauthClient.FetchAccount(ctx, userInfoURL, tokens.AccessToken)
+	account, err := f.oauthClient.FetchAccount(ctx, AccountFetchRequest{
+		UserInfoURL:      definition.UserInfoURL,
+		AccessToken:      tokens.AccessToken,
+		EmailField:       definition.UserInfo.EmailField,
+		DisplayNameField: definition.UserInfo.DisplayNameField,
+	})
 	if err != nil {
 		return tokens, AccountInfo{}, err
 	}

@@ -1,17 +1,18 @@
-// vault_test.go covers AC10 at the unit level: the Vault is the only place a
-// raw OAuth token value is ever held outside the provider exchange itself —
-// round-trip correctness, ciphertext non-determinism (fresh nonce per call),
-// tamper rejection (GCM authentication failure), and key-length validation
-// (AC11's downstream guard: NewVault re-checks what config.DecodeEncryptionKey
-// already validated).
-package connections_test
+// vault_test.go covers AC10 (Phase 1) at the unit level: the Vault is the
+// only place a raw secret value is ever held outside the moment it is minted
+// or used — round-trip correctness, ciphertext non-determinism (fresh nonce
+// per call), tamper rejection (GCM authentication failure), and key-length
+// validation (NewVault re-checks what config.DecodeEncryptionKey already
+// validated). Moved verbatim from connections/vault_test.go (Phase 2 Slice 2)
+// when the vault was extracted to shared infra.
+package vault_test
 
 import (
 	"encoding/base64"
 	"strings"
 	"testing"
 
-	"beecon/internal/connections"
+	"beecon/internal/vault"
 )
 
 func testVaultKey() []byte {
@@ -19,17 +20,17 @@ func testVaultKey() []byte {
 }
 
 func TestVault_EncryptThenDecryptRoundTripsToTheOriginalPlaintext(t *testing.T) {
-	vault, err := connections.NewVault(testVaultKey())
+	v, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault: %v", err)
 	}
 	const plaintext = "EwAoA...a-real-looking-microsoft-access-token"
 
-	ciphertext, err := vault.Encrypt(plaintext)
+	ciphertext, err := v.Encrypt(plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	got, err := vault.Decrypt(ciphertext)
+	got, err := v.Decrypt(ciphertext)
 
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
@@ -42,13 +43,13 @@ func TestVault_EncryptThenDecryptRoundTripsToTheOriginalPlaintext(t *testing.T) 
 // TestVault_CiphertextNeverContainsTheRawPlaintext is AC10's core defensive
 // check: whatever Encrypt returns must not leak the token in the clear.
 func TestVault_CiphertextNeverContainsTheRawPlaintext(t *testing.T) {
-	vault, err := connections.NewVault(testVaultKey())
+	v, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault: %v", err)
 	}
 	const plaintext = "super-secret-access-token-value"
 
-	ciphertext, err := vault.Encrypt(plaintext)
+	ciphertext, err := v.Encrypt(plaintext)
 
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
@@ -62,17 +63,17 @@ func TestVault_CiphertextNeverContainsTheRawPlaintext(t *testing.T) {
 // proves a fresh random nonce is used per call — encrypting the same token
 // twice must not produce identical, comparable ciphertext.
 func TestVault_EncryptProducesDifferentCiphertextForTheSamePlaintextEachTime(t *testing.T) {
-	vault, err := connections.NewVault(testVaultKey())
+	v, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault: %v", err)
 	}
 	const plaintext = "same-token-encrypted-twice"
 
-	first, err := vault.Encrypt(plaintext)
+	first, err := v.Encrypt(plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt (first): %v", err)
 	}
-	second, err := vault.Encrypt(plaintext)
+	second, err := v.Encrypt(plaintext)
 	if err != nil {
 		t.Fatalf("Encrypt (second): %v", err)
 	}
@@ -86,17 +87,17 @@ func TestVault_EncryptProducesDifferentCiphertextForTheSamePlaintextEachTime(t *
 // flipping a single byte of sealed ciphertext must fail GCM's authentication
 // check, not silently return corrupted plaintext.
 func TestVault_DecryptRejectsTamperedCiphertext(t *testing.T) {
-	vault, err := connections.NewVault(testVaultKey())
+	v, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault: %v", err)
 	}
-	ciphertext, err := vault.Encrypt("a-token-that-will-be-tampered-with")
+	ciphertext, err := v.Encrypt("a-token-that-will-be-tampered-with")
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	tampered := flipLastByte(t, ciphertext)
 
-	_, err = vault.Decrypt(tampered)
+	_, err = v.Decrypt(tampered)
 
 	if err == nil {
 		t.Fatal("expected Decrypt to reject tampered ciphertext, got nil error")
@@ -107,11 +108,11 @@ func TestVault_DecryptRejectsTamperedCiphertext(t *testing.T) {
 // key itself is load-bearing: a different key must not be able to open
 // another vault's ciphertext.
 func TestVault_DecryptRejectsCiphertextSealedUnderADifferentKey(t *testing.T) {
-	vaultA, err := connections.NewVault(testVaultKey())
+	vaultA, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault (A): %v", err)
 	}
-	vaultB, err := connections.NewVault([]byte("98765432109876543210987654321098"))
+	vaultB, err := vault.NewVault([]byte("98765432109876543210987654321098"))
 	if err != nil {
 		t.Fatalf("NewVault (B): %v", err)
 	}
@@ -128,12 +129,12 @@ func TestVault_DecryptRejectsCiphertextSealedUnderADifferentKey(t *testing.T) {
 }
 
 func TestVault_DecryptRejectsMalformedBase64(t *testing.T) {
-	vault, err := connections.NewVault(testVaultKey())
+	v, err := vault.NewVault(testVaultKey())
 	if err != nil {
 		t.Fatalf("NewVault: %v", err)
 	}
 
-	_, err = vault.Decrypt("not-valid-base64!!!")
+	_, err = v.Decrypt("not-valid-base64!!!")
 
 	if err == nil {
 		t.Fatal("expected Decrypt to reject malformed base64, got nil error")
@@ -141,7 +142,7 @@ func TestVault_DecryptRejectsMalformedBase64(t *testing.T) {
 }
 
 func TestNewVault_RejectsAKeyShorterThan32Bytes(t *testing.T) {
-	_, err := connections.NewVault([]byte("too-short"))
+	_, err := vault.NewVault([]byte("too-short"))
 
 	if err == nil {
 		t.Fatal("expected NewVault to reject a key shorter than 32 bytes, got nil error")
@@ -149,7 +150,7 @@ func TestNewVault_RejectsAKeyShorterThan32Bytes(t *testing.T) {
 }
 
 func TestNewVault_RejectsAKeyLongerThan32Bytes(t *testing.T) {
-	_, err := connections.NewVault([]byte("012345678901234567890123456789012345"))
+	_, err := vault.NewVault([]byte("012345678901234567890123456789012345"))
 
 	if err == nil {
 		t.Fatal("expected NewVault to reject a key longer than 32 bytes, got nil error")

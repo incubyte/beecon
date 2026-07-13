@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"beecon/internal/connections"
+	"beecon/internal/vault"
 )
 
 var fixedTestTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -31,7 +32,7 @@ type Overrides struct {
 	Providers     connections.ProviderDefinitionReader
 	OAuthClient   connections.OAuthClient
 	Recorder      connections.Recorder
-	Vault         *connections.Vault
+	Vault         *vault.Vault
 	NewID         func() string
 	NewToken      func() string
 	NewState      func() string
@@ -65,9 +66,9 @@ func NewFacadeWithOverrides(o Overrides) *connections.Facade {
 	if now == nil {
 		now = func() time.Time { return fixedTestTime }
 	}
-	vault := o.Vault
-	if vault == nil {
-		vault, _ = connections.NewVault(defaultTestVaultKey)
+	tokenVault := o.Vault
+	if tokenVault == nil {
+		tokenVault, _ = vault.NewVault(defaultTestVaultKey)
 	}
 	return connections.NewFacade(
 		repository,
@@ -76,7 +77,7 @@ func NewFacadeWithOverrides(o Overrides) *connections.Facade {
 		o.Users,
 		o.Integrations,
 		o.Providers,
-		vault,
+		tokenVault,
 		o.OAuthClient,
 		o.Recorder,
 		newID,

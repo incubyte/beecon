@@ -36,6 +36,7 @@ import (
 	"beecon/internal/organizations"
 	orgsbun "beecon/internal/organizations/driven/bun"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
+	"beecon/internal/vault"
 )
 
 // Deps are the externally supplied dependencies main.go hands to Wire.
@@ -89,7 +90,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		_ = database.Close()
 		return nil, fmt.Errorf("token encryption key: %w", err)
 	}
-	vault, err := connections.NewVault(encryptionKey)
+	tokenVault, err := vault.NewVault(encryptionKey)
 	if err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("token encryption key: %w", err)
@@ -100,7 +101,11 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer)
 	accessFacade := buildAccessFacade(database)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
-	catalogFacade := buildCatalogFacade(database, providerDefinitions)
+	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault)
+	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("encrypt plaintext client secrets: %w", err)
+	}
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
 	loggingFacade := buildLoggingFacade(database)
 	loggingHandler := logginghttp.NewHandler(loggingFacade, errorRenderer)
@@ -109,7 +114,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		deps.Config.BaseURL,
 		organizationsFacade,
 		catalogFacade,
-		vault,
+		tokenVault,
 		oauthhttp.NewClient(nil),
 		connectionsLogRecorder{logs: loggingFacade},
 	)
@@ -152,9 +157,9 @@ func buildAccessFacade(database *upstreambun.DB) *access.Facade {
 	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), systemNow)
 }
 
-func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition) *catalog.Facade {
+func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault) *catalog.Facade {
 	repo := catalogbun.NewRepository(database)
-	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), systemNow)
+	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), systemNow, tokenVault)
 }
 
 func buildConnectionsFacade(
@@ -162,7 +167,7 @@ func buildConnectionsFacade(
 	baseURL string,
 	organizationsFacade *organizations.Facade,
 	catalogFacade *catalog.Facade,
-	vault *connections.Vault,
+	tokenVault *vault.Vault,
 	oauthClient connections.OAuthClient,
 	recorder connections.Recorder,
 ) *connections.Facade {
@@ -174,7 +179,7 @@ func buildConnectionsFacade(
 		organizationsFacade,
 		catalogFacade,
 		catalogFacade,
-		vault,
+		tokenVault,
 		oauthClient,
 		recorder,
 		idgen.Prefixed("conn_"),

@@ -53,7 +53,7 @@ func (f *fakeOAuthClient) ExchangeCode(_ context.Context, req connections.TokenE
 	return f.exchangeResult, nil
 }
 
-func (f *fakeOAuthClient) FetchAccount(_ context.Context, _ string, _ string) (connections.AccountInfo, error) {
+func (f *fakeOAuthClient) FetchAccount(_ context.Context, _ connections.AccountFetchRequest) (connections.AccountInfo, error) {
 	f.fetchAccountCalled = true
 	if f.accountErr != nil {
 		return connections.AccountInfo{}, f.accountErr

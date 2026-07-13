@@ -14,15 +14,19 @@ import (
 	"beecon/internal/catalog"
 )
 
-// IntegrationRow is the integrations table schema.
+// IntegrationRow is the integrations table schema. ClientSecretEncrypted
+// (migration 0006, PD17) distinguishes a client_secret already sealed under
+// the vault from a Phase 1 row still awaiting EncryptPlaintextClientSecrets'
+// boot backfill.
 type IntegrationRow struct {
 	upstreambun.BaseModel `bun:"table:integrations,alias:i"`
 
-	ID           string    `bun:"id,pk"`
-	ProviderSlug string    `bun:"provider_slug,notnull"`
-	ClientID     string    `bun:"client_id,notnull"`
-	ClientSecret string    `bun:"client_secret,notnull"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	ID                    string    `bun:"id,pk"`
+	ProviderSlug          string    `bun:"provider_slug,notnull"`
+	ClientID              string    `bun:"client_id,notnull"`
+	ClientSecret          string    `bun:"client_secret,notnull"`
+	ClientSecretEncrypted bool      `bun:"client_secret_encrypted,notnull"`
+	CreatedAt             time.Time `bun:"created_at,notnull"`
 }
 
 // Repository is the bun-backed catalog.Repository.
@@ -75,22 +79,36 @@ func (r *Repository) ListAll(ctx context.Context) ([]catalog.Integration, error)
 	return integrations, nil
 }
 
+// UpdateEncryptedClientSecret persists the boot backfill's re-sealed
+// ciphertext for id (PD17) and flips client_secret_encrypted to true.
+func (r *Repository) UpdateEncryptedClientSecret(ctx context.Context, id catalog.IntegrationID, encryptedClientSecret string) error {
+	row := IntegrationRow{ID: string(id), ClientSecret: encryptedClientSecret, ClientSecretEncrypted: true}
+	_, err := r.db.NewUpdate().
+		Model(&row).
+		Column("client_secret", "client_secret_encrypted").
+		Where("id = ?", row.ID).
+		Exec(ctx)
+	return err
+}
+
 func rowFromIntegration(integration catalog.Integration) IntegrationRow {
 	return IntegrationRow{
-		ID:           string(integration.ID),
-		ProviderSlug: integration.ProviderSlug,
-		ClientID:     integration.ClientID,
-		ClientSecret: integration.ClientSecret,
-		CreatedAt:    integration.CreatedAt,
+		ID:                    string(integration.ID),
+		ProviderSlug:          integration.ProviderSlug,
+		ClientID:              integration.ClientID,
+		ClientSecret:          integration.ClientSecret,
+		ClientSecretEncrypted: integration.ClientSecretEncrypted,
+		CreatedAt:             integration.CreatedAt,
 	}
 }
 
 func integrationFromRow(row *IntegrationRow) catalog.Integration {
 	return catalog.Integration{
-		ID:           catalog.IntegrationID(row.ID),
-		ProviderSlug: row.ProviderSlug,
-		ClientID:     row.ClientID,
-		ClientSecret: row.ClientSecret,
-		CreatedAt:    row.CreatedAt,
+		ID:                    catalog.IntegrationID(row.ID),
+		ProviderSlug:          row.ProviderSlug,
+		ClientID:              row.ClientID,
+		ClientSecret:          row.ClientSecret,
+		ClientSecretEncrypted: row.ClientSecretEncrypted,
+		CreatedAt:             row.CreatedAt,
 	}
 }

@@ -30,13 +30,16 @@ type ConnectionReader interface {
 // ToolCallRequest is everything ProviderClient needs to make one HTTP call
 // to a provider on the caller's behalf. Headers carries a tool's declared
 // header mapping (PD13) — additional headers beyond the standard bearer
-// Authorization/Accept every call already sends.
+// Authorization/Accept every call already sends. Body is the tool's declared
+// JSON body mapping (PD13, Hubspot's create-contact), already rendered and
+// encoded; empty for a tool with no body mapping (e.g. every GET tool).
 type ToolCallRequest struct {
 	Method      string
 	URL         string
 	AccessToken string
 	Query       map[string]string
 	Headers     map[string]string
+	Body        string
 }
 
 // ToolCallResponse is a provider's raw HTTP response to a tool call — the

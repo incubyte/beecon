@@ -30,6 +30,31 @@ type ProviderTool struct {
 	Mapping      Mapping
 }
 
+// Token-endpoint credential styles a provider definition may declare (PD13,
+// Slice 2): CredentialStyleFormBody carries the Integration's client
+// id/secret in the token request's form body; CredentialStyleBasicAuth
+// carries them in an HTTP Basic Authorization header instead (RFC 6749
+// section 2.3.1). CredentialStyleFormBody is also the default applied when a
+// definition omits oauth.credentialStyle entirely — matching what Phase 1's
+// Outlook token exchange already sends (verified in
+// connections/driven/oauthhttp/client.go), so re-expressing Outlook without
+// the field changes nothing about its behavior.
+const (
+	CredentialStyleFormBody  = "formBody"
+	CredentialStyleBasicAuth = "basicAuth"
+)
+
+// UserInfoMapping names which field of a provider's user-info/token-metadata
+// response (PD13's userInfo mapping) the OAuth callback reads into a
+// Connection's captured account metadata (PD9): Outlook's GET /v1.0/me
+// carries "mail"/"displayName"; Hubspot's token-metadata endpoint carries
+// "user"/"hub_domain" (PD16). A provider whose response carries neither
+// field leaves the corresponding value empty.
+type UserInfoMapping struct {
+	EmailField       string
+	DisplayNameField string
+}
+
 // ProviderDefinition is the parsed, validated form of one provider's
 // declarative definition file. UserInfoURL is optional: it names the
 // endpoint the OAuth callback calls (bearer-authenticated) to capture
@@ -39,16 +64,18 @@ type ProviderTool struct {
 // it is empty for a Phase-1-shaped definition built directly in Go, in which
 // case every ProviderTool.Path is treated as a full URL.
 type ProviderDefinition struct {
-	Slug         string
-	Name         string
-	Logo         string
-	AuthScheme   string
-	BaseURL      string
-	AuthorizeURL string
-	TokenURL     string
-	UserInfoURL  string
-	Scopes       []string
-	Tools        []ProviderTool
+	Slug            string
+	Name            string
+	Logo            string
+	AuthScheme      string
+	BaseURL         string
+	AuthorizeURL    string
+	TokenURL        string
+	UserInfoURL     string
+	Scopes          []string
+	CredentialStyle string
+	UserInfo        UserInfoMapping
+	Tools           []ProviderTool
 }
 
 // IntegrationID is minted only by CreateIntegration.
@@ -57,12 +84,17 @@ type IntegrationID string
 // Integration pairs a Provider with one installation's OAuth client
 // credentials. It is installation-level, not org-scoped (PD7): every
 // organization in the installation may initiate a connection through it.
+// ClientSecretEncrypted reports whether ClientSecret is vault ciphertext
+// (PD17): every Integration created by NewIntegration is, but a row
+// persisted before this phase's migration/backfill may still carry it in
+// plaintext until EncryptPlaintextClientSecrets re-seals it at boot.
 type Integration struct {
-	ID           IntegrationID
-	ProviderSlug string
-	ClientID     string
-	ClientSecret string
-	CreatedAt    time.Time
+	ID                    IntegrationID
+	ProviderSlug          string
+	ClientID              string
+	ClientSecret          string
+	ClientSecretEncrypted bool
+	CreatedAt             time.Time
 }
 
 // IntegrationSummary is what an organization sees when listing integrations
@@ -76,16 +108,21 @@ type IntegrationSummary struct {
 	AuthScheme   string
 }
 
-// NewIntegration constructs an Integration. Validation that providerSlug
-// names a loaded ProviderDefinition happens in the facade, which is the only
-// place that holds the set of loaded definitions.
-func NewIntegration(id IntegrationID, providerSlug, clientID, clientSecret string, now time.Time) Integration {
+// NewIntegration constructs an Integration from an already vault-encrypted
+// client secret (PD17: the facade encrypts before calling this, the same way
+// connections.Connection.Activate only ever receives ciphertext) — every
+// Integration NewIntegration builds is therefore ClientSecretEncrypted.
+// Validation that providerSlug names a loaded ProviderDefinition happens in
+// the facade, which is the only place that holds the set of loaded
+// definitions.
+func NewIntegration(id IntegrationID, providerSlug, clientID, encryptedClientSecret string, now time.Time) Integration {
 	return Integration{
-		ID:           id,
-		ProviderSlug: providerSlug,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		CreatedAt:    now,
+		ID:                    id,
+		ProviderSlug:          providerSlug,
+		ClientID:              clientID,
+		ClientSecret:          encryptedClientSecret,
+		ClientSecretEncrypted: true,
+		CreatedAt:             now,
 	}
 }
 

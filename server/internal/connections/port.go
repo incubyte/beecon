@@ -65,14 +65,27 @@ type ProviderDefinitionReader interface {
 	GetProviderDefinition(ctx context.Context, providerSlug string) (catalog.ProviderDefinition, error)
 }
 
+// Credential styles a provider's token endpoint may declare (PD13): FormBody
+// carries client_id/client_secret in the token request's form body (Phase
+// 1's original, and still Outlook's and Hubspot's, behavior); BasicAuth
+// carries them in an HTTP Basic Authorization header instead, per RFC 6749
+// section 2.3.1. A TokenExchangeRequest with no CredentialStyle set behaves
+// as FormBody — see catalog.CredentialStyleFormBody's doc comment for why
+// that is the definition format's own default.
+const (
+	CredentialStyleFormBody  = "formBody"
+	CredentialStyleBasicAuth = "basicAuth"
+)
+
 // TokenExchangeRequest carries everything ExchangeCode needs to complete the
 // authorization_code grant against a provider's token endpoint.
 type TokenExchangeRequest struct {
-	TokenURL     string
-	ClientID     string
-	ClientSecret string
-	Code         string
-	RedirectURI  string
+	TokenURL        string
+	ClientID        string
+	ClientSecret    string
+	Code            string
+	RedirectURI     string
+	CredentialStyle string
 }
 
 // TokenExchangeResult is the provider's authorization_code grant response —
@@ -84,20 +97,33 @@ type TokenExchangeResult struct {
 }
 
 // AccountInfo is the authenticated account's profile the callback captures
-// via User.Read (PD9): email and display name, later visible via
-// get-connection (AC6).
+// via the provider's user-info/token-metadata endpoint (PD9): email and
+// display name, later visible via get-connection (AC6).
 type AccountInfo struct {
 	Email       string
 	DisplayName string
 }
 
+// AccountFetchRequest carries everything FetchAccount needs to call a
+// provider's user-info/token-metadata endpoint and extract email/display
+// name generically, via the definition's own declared field names (PD13's
+// userInfo mapping) — this is what lets Hubspot's differently-shaped
+// token-metadata response (Slice 2) reuse the same driven adapter Outlook's
+// GET /v1.0/me already used, with no provider-specific Go code.
+type AccountFetchRequest struct {
+	UserInfoURL      string
+	AccessToken      string
+	EmailField       string
+	DisplayNameField string
+}
+
 // OAuthClient is a narrow driven port for exchanging an authorization code
 // for tokens and fetching the authenticated account's profile, so tests can
-// substitute a fake provider (a fake Microsoft + Graph httptest server)
-// instead of calling the real internet.
+// substitute a fake provider (a fake Microsoft + Graph, or Hubspot, httptest
+// server) instead of calling the real internet.
 type OAuthClient interface {
 	ExchangeCode(ctx context.Context, req TokenExchangeRequest) (TokenExchangeResult, error)
-	FetchAccount(ctx context.Context, userInfoURL, accessToken string) (AccountInfo, error)
+	FetchAccount(ctx context.Context, req AccountFetchRequest) (AccountInfo, error)
 }
 
 // LogEntry is what the OAuth token exchange hands to a Recorder after

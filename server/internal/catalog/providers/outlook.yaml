@@ -20,6 +20,12 @@ oauth:
     - offline_access
     - Mail.Read
     - User.Read
+  # credentialStyle is omitted deliberately: it defaults to formBody, which is
+  # exactly how Outlook's token exchange has always sent client_id/
+  # client_secret (Phase 1's behavior, unchanged, PD13/Slice 2).
+  userInfo:
+    email: mail
+    displayName: displayName
 mapping:
   baseUrl: https://graph.microsoft.com/v1.0
 tools:

@@ -51,6 +51,23 @@ func (r *Repository) ListAll(_ context.Context) ([]catalog.Integration, error) {
 	return integrations, nil
 }
 
+// UpdateEncryptedClientSecret persists the boot backfill's re-sealed
+// ciphertext for id (PD17) and flips ClientSecretEncrypted to true. A miss is
+// a silent no-op, mirroring the connections memory repository's own
+// best-effort Update.
+func (r *Repository) UpdateEncryptedClientSecret(_ context.Context, id catalog.IntegrationID, encryptedClientSecret string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	integration, ok := r.byID[id]
+	if !ok {
+		return nil
+	}
+	integration.ClientSecret = encryptedClientSecret
+	integration.ClientSecretEncrypted = true
+	r.byID[id] = integration
+	return nil
+}
+
 func sortByCreatedAt(integrations []catalog.Integration) {
 	sort.Slice(integrations, func(i, j int) bool {
 		if integrations[i].CreatedAt.Equal(integrations[j].CreatedAt) {

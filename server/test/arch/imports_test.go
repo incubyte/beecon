@@ -20,7 +20,11 @@ const modulePath = "beecon"
 // parsing the markdown file. Update this map when BOUNDARIES.md's "Depends
 // on" lines change. Only modules that exist under internal/ in Phase 1 are
 // listed; later phases add catalog, connections, execution, triggers,
-// delivery as their slices land.
+// delivery as their slices land. Shared-infra leaf packages (httpx, idgen,
+// config, db, and, since Phase 2 Slice 2, vault and metrics) are
+// deliberately absent: BOUNDARIES.md's shared-infra line makes them
+// importable by every module, so TestModuleImportsRespectBoundariesDependencyGraph
+// below simply skips any import whose feature name isn't a key here.
 var featureDependencies = map[string][]string{
 	"organizations": {},
 	"access":        {"organizations"},

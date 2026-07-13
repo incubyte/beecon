@@ -77,6 +77,7 @@ func outlookDefinitionAgainst(fakeMS *support.FakeMicrosoft) []catalog.ProviderD
 			TokenURL:     fakeMS.TokenURL,
 			UserInfoURL:  fakeMS.UserInfoURL,
 			Scopes:       []string{"offline_access", "Mail.Read", "User.Read"},
+			UserInfo:     catalog.UserInfoMapping{EmailField: "mail", DisplayNameField: "displayName"},
 		},
 	}
 }

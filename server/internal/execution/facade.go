@@ -86,6 +86,10 @@ func (f *Facade) callProvider(
 	if err != nil {
 		return FailureResult(CodeInvalidArguments, err.Error()), nil
 	}
+	requestBody, err := buildToolBody(tool.Mapping, arguments)
+	if err != nil {
+		return FailureResult(CodeInvalidArguments, err.Error()), nil
+	}
 
 	request := ToolCallRequest{
 		Method:      tool.Method,
@@ -93,6 +97,7 @@ func (f *Facade) callProvider(
 		AccessToken: accessToken,
 		Query:       buildToolQuery(tool.Mapping, arguments),
 		Headers:     buildToolHeaders(tool.Mapping, arguments),
+		Body:        requestBody,
 	}
 
 	started := f.now()
@@ -108,7 +113,8 @@ func (f *Facade) callProvider(
 	if response.StatusCode >= 400 {
 		return FailureResult(CodeProviderError, providerErrorMessage(response.StatusCode, response.Body)), nil
 	}
-	return SuccessResult(decodeResponseData(response.Body)), nil
+	data := decodeResponseData(response.Body)
+	return SuccessResult(data, extractNextCursor(tool.Mapping.Pagination, data)), nil
 }
 
 func providerOutcome(response ToolCallResponse, callErr error) (int, string) {
@@ -185,11 +191,15 @@ func joinBaseURLAndPath(baseURL, path string) string {
 }
 
 // buildToolQuery evaluates the tool's declared query mapping against
-// arguments: a mapping entry whose input/param was not supplied is dropped
-// (an optional argument the caller omitted). A tool with no declared query
-// mapping falls back to stringifyArguments (Phase 1's generic pass-through).
+// arguments, then applies its declared pagination's canonical pageSize/
+// cursor arguments (PD15b): a mapping entry whose input/param was not
+// supplied is dropped (an optional argument the caller omitted). A tool with
+// no declared query mapping, body mapping, or pagination at all falls back
+// to stringifyArguments (Phase 1's generic pass-through) — a tool that
+// declares only a body mapping (e.g. hubspot-create-contact) or only
+// pagination (e.g. hubspot-list-contacts) does not.
 func buildToolQuery(mapping catalog.Mapping, arguments map[string]any) map[string]string {
-	if len(mapping.Query) == 0 {
+	if len(mapping.Query) == 0 && len(mapping.Body) == 0 && mapping.Pagination == nil {
 		return stringifyArguments(arguments)
 	}
 	query := make(map[string]string, len(mapping.Query))
@@ -198,6 +208,7 @@ func buildToolQuery(mapping catalog.Mapping, arguments map[string]any) map[strin
 			query[param] = value
 		}
 	}
+	applyPaginationQuery(query, mapping.Pagination, arguments)
 	return query
 }
 
@@ -215,6 +226,46 @@ func buildToolHeaders(mapping catalog.Mapping, arguments map[string]any) map[str
 		}
 	}
 	return headers
+}
+
+// buildToolBody evaluates the tool's declared JSON body mapping against
+// arguments (PD13, Hubspot's create-contact): a mapping entry whose
+// input/param was not supplied is dropped, and a dotted key (e.g.
+// "properties.email") builds a nested JSON object. A tool with no declared
+// body mapping sends no request body at all.
+func buildToolBody(mapping catalog.Mapping, arguments map[string]any) (string, error) {
+	if len(mapping.Body) == 0 {
+		return "", nil
+	}
+	body := map[string]any{}
+	for key, expression := range mapping.Body {
+		value, ok := RenderMappedValue(expression, arguments, nil)
+		if !ok {
+			continue
+		}
+		setNestedBodyValue(body, strings.Split(key, "."), value)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// setNestedBodyValue sets value at path inside target, creating intermediate
+// nested maps as needed (e.g. path ["properties","email"] builds
+// {"properties":{"email":value}}).
+func setNestedBodyValue(target map[string]any, path []string, value string) {
+	if len(path) == 1 {
+		target[path[0]] = value
+		return
+	}
+	child, ok := target[path[0]].(map[string]any)
+	if !ok {
+		child = map[string]any{}
+		target[path[0]] = child
+	}
+	setNestedBodyValue(child, path[1:], value)
 }
 
 func providerErrorMessage(status int, body string) string {
@@ -245,6 +296,7 @@ func toolCallRequestLogBody(request ToolCallRequest) string {
 			"Authorization": "Bearer " + request.AccessToken,
 		},
 		"query": request.Query,
+		"body":  request.Body,
 	})
 	return string(body)
 }

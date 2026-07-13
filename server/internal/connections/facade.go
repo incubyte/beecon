@@ -7,6 +7,7 @@ import (
 
 	"beecon/internal/catalog"
 	"beecon/internal/organizations"
+	"beecon/internal/vault"
 )
 
 // Facade is the connections module's only public surface.
@@ -17,7 +18,7 @@ type Facade struct {
 	users        UserReader
 	integrations IntegrationReader
 	providers    ProviderDefinitionReader
-	vault        *Vault
+	vault        *vault.Vault
 	oauthClient  OAuthClient
 	recorder     Recorder
 	newID        func() string
@@ -41,7 +42,7 @@ func NewFacade(
 	users UserReader,
 	integrations IntegrationReader,
 	providers ProviderDefinitionReader,
-	vault *Vault,
+	tokenVault *vault.Vault,
 	oauthClient OAuthClient,
 	recorder Recorder,
 	newID func() string,
@@ -57,7 +58,7 @@ func NewFacade(
 		users:        users,
 		integrations: integrations,
 		providers:    providers,
-		vault:        vault,
+		vault:        tokenVault,
 		oauthClient:  oauthClient,
 		recorder:     recorder,
 		newID:        newID,

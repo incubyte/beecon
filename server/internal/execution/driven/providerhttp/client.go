@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"beecon/internal/execution"
@@ -36,22 +37,30 @@ func NewClient(httpClient *http.Client) *Client {
 
 // Call makes one bearer-authenticated HTTP request to a provider's tool
 // endpoint (PD8: GET /v1.0/me/messages on Microsoft Graph, with
-// top/skip/select/filter carried as query parameters). It returns an error
-// only when the provider could not be reached at all; a non-2xx response is
-// returned as a normal ToolCallResponse so Execute can turn it into AC7's
-// tool-level failure.
+// top/skip/select/filter carried as query parameters; PD13: a POST tool with
+// a declared body mapping, e.g. Hubspot's create-contact, carries req.Body as
+// a JSON request body). It returns an error only when the provider could not
+// be reached at all; a non-2xx response is returned as a normal
+// ToolCallResponse so Execute can turn it into AC7's tool-level failure.
 func (c *Client) Call(ctx context.Context, req execution.ToolCallRequest) (execution.ToolCallResponse, error) {
 	requestURL, err := buildRequestURL(req.URL, req.Query)
 	if err != nil {
 		return execution.ToolCallResponse{}, fmt.Errorf("build tool call url: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, req.Method, requestURL, nil)
+	var requestBody io.Reader
+	if req.Body != "" {
+		requestBody = strings.NewReader(req.Body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, req.Method, requestURL, requestBody)
 	if err != nil {
 		return execution.ToolCallResponse{}, fmt.Errorf("build tool call request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+req.AccessToken)
 	httpReq.Header.Set("Accept", "application/json")
+	if req.Body != "" {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	for name, value := range req.Headers {
 		httpReq.Header.Set(name, value)
 	}

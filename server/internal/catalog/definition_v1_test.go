@@ -230,3 +230,106 @@ func TestLoadProviderDefinitions_AcceptsAndIgnoresTheReservedTriggersKey(t *test
 		t.Fatalf("len(defs) = %d, want 1", len(defs))
 	}
 }
+
+// --- credentialStyle / userInfo (PD13/PD16, Slice 2) ---
+
+// TestLoadProviderDefinitions_DefaultsCredentialStyleToFormBodyWhenOmitted
+// pins PD13's stated default: a definition that omits oauth.credentialStyle
+// entirely (Outlook's shape, unchanged) must behave exactly as formBody.
+func TestLoadProviderDefinitions_DefaultsCredentialStyleToFormBodyWhenOmitted(t *testing.T) {
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", validDefinitionYAML))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].CredentialStyle != catalog.CredentialStyleFormBody {
+		t.Errorf("CredentialStyle = %q, want the default %q", defs[0].CredentialStyle, catalog.CredentialStyleFormBody)
+	}
+}
+
+func TestLoadProviderDefinitions_ParsesAnExplicitlyDeclaredCredentialStyle(t *testing.T) {
+	withStyle := `
+formatVersion: 1
+slug: hubspot
+name: Hubspot
+logo: https://static.beecon.dev/providers/hubspot.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://app.hubspot.com/oauth/authorize
+  tokenUrl: https://api.hubapi.com/oauth/v1/token
+  credentialStyle: basicAuth
+  scopes:
+    - crm.objects.contacts.read
+mapping:
+  baseUrl: https://api.hubapi.com
+tools:
+  - slug: hubspot-list-contacts
+    name: List contacts
+    description: List CRM contacts.
+    inputSchema:
+      type: object
+    outputSchema:
+      type: object
+    mapping:
+      method: GET
+      path: /crm/v3/objects/contacts
+`
+
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("hubspot.yaml", withStyle))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].CredentialStyle != catalog.CredentialStyleBasicAuth {
+		t.Errorf("CredentialStyle = %q, want %q", defs[0].CredentialStyle, catalog.CredentialStyleBasicAuth)
+	}
+}
+
+// TestLoadProviderDefinitions_RejectsAnInvalidCredentialStyle proves the enum
+// is validated field-precisely rather than silently accepted or defaulted.
+func TestLoadProviderDefinitions_RejectsAnInvalidCredentialStyle(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML, "oauth:\n", "oauth:\n  credentialStyle: not-a-real-style\n", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "oauth.credentialStyle" must be "formBody" or "basicAuth"`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_ParsesTheUserInfoEmailAndDisplayNameFieldMapping
+// is PD13/PD16's userInfo mapping: which field of a provider's user-info/
+// token-metadata response names the account's email and display name
+// (Hubspot's differently-shaped "user"/"hub_domain" fields, proving this is
+// generic rather than hardcoded to Outlook's "mail"/"displayName").
+func TestLoadProviderDefinitions_ParsesTheUserInfoEmailAndDisplayNameFieldMapping(t *testing.T) {
+	withUserInfo := strings.Replace(validDefinitionYAML,
+		"oauth:\n  authorizeUrl:", "oauth:\n  userInfo:\n    email: user\n    displayName: hub_domain\n  authorizeUrl:", 1)
+
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", withUserInfo))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].UserInfo.EmailField != "user" {
+		t.Errorf("UserInfo.EmailField = %q, want %q", defs[0].UserInfo.EmailField, "user")
+	}
+	if defs[0].UserInfo.DisplayNameField != "hub_domain" {
+		t.Errorf("UserInfo.DisplayNameField = %q, want %q", defs[0].UserInfo.DisplayNameField, "hub_domain")
+	}
+}
+
+// TestLoadProviderDefinitions_DefaultsUserInfoFieldsToEmptyWhenOmitted proves
+// a definition with no userInfo block at all (not every provider needs one)
+// leaves both fields empty rather than failing boot.
+func TestLoadProviderDefinitions_DefaultsUserInfoFieldsToEmptyWhenOmitted(t *testing.T) {
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", validDefinitionYAML))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].UserInfo.EmailField != "" || defs[0].UserInfo.DisplayNameField != "" {
+		t.Errorf("UserInfo = %+v, want both fields empty when the definition declares no userInfo block", defs[0].UserInfo)
+	}
+}

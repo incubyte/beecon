@@ -157,16 +157,16 @@ the catalog API rolai polls today (with the output schemas both vendors get wron
 H2's validation: provider #2 arrives as definitions, connects through the same pages,
 and runs tools — with the client-secret encryption Phase 1 deferred.
 
-- [ ] The Hubspot provider definition loads at boot — adding Hubspot introduces no provider-specific Go code, only the definition file (token-endpoint credential style is declared in the definition)
-- [ ] Installation admin can create a Hubspot Integration with OAuth client id + client secret; response includes an `intg_`-prefixed id
-- [ ] All Integration client secrets — including Phase 1's existing Outlook rows — are stored encrypted; a database dump contains no plaintext client secret
-- [ ] End user completes Hubspot OAuth through the same middle-man pages into an ACTIVE connection with a stable `conn_` id
-- [ ] The Hubspot consent redirect carries the definition's scopes and a single-use CSRF state parameter
-- [ ] The ACTIVE Hubspot connection records account metadata (user email, hub domain) visible via get-connection
-- [ ] When the user denies consent at Hubspot, the browser returns to the consumer's redirectUri with an error status and the connection stays INITIATED
-- [ ] Consumer can execute `hubspot-list-contacts` and receive `{successful: true, error: null, data}` with the contacts
-- [ ] `hubspot-list-contacts` accepts canonical `pageSize`/`cursor` inputs and returns a `nextCursor` that fetches the following page
-- [ ] Consumer can execute `hubspot-create-contact` and receive the created contact (proves JSON body mapping); upstream Hubspot errors surface as `{successful: false, error, data: null}` with the provider's status and message
+- [x] The Hubspot provider definition loads at boot — adding Hubspot introduces no provider-specific Go code, only the definition file (token-endpoint credential style is declared in the definition)
+- [x] Installation admin can create a Hubspot Integration with OAuth client id + client secret; response includes an `intg_`-prefixed id
+- [x] All Integration client secrets — including Phase 1's existing Outlook rows — are stored encrypted; a database dump contains no plaintext client secret
+- [x] End user completes Hubspot OAuth through the same middle-man pages into an ACTIVE connection with a stable `conn_` id
+- [x] The Hubspot consent redirect carries the definition's scopes and a single-use CSRF state parameter
+- [x] The ACTIVE Hubspot connection records account metadata (user email, hub domain) visible via get-connection
+- [x] When the user denies consent at Hubspot, the browser returns to the consumer's redirectUri with an error status and the connection stays INITIATED
+- [x] Consumer can execute `hubspot-list-contacts` and receive `{successful: true, error: null, data}` with the contacts
+- [x] `hubspot-list-contacts` accepts canonical `pageSize`/`cursor` inputs and returns a `nextCursor` that fetches the following page
+- [x] Consumer can execute `hubspot-create-contact` and receive the created contact (proves JSON body mapping); upstream Hubspot errors surface as `{successful: false, error, data: null}` with the provider's status and message
 
 ## Slice 3 — Ask before auth: expected pre-auth params + param-collection page
 

@@ -7,9 +7,12 @@ import "context"
 // organization in the installation) — there is no organization id to filter
 // by, mirroring organizations.Repository's own installation-level scope.
 // FindByID returns (nil, nil) on a miss; the facade translates that into
-// ErrIntegrationNotFound.
+// ErrIntegrationNotFound. UpdateEncryptedClientSecret persists the boot
+// backfill's re-sealed ciphertext for a row that predates the vault (PD17) —
+// it never receives a plaintext value.
 type Repository interface {
 	Save(ctx context.Context, integration Integration) error
 	FindByID(ctx context.Context, id IntegrationID) (*Integration, error)
 	ListAll(ctx context.Context) ([]Integration, error)
+	UpdateEncryptedClientSecret(ctx context.Context, id IntegrationID, encryptedClientSecret string) error
 }

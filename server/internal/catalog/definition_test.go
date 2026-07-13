@@ -255,16 +255,29 @@ func TestLoadProviderDefinitions_FailsOnUnparsableYAML(t *testing.T) {
 	}
 }
 
+// findDefinitionBySlug locates one loaded ProviderDefinition by slug —
+// DefaultProviderDefinitions() loads every embedded provider file (Outlook
+// and, since Slice 2, Hubspot), so tests that care about one provider's own
+// shape look it up by slug rather than assuming it is the only one loaded.
+func findDefinitionBySlug(defs []catalog.ProviderDefinition, slug string) (catalog.ProviderDefinition, bool) {
+	for _, d := range defs {
+		if d.Slug == slug {
+			return d, true
+		}
+	}
+	return catalog.ProviderDefinition{}, false
+}
+
 func TestDefaultProviderDefinitions_LoadsTheEmbeddedOutlookDefinition(t *testing.T) {
 	defs, err := catalog.DefaultProviderDefinitions()
 
 	if err != nil {
 		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
 	}
-	if len(defs) != 1 {
-		t.Fatalf("len(defs) = %d, want 1 (the bundled Outlook definition)", len(defs))
+	outlook, ok := findDefinitionBySlug(defs, "outlook")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled Outlook definition", defs)
 	}
-	outlook := defs[0]
 	if outlook.Slug != "outlook" {
 		t.Errorf("Slug = %q, want %q", outlook.Slug, "outlook")
 	}
@@ -282,5 +295,64 @@ func TestDefaultProviderDefinitions_LoadsTheEmbeddedOutlookDefinition(t *testing
 	}
 	if !foundListMessages {
 		t.Errorf("Tools = %+v, want it to include the outlook-list-messages tool (PD8)", outlook.Tools)
+	}
+}
+
+// TestDefaultProviderDefinitions_LoadsTheEmbeddedHubspotDefinition is AC1: the
+// second provider arrives purely as a definition file — no provider-specific
+// Go code was added to parse credentialStyle/userInfo generically (PD13,
+// PD16) or to make hubspot-list-contacts/hubspot-create-contact executable.
+func TestDefaultProviderDefinitions_LoadsTheEmbeddedHubspotDefinition(t *testing.T) {
+	defs, err := catalog.DefaultProviderDefinitions()
+
+	if err != nil {
+		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
+	}
+	hubspot, ok := findDefinitionBySlug(defs, "hubspot")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled Hubspot definition", defs)
+	}
+	if hubspot.Name != "Hubspot" {
+		t.Errorf("Name = %q, want %q", hubspot.Name, "Hubspot")
+	}
+	if hubspot.AuthorizeURL == "" || hubspot.TokenURL == "" {
+		t.Error("AuthorizeURL/TokenURL must not be empty for the bundled Hubspot definition")
+	}
+	if hubspot.CredentialStyle != catalog.CredentialStyleFormBody {
+		t.Errorf("CredentialStyle = %q, want %q (declared explicitly in hubspot.yaml)", hubspot.CredentialStyle, catalog.CredentialStyleFormBody)
+	}
+	if hubspot.UserInfo.EmailField != "user" {
+		t.Errorf("UserInfo.EmailField = %q, want %q", hubspot.UserInfo.EmailField, "user")
+	}
+	if hubspot.UserInfo.DisplayNameField != "hub_domain" {
+		t.Errorf("UserInfo.DisplayNameField = %q, want %q", hubspot.UserInfo.DisplayNameField, "hub_domain")
+	}
+
+	wantTools := map[string]bool{"hubspot-list-contacts": false, "hubspot-create-contact": false, "hubspot-upload-file": false}
+	for _, tool := range hubspot.Tools {
+		if _, declared := wantTools[tool.Slug]; declared {
+			wantTools[tool.Slug] = true
+		}
+		if tool.Slug == "hubspot-list-contacts" {
+			if tool.Mapping.Pagination == nil {
+				t.Fatal("hubspot-list-contacts declares no Mapping.Pagination, want one (PD15b)")
+			}
+			if tool.Mapping.Pagination.PageSizeParam != "limit" || tool.Mapping.Pagination.CursorParam != "after" {
+				t.Errorf("Pagination = %+v, want PageSizeParam=limit, CursorParam=after", tool.Mapping.Pagination)
+			}
+			if tool.Mapping.Pagination.NextCursorPath != "paging.next.after" {
+				t.Errorf("NextCursorPath = %q, want %q", tool.Mapping.Pagination.NextCursorPath, "paging.next.after")
+			}
+		}
+		if tool.Slug == "hubspot-create-contact" {
+			if tool.Mapping.Body["properties.email"] != "{input.email}" {
+				t.Errorf(`Mapping.Body["properties.email"] = %q, want %q`, tool.Mapping.Body["properties.email"], "{input.email}")
+			}
+		}
+	}
+	for slug, found := range wantTools {
+		if !found {
+			t.Errorf("Tools = %+v, want it to include %q", hubspot.Tools, slug)
+		}
 	}
 }

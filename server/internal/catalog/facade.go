@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"beecon/internal/organizations"
+	"beecon/internal/vault"
 )
 
 // defaultToolPageLimit and maxToolPageLimit bound ListTools' page size
@@ -23,28 +24,36 @@ type Facade struct {
 	definitions map[string]ProviderDefinition
 	newID       func() string
 	now         func() time.Time
+	vault       *vault.Vault
 }
 
 // NewFacade wires the facade with the installation's loaded provider
-// definitions (AC1), an injected id minter, and a clock so tests can supply
-// deterministic ids and a fixed time.
-func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() string, now func() time.Time) *Facade {
+// definitions (AC1), an injected id minter, a clock so tests can supply
+// deterministic ids and a fixed time, and the shared vault (PD17) every
+// Integration client secret is encrypted under.
+func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() string, now func() time.Time, tokenVault *vault.Vault) *Facade {
 	byslug := make(map[string]ProviderDefinition, len(definitions))
 	for _, d := range definitions {
 		byslug[d.Slug] = d
 	}
-	return &Facade{repo: repo, definitions: byslug, newID: newID, now: now}
+	return &Facade{repo: repo, definitions: byslug, newID: newID, now: now, vault: tokenVault}
 }
 
 // CreateIntegration validates providerSlug against a loaded
 // ProviderDefinition and persists a new Integration carrying the
-// installation's OAuth client credentials. The returned summary never
-// carries clientSecret (AC4: it appears in no API response after creation).
+// installation's OAuth client credentials, encrypted under the vault before
+// it is ever handed to the repository (PD17: only ciphertext is persisted).
+// The returned summary never carries clientSecret (AC4: it appears in no API
+// response after creation).
 func (f *Facade) CreateIntegration(ctx context.Context, providerSlug, clientID, clientSecret string) (IntegrationSummary, error) {
 	if _, ok := f.definitions[providerSlug]; !ok {
 		return IntegrationSummary{}, ErrUnknownProvider(providerSlug)
 	}
-	integration := NewIntegration(IntegrationID(f.newID()), providerSlug, clientID, clientSecret, f.now())
+	encryptedSecret, err := f.vault.Encrypt(clientSecret)
+	if err != nil {
+		return IntegrationSummary{}, err
+	}
+	integration := NewIntegration(IntegrationID(f.newID()), providerSlug, clientID, encryptedSecret, f.now())
 	if err := f.repo.Save(ctx, integration); err != nil {
 		return IntegrationSummary{}, err
 	}
@@ -52,8 +61,11 @@ func (f *Facade) CreateIntegration(ctx context.Context, providerSlug, clientID, 
 }
 
 // GetIntegration fetches an Integration by id, translating a repository miss
-// into ErrIntegrationNotFound. Integrations are installation-level (PD7), so
-// this takes no organization id.
+// into ErrIntegrationNotFound, and decrypts its client secret before
+// returning it (PD17) — every caller of this port (the connections module's
+// OAuth handshake among them) keeps receiving the plaintext it always did;
+// only the vault boundary moved. Integrations are installation-level (PD7),
+// so this takes no organization id.
 func (f *Facade) GetIntegration(ctx context.Context, id IntegrationID) (Integration, error) {
 	integration, err := f.repo.FindByID(ctx, id)
 	if err != nil {
@@ -62,7 +74,49 @@ func (f *Facade) GetIntegration(ctx context.Context, id IntegrationID) (Integrat
 	if integration == nil {
 		return Integration{}, ErrIntegrationNotFound()
 	}
-	return *integration, nil
+	return f.withDecryptedClientSecret(*integration)
+}
+
+// EncryptPlaintextClientSecrets encrypts every Integration client secret
+// still stored in plaintext (PD17: Phase 1 rows created before the vault
+// existed) and persists the ciphertext, flipping ClientSecretEncrypted. It is
+// idempotent — a row already marked ClientSecretEncrypted is left untouched
+// — so it is safe to call once at every boot (app/wiring.go, after
+// db.Migrate) regardless of how many times the installation has restarted.
+func (f *Facade) EncryptPlaintextClientSecrets(ctx context.Context) error {
+	integrations, err := f.repo.ListAll(ctx)
+	if err != nil {
+		return err
+	}
+	for _, integration := range integrations {
+		if integration.ClientSecretEncrypted {
+			continue
+		}
+		encrypted, err := f.vault.Encrypt(integration.ClientSecret)
+		if err != nil {
+			return err
+		}
+		if err := f.repo.UpdateEncryptedClientSecret(ctx, integration.ID, encrypted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// withDecryptedClientSecret returns a copy of integration with ClientSecret
+// decrypted to plaintext when it is vault ciphertext. An integration not yet
+// marked ClientSecretEncrypted (only possible for the brief window before
+// EncryptPlaintextClientSecrets' boot backfill runs) is returned unchanged.
+func (f *Facade) withDecryptedClientSecret(integration Integration) (Integration, error) {
+	if !integration.ClientSecretEncrypted {
+		return integration, nil
+	}
+	plaintext, err := f.vault.Decrypt(integration.ClientSecret)
+	if err != nil {
+		return Integration{}, err
+	}
+	integration.ClientSecret = plaintext
+	return integration, nil
 }
 
 // ListIntegrations returns every integration in the installation (PD7: every

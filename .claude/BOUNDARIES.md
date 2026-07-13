@@ -5,6 +5,7 @@
 
 ## Modules
 
+- `server/internal/{httpx,idgen,config,db,vault,metrics}` — shared infrastructure leaf packages; importable by any module; import no domain module.
 - `organizations/` — owns: Organization, User, org governance rules, data-isolation policy. Depends on: (none)
 - `access/` — owns: ServerApiKey, UserToken, WebhookSigningSecret, key verification and rotation. Depends on: organizations
 - `catalog/` — owns: Provider, Integration, Tool, Mapping, TriggerDefinition, definition bundles and versions, registry-sync (import/diff/activate). Depends on: organizations

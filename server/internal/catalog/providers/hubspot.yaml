@@ -1,0 +1,137 @@
+# Hubspot provider definition, finalized format v1 (PD13). H2's second
+# provider: everything below is declarative — no provider-specific Go code
+# was added to ship it (Slice 2, AC1).
+formatVersion: 1
+slug: hubspot
+name: Hubspot
+logo: https://static.beecon.dev/providers/hubspot.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://app.hubspot.com/oauth/authorize
+  tokenUrl: https://api.hubapi.com/oauth/v1/token
+  # Hubspot's token endpoint takes client_id/client_secret in the form body,
+  # same as Outlook's — declared explicitly here even though it also matches
+  # the format's default (PD16).
+  credentialStyle: formBody
+  # Hubspot's token-metadata endpoint takes the access token embedded in the
+  # URL path rather than (only) a bearer header; {accessToken} is substituted
+  # by the OAuth callback's generic account-fetch mechanism (PD9, PD16).
+  userInfoUrl: https://api.hubapi.com/oauth/v1/access-tokens/{accessToken}
+  scopes:
+    - crm.objects.contacts.read
+    - crm.objects.contacts.write
+    - files
+  # Hubspot's token-metadata response carries the connected user's email
+  # under "user" and the connected account's domain under "hub_domain" — read
+  # into the same two account-metadata columns Outlook's mail/displayName
+  # already populate (PD16).
+  userInfo:
+    email: user
+    displayName: hub_domain
+mapping:
+  baseUrl: https://api.hubapi.com
+tools:
+  - slug: hubspot-list-contacts
+    name: List contacts
+    description: List CRM contacts, cursor-paginated.
+    inputSchema:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          description: Maximum number of contacts to return in this page.
+        cursor:
+          type: string
+          description: Opaque pagination cursor from a previous page's nextCursor.
+    outputSchema:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              properties:
+                type: object
+        paging:
+          type: object
+    mapping:
+      method: GET
+      path: /crm/v3/objects/contacts
+      # Canonical pageSize/cursor call arguments (PD15b) map onto Hubspot's
+      # own limit/after query parameters; the following page's cursor is read
+      # back out of the response at paging.next.after into the envelope's
+      # top-level nextCursor.
+      pagination:
+        pageSizeParam: limit
+        cursorParam: after
+        nextCursorPath: paging.next.after
+
+  - slug: hubspot-create-contact
+    name: Create contact
+    description: Create a CRM contact.
+    inputSchema:
+      type: object
+      properties:
+        email:
+          type: string
+          description: The contact's email address.
+        firstname:
+          type: string
+          description: The contact's first name.
+        lastname:
+          type: string
+          description: The contact's last name.
+      required:
+        - email
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        properties:
+          type: object
+    mapping:
+      method: POST
+      path: /crm/v3/objects/contacts
+      # Dotted body keys build the nested {"properties": {...}} JSON shape
+      # Hubspot's contacts API requires from the tool's flat inputSchema
+      # (proves JSON body mapping, PD16).
+      body:
+        properties.email: "{input.email}"
+        properties.firstname: "{input.firstname}"
+        properties.lastname: "{input.lastname}"
+
+  - slug: hubspot-upload-file
+    name: Upload file
+    description: Upload a file to Hubspot's file manager.
+    inputSchema:
+      type: object
+      properties:
+        file:
+          type: string
+          description: >-
+            The id of a previously uploaded Beecon file (file_...); resolved
+            to its stored bytes and streamed to Hubspot as multipart form
+            data.
+      required:
+        - file
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+    mapping:
+      method: POST
+      path: /files/v3/files
+      # file-typed input: the multipart upload/file-resolution wiring itself
+      # is a Slice 7 concern (FileUpload behind execution's storage port);
+      # this definition only needs to parse and validate today (Slice 2, PD22).
+      fileInputs:
+        - file
