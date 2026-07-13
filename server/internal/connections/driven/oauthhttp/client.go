@@ -38,10 +38,14 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{httpClient: httpClient}
 }
 
-// tokenExchangeResponse is the authorization_code grant's JSON shape.
+// tokenExchangeResponse is a token endpoint's JSON shape, shared by the
+// authorization_code and refresh_token grants: ExpiresIn (PD18) is the
+// access token's lifetime in seconds, absent (0) when a provider doesn't
+// report one.
 type tokenExchangeResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
 }
 
 // ExchangeCode completes the authorization_code grant against req.TokenURL:
@@ -54,42 +58,79 @@ func (c *Client) ExchangeCode(ctx context.Context, req connections.TokenExchange
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", req.Code)
 	form.Set("redirect_uri", req.RedirectURI)
-	if req.CredentialStyle != connections.CredentialStyleBasicAuth {
-		form.Set("client_id", req.ClientID)
-		form.Set("client_secret", req.ClientSecret)
+
+	body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
+	if err != nil {
+		return connections.TokenExchangeResult{}, err
+	}
+	return tokenExchangeResultFrom(body), nil
+}
+
+// RefreshGrant completes a refresh_token grant against req.TokenURL (PD18):
+// the same credential-style-aware client authentication ExchangeCode uses,
+// carrying a stored refresh token instead of a fresh authorization code. A
+// response with an empty refresh_token means the provider did not rotate
+// it — the caller keeps the one it already has (AC8's other branch).
+func (c *Client) RefreshGrant(ctx context.Context, req connections.RefreshGrantRequest) (connections.TokenExchangeResult, error) {
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", req.RefreshToken)
+
+	body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
+	if err != nil {
+		return connections.TokenExchangeResult{}, err
+	}
+	return tokenExchangeResultFrom(body), nil
+}
+
+// doTokenGrant executes one token-endpoint round trip: form already carries
+// the grant's own fields (grant_type plus either code/redirect_uri or
+// refresh_token); credentialStyle decides whether clientID/clientSecret ride
+// in form or an HTTP Basic Authorization header (PD13) — shared by
+// ExchangeCode's authorization_code grant and RefreshGrant's refresh_token
+// grant, which differ only in which grant fields the form carries.
+func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Values, credentialStyle, clientID, clientSecret string) (tokenExchangeResponse, error) {
+	if credentialStyle != connections.CredentialStyleBasicAuth {
+		form.Set("client_id", clientID)
+		form.Set("client_secret", clientSecret)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, req.TokenURL, strings.NewReader(form.Encode()))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return connections.TokenExchangeResult{}, fmt.Errorf("build token exchange request: %w", err)
+		return tokenExchangeResponse{}, fmt.Errorf("build token grant request: %w", err)
 	}
-	if req.CredentialStyle == connections.CredentialStyleBasicAuth {
-		httpReq.SetBasicAuth(req.ClientID, req.ClientSecret)
+	if credentialStyle == connections.CredentialStyleBasicAuth {
+		httpReq.SetBasicAuth(clientID, clientSecret)
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return connections.TokenExchangeResult{}, fmt.Errorf("call token endpoint: %w", err)
+		return tokenExchangeResponse{}, fmt.Errorf("call token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return connections.TokenExchangeResult{}, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
+		return tokenExchangeResponse{}, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
 	}
 
 	var body tokenExchangeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return connections.TokenExchangeResult{}, fmt.Errorf("decode token exchange response: %w", err)
+		return tokenExchangeResponse{}, fmt.Errorf("decode token endpoint response: %w", err)
 	}
 	if body.AccessToken == "" {
-		return connections.TokenExchangeResult{}, errors.New("token exchange response carried no access_token")
+		return tokenExchangeResponse{}, errors.New("token endpoint response carried no access_token")
 	}
+	return body, nil
+}
+
+func tokenExchangeResultFrom(body tokenExchangeResponse) connections.TokenExchangeResult {
 	return connections.TokenExchangeResult{
 		AccessToken:  body.AccessToken,
 		RefreshToken: body.RefreshToken,
-	}, nil
+		ExpiresIn:    body.ExpiresIn,
+	}
 }
 
 // accessTokenURLPlaceholder is a userInfoUrl token a provider definition may

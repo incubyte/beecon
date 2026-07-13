@@ -73,7 +73,12 @@ type CallbackOutcome struct {
 // validateConnectToken looks up the connect token's connection and rejects
 // an invalid, expired, or already-completed connect link (AC2) before it
 // ever reaches the provider — shared by OpenConnectPage and SubmitParams so
-// both entry points into the connect flow enforce the same rules.
+// both entry points into the connect flow enforce the same rules. The
+// already-completed and expired checks key off ConnectTokenUsed and
+// ConnectTokenExpiresAt rather than the connection's overall Status, so a
+// Reconnect attempt (Slice 4, PD19) can run this exact handshake again
+// without validateConnectToken mistaking a previously ACTIVE/EXPIRED/
+// DISCONNECTED connection for one whose handshake already finished.
 func (f *Facade) validateConnectToken(ctx context.Context, token string) (*Connection, error) {
 	connection, err := f.oauthRepo.FindByConnectToken(ctx, token)
 	if err != nil {
@@ -82,10 +87,10 @@ func (f *Facade) validateConnectToken(ctx context.Context, token string) (*Conne
 	if connection == nil {
 		return nil, ErrConnectLinkInvalid()
 	}
-	if connection.Status != StatusInitiated {
+	if connection.ConnectTokenUsed {
 		return nil, ErrConnectLinkAlreadyCompleted()
 	}
-	if f.now().Sub(connection.CreatedAt) > ConnectLinkTTL {
+	if f.now().After(connection.ConnectTokenExpiresAt) {
 		return nil, ErrConnectLinkExpired()
 	}
 	return connection, nil
@@ -305,7 +310,7 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 
 	started := f.now()
 	tokens, account, exchangeErr := f.exchangeTokensAndFetchAccount(ctx, request, definition)
-	f.recordTokenExchange(ctx, connection, started, request, tokens, exchangeErr)
+	f.recordExchange(ctx, connection, started, tokenExchangeRequestLogBody(request), tokens, exchangeErr)
 	if exchangeErr != nil {
 		return Connection{}, ErrTokenExchangeFailed()
 	}
@@ -319,7 +324,8 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 		return Connection{}, err
 	}
 
-	return connection.Activate(encryptedAccessToken, encryptedRefreshToken, account.Email, account.DisplayName), nil
+	tokenExpiresAt := tokenExpiryFrom(f.now(), tokens.ExpiresIn)
+	return connection.Activate(encryptedAccessToken, encryptedRefreshToken, account.Email, account.DisplayName, tokenExpiresAt), nil
 }
 
 // exchangeTokensAndFetchAccount performs the two upstream calls the token
@@ -345,11 +351,14 @@ func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request Toke
 	return tokens, account, nil
 }
 
-// recordTokenExchange writes one log entry for a completed or failed token
-// exchange (AC8). A nil recorder (no logging module wired) is a silent
-// no-op; a recorder error never fails the OAuth handshake itself — logging
-// is observability, not a precondition of the primary operation.
-func (f *Facade) recordTokenExchange(ctx context.Context, connection Connection, started time.Time, request TokenExchangeRequest, tokens TokenExchangeResult, exchangeErr error) {
+// recordExchange writes one log entry for a completed or failed OAuth grant
+// — the authorization_code exchange (oauth.go) or a refresh_token grant
+// (refresh.go, PD18) — under the same Recorder port (AC8; Slice 4's refresh
+// reuses it as an oauth_token_exchange entry too, so the same code/token
+// redaction applies). A nil recorder (no logging module wired) is a silent
+// no-op; a recorder error never fails the operation itself — logging is
+// observability, not a precondition of the primary operation.
+func (f *Facade) recordExchange(ctx context.Context, connection Connection, started time.Time, requestBody string, tokens TokenExchangeResult, exchangeErr error) {
 	if f.recorder == nil {
 		return
 	}
@@ -365,7 +374,7 @@ func (f *Facade) recordTokenExchange(ctx context.Context, connection Connection,
 		ConnectionID: connection.ID,
 		Status:       status,
 		DurationMs:   f.now().Sub(started).Milliseconds(),
-		RequestBody:  tokenExchangeRequestLogBody(request),
+		RequestBody:  requestBody,
 		ResponseBody: responseBody,
 	})
 }

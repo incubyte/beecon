@@ -76,6 +76,16 @@ type fakeConnectionReader struct {
 	lastResolvedOrg   organizations.OrgID
 	lastResolvedUser  organizations.UserID
 	lastResolvedConID connections.ConnectionID
+
+	// refreshAccess/refreshErr script RefreshForExecution's own result
+	// (Slice 4's PD18 retry path) independently of ResolveForExecution's —
+	// left unset, RefreshForExecution falls back to whatever access map
+	// entry ResolveForExecution would have returned, so a test that doesn't
+	// care about refresh at all still exercises a 401-then-retry with the
+	// same scripted response.
+	refreshAccess    map[connections.ConnectionID]connections.ExecutionAccess
+	refreshErr       error
+	refreshCallCount int
 }
 
 func (f *fakeConnectionReader) ResolveForExecution(_ context.Context, org organizations.OrgID, userID organizations.UserID, id connections.ConnectionID) (connections.ExecutionAccess, error) {
@@ -85,6 +95,24 @@ func (f *fakeConnectionReader) ResolveForExecution(_ context.Context, org organi
 	f.lastResolvedConID = id
 	if f.notFoundIDs[id] {
 		return connections.ExecutionAccess{}, connections.ErrNotFound()
+	}
+	access, ok := f.access[id]
+	if !ok {
+		return connections.ExecutionAccess{}, connections.ErrNotFound()
+	}
+	return access, nil
+}
+
+func (f *fakeConnectionReader) RefreshForExecution(_ context.Context, _ organizations.OrgID, _ organizations.UserID, id connections.ConnectionID) (connections.ExecutionAccess, error) {
+	f.refreshCallCount++
+	if f.notFoundIDs[id] {
+		return connections.ExecutionAccess{}, connections.ErrNotFound()
+	}
+	if f.refreshErr != nil {
+		return connections.ExecutionAccess{}, f.refreshErr
+	}
+	if access, ok := f.refreshAccess[id]; ok {
+		return access, nil
 	}
 	access, ok := f.access[id]
 	if !ok {
@@ -126,6 +154,27 @@ func messagesResponse() execution.ToolCallResponse {
 		StatusCode: 200,
 		Body:       `{"value":[{"id":"msg-1","subject":"Hello"}]}`,
 	}
+}
+
+// fakeSequencedProviderClient returns one scripted ToolCallResponse per call,
+// in order (and repeats the last one if called more times than scripted) —
+// Slice 4's 401-then-retry path needs a provider that can behave differently
+// on its first call and its retried call, which fakeProviderClient's single
+// fixed response can't express.
+type fakeSequencedProviderClient struct {
+	responses []execution.ToolCallResponse
+	callCount int
+	requests  []execution.ToolCallRequest
+}
+
+func (f *fakeSequencedProviderClient) Call(_ context.Context, req execution.ToolCallRequest) (execution.ToolCallResponse, error) {
+	f.requests = append(f.requests, req)
+	index := f.callCount
+	if index >= len(f.responses) {
+		index = len(f.responses) - 1
+	}
+	f.callCount++
+	return f.responses[index], nil
 }
 
 // fakeRecorder is a hand-written execution.Recorder: records every entry
@@ -543,6 +592,173 @@ func TestExecute_TheRawAccessTokenNeverAppearsInTheSuccessfulResult(t *testing.T
 	}
 	if data, ok := result.Data.(string); ok && strings.Contains(data, rawAccessToken) {
 		t.Fatalf("Data contains the raw access token: %v", result.Data)
+	}
+}
+
+// --- Slice 4: PD18's reactive refresh path (a provider 401 triggers exactly
+// one refresh, then exactly one retried call) ---
+
+func TestExecute_A401ResponseTriggersExactlyOneRefreshAndOneRetriedCallThatSucceeds(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		{StatusCode: 401, Body: `{"error":"invalid_token"}`},
+		messagesResponse(),
+	}}
+	connReader := &fakeConnectionReader{
+		access: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "stale-access-token"},
+		},
+		refreshAccess: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "refreshed-access-token"},
+		},
+	}
+	f := execution.NewFacade(newFakeToolReader(), connReader, provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true after a successful retry; Error = %+v", result.Error)
+	}
+	if connReader.refreshCallCount != 1 {
+		t.Errorf("refreshCallCount = %d, want exactly 1", connReader.refreshCallCount)
+	}
+	if provider.callCount != 2 {
+		t.Errorf("provider was called %d times, want exactly 2 (the original 401 plus one retry)", provider.callCount)
+	}
+}
+
+// TestExecute_TheRetriedCallUsesTheRefreshedAccessToken proves the retry
+// carries the connection's newly refreshed token, not the stale one that
+// triggered the 401.
+func TestExecute_TheRetriedCallUsesTheRefreshedAccessToken(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		{StatusCode: 401, Body: "unauthorized"},
+		messagesResponse(),
+	}}
+	connReader := &fakeConnectionReader{
+		access: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "stale-access-token"},
+		},
+		refreshAccess: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "refreshed-access-token"},
+		},
+	}
+	f := execution.NewFacade(newFakeToolReader(), connReader, provider, nil, fixedClock(time.Now()))
+
+	if _, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider received %d requests, want 2", len(provider.requests))
+	}
+	if provider.requests[0].AccessToken != "stale-access-token" {
+		t.Errorf("first request's AccessToken = %q, want the original stale token", provider.requests[0].AccessToken)
+	}
+	if provider.requests[1].AccessToken != "refreshed-access-token" {
+		t.Errorf("retried request's AccessToken = %q, want the freshly refreshed token", provider.requests[1].AccessToken)
+	}
+}
+
+// TestExecute_ANon401UpstreamErrorNeverTriggersARefresh is the coder's own
+// flagged concern: only a 401 triggers PD18's reactive refresh.
+func TestExecute_ANon401UpstreamErrorNeverTriggersARefresh(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		{StatusCode: 500, Body: "internal server error"},
+	}}
+	connReader := activeConnectionReader()
+	f := execution.NewFacade(newFakeToolReader(), connReader, provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Successful {
+		t.Fatal("Successful = true, want false for a 500 upstream response")
+	}
+	if connReader.refreshCallCount != 0 {
+		t.Errorf("refreshCallCount = %d, want 0 — only a 401 may trigger a reactive refresh", connReader.refreshCallCount)
+	}
+	if provider.callCount != 1 {
+		t.Errorf("provider was called %d times, want exactly 1 — a non-401 error must never be retried", provider.callCount)
+	}
+}
+
+// TestExecute_WhenTheRefreshedConnectionIsNoLongerActiveReturnsTheStatusExplainingFailureWithoutRetrying
+// is AC9's execution-facing half: a refresh that leaves the connection
+// EXPIRED (e.g. a revoked refresh token) must report the same status-
+// explaining tool-level failure a non-ACTIVE connection produces up front,
+// and must never retry the call.
+func TestExecute_WhenTheRefreshedConnectionIsNoLongerActiveReturnsTheStatusExplainingFailureWithoutRetrying(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		{StatusCode: 401, Body: "unauthorized"},
+	}}
+	connReader := &fakeConnectionReader{
+		access: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "stale-access-token"},
+		},
+		refreshAccess: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusExpired},
+		},
+	}
+	f := execution.NewFacade(newFakeToolReader(), connReader, provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected platform-level error: %v", err)
+	}
+	if result.Successful {
+		t.Fatal("Successful = true, want false when the refresh leaves the connection EXPIRED")
+	}
+	if result.Error == nil || result.Error.Code != execution.CodeConnectionNotActive {
+		t.Fatalf("Error = %+v, want code %q", result.Error, execution.CodeConnectionNotActive)
+	}
+	if !strings.Contains(result.Error.Message, "EXPIRED") {
+		t.Errorf("Error.Message = %q, want it to explain the connection's actual status", result.Error.Message)
+	}
+	if provider.callCount != 1 {
+		t.Errorf("provider was called %d times, want exactly 1 — a connection left non-ACTIVE by the refresh must never be retried", provider.callCount)
+	}
+}
+
+// TestExecute_RetriesAtMostOnceEvenWhenTheRetriedCallAlsoReturns401 proves
+// there is no second refresh and no loop: the retried call's own 401 is
+// surfaced as a normal upstream error.
+func TestExecute_RetriesAtMostOnceEvenWhenTheRetriedCallAlsoReturns401(t *testing.T) {
+	provider := &fakeSequencedProviderClient{responses: []execution.ToolCallResponse{
+		{StatusCode: 401, Body: "unauthorized"},
+		{StatusCode: 401, Body: "still unauthorized"},
+	}}
+	connReader := &fakeConnectionReader{
+		access: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "stale-access-token"},
+		},
+		refreshAccess: map[connections.ConnectionID]connections.ExecutionAccess{
+			testConnectionID: {Status: connections.StatusActive, AccessToken: "refreshed-access-token"},
+		},
+	}
+	f := execution.NewFacade(newFakeToolReader(), connReader, provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Successful {
+		t.Fatal("Successful = true, want false — the retried call's own 401 must surface as a failure")
+	}
+	if result.Error == nil || result.Error.Code != execution.CodeProviderError {
+		t.Fatalf("Error = %+v, want code %q", result.Error, execution.CodeProviderError)
+	}
+	if connReader.refreshCallCount != 1 {
+		t.Errorf("refreshCallCount = %d, want exactly 1 — a second 401 on the retry must never trigger a second refresh", connReader.refreshCallCount)
+	}
+	if provider.callCount != 2 {
+		t.Errorf("provider was called %d times, want exactly 2 (no further retries)", provider.callCount)
 	}
 }
 

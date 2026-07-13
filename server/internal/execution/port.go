@@ -22,9 +22,13 @@ type ToolReader interface {
 // cross-org, or cross-user is not-found (AC5, AC6) — before it ever calls
 // the provider, and needs the connection's current status and (only when
 // ACTIVE) its decrypted access token. Decryption happens inside connections;
-// the vault stays private to that module.
+// the vault stays private to that module. RefreshForExecution is PD18's
+// reactive path (Slice 4): Execute calls it after a provider 401, forcing
+// one refresh_token grant regardless of the connection's stored expiry, and
+// retries the provider call exactly once with the result.
 type ConnectionReader interface {
 	ResolveForExecution(ctx context.Context, org organizations.OrgID, userID organizations.UserID, id connections.ConnectionID) (connections.ExecutionAccess, error)
+	RefreshForExecution(ctx context.Context, org organizations.OrgID, userID organizations.UserID, id connections.ConnectionID) (connections.ExecutionAccess, error)
 }
 
 // ToolCallRequest is everything ProviderClient needs to make one HTTP call

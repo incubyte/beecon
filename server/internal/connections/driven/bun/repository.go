@@ -20,20 +20,23 @@ import (
 type ConnectionRow struct {
 	upstreambun.BaseModel `bun:"table:connections,alias:c"`
 
-	ID                    string    `bun:"id,pk"`
-	OrgID                 string    `bun:"org_id,notnull"`
-	UserID                string    `bun:"user_id,notnull"`
-	IntegrationID         string    `bun:"integration_id,notnull"`
-	ProviderSlug          string    `bun:"provider_slug,notnull"`
-	Status                string    `bun:"status,notnull"`
-	RedirectURI           string    `bun:"redirect_uri,notnull"`
-	ConnectToken          string    `bun:"connect_token,notnull"`
-	EncryptedAccessToken  string    `bun:"encrypted_access_token,notnull"`
-	EncryptedRefreshToken string    `bun:"encrypted_refresh_token,notnull"`
-	AccountEmail          string    `bun:"account_email,notnull"`
-	AccountDisplayName    string    `bun:"account_display_name,notnull"`
-	EncryptedParams       string    `bun:"encrypted_params,notnull"`
-	CreatedAt             time.Time `bun:"created_at,notnull"`
+	ID                    string     `bun:"id,pk"`
+	OrgID                 string     `bun:"org_id,notnull"`
+	UserID                string     `bun:"user_id,notnull"`
+	IntegrationID         string     `bun:"integration_id,notnull"`
+	ProviderSlug          string     `bun:"provider_slug,notnull"`
+	Status                string     `bun:"status,notnull"`
+	RedirectURI           string     `bun:"redirect_uri,notnull"`
+	ConnectToken          string     `bun:"connect_token,notnull"`
+	ConnectTokenExpiresAt time.Time  `bun:"connect_token_expires_at,notnull"`
+	ConnectTokenUsed      bool       `bun:"connect_token_used,notnull"`
+	EncryptedAccessToken  string     `bun:"encrypted_access_token,notnull"`
+	EncryptedRefreshToken string     `bun:"encrypted_refresh_token,notnull"`
+	TokenExpiresAt        *time.Time `bun:"token_expires_at"`
+	AccountEmail          string     `bun:"account_email,notnull"`
+	AccountDisplayName    string     `bun:"account_display_name,notnull"`
+	EncryptedParams       string     `bun:"encrypted_params,notnull"`
+	CreatedAt             time.Time  `bun:"created_at,notnull"`
 }
 
 // OAuthStateRow is the oauth_states table schema.
@@ -83,17 +86,73 @@ func (r *Repository) FindByID(ctx context.Context, org organizations.OrgID, id c
 	return &connection, nil
 }
 
-// Update persists a previously initiated Connection's mutable fields: status,
-// the OAuth callback's activation payload (encrypted tokens, account
-// metadata), and the connect page's collected pre-auth param values
-// (encrypted_params, Slice 3) — the same call SubmitParams uses to persist
-// params ahead of activation.
+// Update persists a Connection's mutable fields: status, redirect uri and
+// connect-token state (Slice 4's Reconnect mints a fresh one against the
+// same row), encrypted tokens and their expiry, account metadata, and the
+// connect page's collected pre-auth param values (encrypted_params, Slice
+// 3) — every lifecycle operation (activation, disable, refresh, reconnect)
+// goes through this one call.
 func (r *Repository) Update(ctx context.Context, connection connections.Connection) error {
 	row := rowFromConnection(connection)
 	_, err := r.db.NewUpdate().
 		Model(&row).
-		Column("status", "encrypted_access_token", "encrypted_refresh_token", "account_email", "account_display_name", "encrypted_params").
+		Column(
+			"status",
+			"redirect_uri",
+			"connect_token",
+			"connect_token_expires_at",
+			"connect_token_used",
+			"encrypted_access_token",
+			"encrypted_refresh_token",
+			"token_expires_at",
+			"account_email",
+			"account_display_name",
+			"encrypted_params",
+		).
 		Where("id = ?", row.ID).
+		Exec(ctx)
+	return err
+}
+
+// List returns Connections scoped to org (Slice 4, AC1), optionally
+// narrowed to filter.UserID, newest first (created_at DESC, id DESC as a
+// deterministic tiebreaker), limited to filter.Limit rows.
+func (r *Repository) List(ctx context.Context, org organizations.OrgID, filter connections.ListFilter) ([]connections.Connection, error) {
+	var rows []ConnectionRow
+	query := r.db.NewSelect().Model(&rows).Where("org_id = ?", string(org))
+
+	if filter.UserID != "" {
+		query = query.Where("user_id = ?", string(filter.UserID))
+	}
+	if filter.Cursor != nil {
+		query = query.Where("(created_at < ? OR (created_at = ? AND id < ?))",
+			filter.Cursor.CreatedAt, filter.Cursor.CreatedAt, string(filter.Cursor.ID))
+	}
+
+	err := query.
+		Order("created_at DESC", "id DESC").
+		Limit(filter.Limit).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]connections.Connection, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, connectionFromRow(&row))
+	}
+	return results, nil
+}
+
+// Delete permanently removes the row for id scoped to org (Slice 4, AC3):
+// a hard delete, so its encrypted credentials are destroyed along with it. A
+// cross-org or unknown id affects zero rows — the facade has already turned
+// that into ErrNotFound via a preceding FindByID.
+func (r *Repository) Delete(ctx context.Context, org organizations.OrgID, id connections.ConnectionID) error {
+	_, err := r.db.NewDelete().
+		Model((*ConnectionRow)(nil)).
+		Where("id = ?", string(id)).
+		Where("org_id = ?", string(org)).
 		Exec(ctx)
 	return err
 }
@@ -208,8 +267,11 @@ func rowFromConnection(connection connections.Connection) ConnectionRow {
 		Status:                string(connection.Status),
 		RedirectURI:           connection.RedirectURI,
 		ConnectToken:          connection.ConnectToken,
+		ConnectTokenExpiresAt: connection.ConnectTokenExpiresAt,
+		ConnectTokenUsed:      connection.ConnectTokenUsed,
 		EncryptedAccessToken:  connection.EncryptedAccessToken,
 		EncryptedRefreshToken: connection.EncryptedRefreshToken,
+		TokenExpiresAt:        connection.TokenExpiresAt,
 		AccountEmail:          connection.AccountEmail,
 		AccountDisplayName:    connection.AccountDisplayName,
 		EncryptedParams:       connection.EncryptedParams,
@@ -227,8 +289,11 @@ func connectionFromRow(row *ConnectionRow) connections.Connection {
 		Status:                connections.Status(row.Status),
 		RedirectURI:           row.RedirectURI,
 		ConnectToken:          row.ConnectToken,
+		ConnectTokenExpiresAt: row.ConnectTokenExpiresAt,
+		ConnectTokenUsed:      row.ConnectTokenUsed,
 		EncryptedAccessToken:  row.EncryptedAccessToken,
 		EncryptedRefreshToken: row.EncryptedRefreshToken,
+		TokenExpiresAt:        row.TokenExpiresAt,
 		AccountEmail:          row.AccountEmail,
 		AccountDisplayName:    row.AccountDisplayName,
 		EncryptedParams:       row.EncryptedParams,

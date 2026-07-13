@@ -13,8 +13,10 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"beecon/internal/app"
 	"beecon/internal/catalog"
@@ -85,6 +87,55 @@ func BootAppWithProviderDefinitions(t *testing.T, definitions []catalog.Provider
 		Config:              testConfig(NewTestDSN(t)),
 		Logger:              testLogger(),
 		ProviderDefinitions: definitions,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
+// MovableClock is an injectable clock a test can advance without a real
+// sleep (Slice 4): its Now method is app.Deps.Now, so a journey can travel
+// time past a connect link's TTL, a connection's access-token expiry, or an
+// api-key rotation's overlap window deterministically.
+type MovableClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// NewMovableClock returns a MovableClock starting at start.
+func NewMovableClock(start time.Time) *MovableClock {
+	return &MovableClock{now: start}
+}
+
+// Now is app.Deps.Now's clock function.
+func (c *MovableClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// Advance moves the clock forward by d.
+func (c *MovableClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// BootAppWithProviderDefinitionsAndClock is BootAppWithProviderDefinitions
+// plus an injected clock override — Slice 4's token-refresh and reconnect
+// journeys travel time (past ConnectLinkTTL, a connection's token_expires_at,
+// etc.) without a real sleep.
+func BootAppWithProviderDefinitionsAndClock(t *testing.T, definitions []catalog.ProviderDefinition, now func() time.Time) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              testConfig(NewTestDSN(t)),
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+		Now:                 now,
 	})
 	if err != nil {
 		t.Fatalf("app.Wire failed: %v", err)

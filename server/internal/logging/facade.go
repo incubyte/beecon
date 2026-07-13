@@ -2,10 +2,9 @@ package logging
 
 import (
 	"context"
-	"encoding/base64"
-	"strings"
 	"time"
 
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 )
 
@@ -15,10 +14,6 @@ const (
 	defaultPageLimit = 50
 	maxPageLimit     = 200
 )
-
-// cursorSeparator joins encodeCursor's two fields inside the opaque,
-// base64-encoded pagination cursor (PD10).
-const cursorSeparator = "|"
 
 // Facade is the logging module's only public surface.
 type Facade struct {
@@ -114,25 +109,20 @@ func normalizeLimit(requested int) int {
 }
 
 func encodeCursor(createdAt time.Time, id LogID) string {
-	raw := createdAt.UTC().Format(time.RFC3339Nano) + cursorSeparator + string(id)
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+	return httpx.EncodeCursor(createdAt.UTC().Format(time.RFC3339Nano), string(id))
 }
 
 func decodeCursor(raw string) (*Cursor, error) {
-	if raw == "" {
+	fields, err := httpx.DecodeCursor(raw, 2)
+	if err != nil {
+		return nil, ErrInvalidCursor()
+	}
+	if fields == nil {
 		return nil, nil
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	createdAt, err := time.Parse(time.RFC3339Nano, fields[0])
 	if err != nil {
 		return nil, ErrInvalidCursor()
 	}
-	createdAtRaw, id, found := strings.Cut(string(decoded), cursorSeparator)
-	if !found || id == "" {
-		return nil, ErrInvalidCursor()
-	}
-	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
-	if err != nil {
-		return nil, ErrInvalidCursor()
-	}
-	return &Cursor{CreatedAt: createdAt, ID: LogID(id)}, nil
+	return &Cursor{CreatedAt: createdAt, ID: LogID(fields[1])}, nil
 }

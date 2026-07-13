@@ -8,17 +8,43 @@ import (
 	"beecon/internal/organizations"
 )
 
+// ListCursor is the decoded pagination cursor List's driven port accepts
+// (Slice 4, AC1): the created_at/id pair of the last connection on the
+// previous page, so the next page resumes strictly after it in the
+// newest-first ordering.
+type ListCursor struct {
+	CreatedAt time.Time
+	ID        ConnectionID
+}
+
+// ListFilter is List's org-scoped driven port query shape: UserID optionally
+// restricts the page to one user's connections (empty means every user in
+// org), plus the decoded pagination cursor and the page size to fetch.
+type ListFilter struct {
+	UserID organizations.UserID
+	Cursor *ListCursor
+	Limit  int
+}
+
 // Repository is the connections module's org-scoped driven port. Every
 // method takes the owning OrgID as its second parameter, so a query without
 // org scope cannot be expressed. FindByID returns (nil, nil) on a miss
 // (including a connection that belongs to a different organization); the
-// facade translates that into ErrNotFound. Update persists a previously
-// initiated Connection's mutable fields — in this slice, only the OAuth
-// callback's activation (status, encrypted tokens, account metadata).
+// facade translates that into ErrNotFound. Update persists a Connection's
+// mutable fields (status, connect token/redirect uri, encrypted tokens and
+// their expiry, account metadata, encrypted params) — every lifecycle
+// operation (activation, disable, refresh, reconnect) goes through it. List
+// returns connections scoped to org (AC1), matching filter, newest first.
+// Delete permanently removes a connection and its row — including its
+// encrypted credentials — scoped to org (AC3); deleting an id that does not
+// exist, or belongs to another organization, is a no-op the facade has
+// already turned into ErrNotFound via a preceding FindByID.
 type Repository interface {
 	Save(ctx context.Context, connection Connection) error
 	FindByID(ctx context.Context, org organizations.OrgID, id ConnectionID) (*Connection, error)
 	Update(ctx context.Context, connection Connection) error
+	List(ctx context.Context, org organizations.OrgID, filter ListFilter) ([]Connection, error)
+	Delete(ctx context.Context, org organizations.OrgID, id ConnectionID) error
 }
 
 // OAuthRepository is deliberately installation-level, not org-scoped: the
@@ -88,12 +114,28 @@ type TokenExchangeRequest struct {
 	CredentialStyle string
 }
 
-// TokenExchangeResult is the provider's authorization_code grant response —
-// the raw values the vault encrypts before they are ever persisted, returned
-// to a DTO, or written to a log line (AC10).
+// TokenExchangeResult is a provider's authorization_code or refresh_token
+// grant response — the raw values the vault encrypts before they are ever
+// persisted, returned to a DTO, or written to a log line (AC10). ExpiresIn
+// is the access token's lifetime in seconds (PD18); RefreshToken is empty on
+// a refresh_token grant response when the provider did not rotate it — the
+// caller keeps the one it already has (Slice 4, AC8's other branch).
 type TokenExchangeResult struct {
 	AccessToken  string
 	RefreshToken string
+	ExpiresIn    int
+}
+
+// RefreshGrantRequest carries everything RefreshGrant needs to complete a
+// refresh_token grant against a provider's token endpoint (PD18): the same
+// credential-style-aware client authentication ExchangeCode uses, applied to
+// a stored refresh token instead of a fresh authorization code.
+type RefreshGrantRequest struct {
+	TokenURL        string
+	ClientID        string
+	ClientSecret    string
+	RefreshToken    string
+	CredentialStyle string
 }
 
 // AccountInfo is the authenticated account's profile the callback captures
@@ -118,12 +160,14 @@ type AccountFetchRequest struct {
 }
 
 // OAuthClient is a narrow driven port for exchanging an authorization code
-// for tokens and fetching the authenticated account's profile, so tests can
-// substitute a fake provider (a fake Microsoft + Graph, or Hubspot, httptest
-// server) instead of calling the real internet.
+// for tokens, fetching the authenticated account's profile, and refreshing
+// an access token via a stored refresh token (PD18), so tests can substitute
+// a fake provider (a fake Microsoft + Graph, or Hubspot, httptest server)
+// instead of calling the real internet.
 type OAuthClient interface {
 	ExchangeCode(ctx context.Context, req TokenExchangeRequest) (TokenExchangeResult, error)
 	FetchAccount(ctx context.Context, req AccountFetchRequest) (AccountInfo, error)
+	RefreshGrant(ctx context.Context, req RefreshGrantRequest) (TokenExchangeResult, error)
 }
 
 // LogEntry is what the OAuth token exchange hands to a Recorder after

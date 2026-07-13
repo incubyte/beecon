@@ -86,7 +86,11 @@ func newTestRouter(t *testing.T) chi.Router {
 
 	r := chi.NewRouter()
 	r.Post("/initiate", h.Initiate)
+	r.Get("/", h.List)
 	r.Get("/{connectionId}", h.Get)
+	r.Post("/{connectionId}/disable", h.Disable)
+	r.Delete("/{connectionId}", h.Delete)
+	r.Post("/{connectionId}/reconnect", h.Reconnect)
 	return r
 }
 
@@ -332,5 +336,282 @@ func TestGet_ResponseNeverIncludesTheConnectToken(t *testing.T) {
 
 	if strings.Contains(w.Body.String(), token) {
 		t.Errorf("Get response %s contains the connect token %q — it must never be echoed back", w.Body.String(), token)
+	}
+}
+
+// --- List (Slice 4, AC1) ---
+
+func TestList_Returns200WithItemsScopedToTheCallersOrganization(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	doRequestAsOrg(r, http.MethodPost, "/initiate", otherOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+
+	w := doRequestAsOrg(r, http.MethodGet, "/", testOrg, "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page connectionsPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != createdDTO.ID {
+		t.Fatalf("Items = %+v, want exactly the caller's own organization's connection %q", page.Items, createdDTO.ID)
+	}
+}
+
+func TestList_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestList_Returns422ForAMalformedCursor(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/?cursor=not-valid-base64!!", testOrg, "")
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "validation_failed" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "validation_failed")
+	}
+}
+
+// --- Disable (Slice 4, AC2, AC11) ---
+
+func TestDisable_Returns200WithDisconnectedStatus(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/disable", testOrg, "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var dto connectionStatusDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if dto.ID != createdDTO.ID {
+		t.Errorf("id = %q, want %q", dto.ID, createdDTO.ID)
+	}
+	if dto.Status != "DISCONNECTED" {
+		t.Errorf("status = %q, want %q", dto.Status, "DISCONNECTED")
+	}
+}
+
+func TestDisable_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodPost, "/conn_1/disable", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+// TestDisable_Returns404ForAConnectionBelongingToAnotherOrganization is AC11.
+func TestDisable_Returns404ForAConnectionBelongingToAnotherOrganization(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/disable", otherOrg, "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
+	}
+}
+
+// --- Delete (Slice 4, AC3, AC11) ---
+
+func TestDelete_Returns204AndSubsequentGetIsNotFound(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	w := doRequestAsOrg(r, http.MethodDelete, "/"+createdDTO.ID, testOrg, "")
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+	}
+	after := doRequestAsOrg(r, http.MethodGet, "/"+createdDTO.ID, testOrg, "")
+	if after.Code != http.StatusNotFound {
+		t.Fatalf("get-after-delete status = %d, want %d; body=%s", after.Code, http.StatusNotFound, after.Body.String())
+	}
+}
+
+func TestDelete_Returns404ForAnUnknownID(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodDelete, "/conn_missing", testOrg, "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+}
+
+func TestDelete_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodDelete, "/conn_1", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+// TestDelete_Returns404ForAConnectionBelongingToAnotherOrganization is AC11.
+func TestDelete_Returns404ForAConnectionBelongingToAnotherOrganization(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	w := doRequestAsOrg(r, http.MethodDelete, "/"+createdDTO.ID, otherOrg, "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	stillThere := doRequestAsOrg(r, http.MethodGet, "/"+createdDTO.ID, testOrg, "")
+	if stillThere.Code != http.StatusOK {
+		t.Fatalf("connection was deleted via another organization's key; get status = %d, want %d", stillThere.Code, http.StatusOK)
+	}
+}
+
+// --- Reconnect (Slice 4, AC4, AC11) ---
+
+func reconnectBody(redirectURI string) string {
+	return `{"redirectUri":"` + redirectURI + `"}`
+}
+
+func TestReconnect_Returns201WithTheSameIDAndAFreshRedirectURL(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	// A connection can only be reconnected once it is no longer INITIATED —
+	// disable it first (Disable's own transition, already proven above).
+	if disableResp := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/disable", testOrg, ""); disableResp.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, want %d; body=%s", disableResp.Code, http.StatusOK, disableResp.Body.String())
+	}
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/reconnect", testOrg, reconnectBody(allowedRedirect))
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var dto initiatedConnectionDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if dto.ID != createdDTO.ID {
+		t.Errorf("id = %q, want the same stable id %q", dto.ID, createdDTO.ID)
+	}
+	if dto.RedirectURL == createdDTO.RedirectURL {
+		t.Errorf("redirectUrl = %q, want a fresh redirectUrl distinct from the original", dto.RedirectURL)
+	}
+	if !strings.Contains(dto.RedirectURL, "/connect/") {
+		t.Errorf("redirectUrl = %q, want it to point at Beecon's own connect page", dto.RedirectURL)
+	}
+}
+
+func TestReconnect_Returns422ForAConnectionStillInitiated(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/reconnect", testOrg, reconnectBody(allowedRedirect))
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "reconnect_not_allowed" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "reconnect_not_allowed")
+	}
+}
+
+func TestReconnect_Returns422WhenRedirectURINotAllowed(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/disable", testOrg, "")
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/reconnect", testOrg, reconnectBody("https://evil.example.com/callback"))
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "validation_failed" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "validation_failed")
+	}
+}
+
+func TestReconnect_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodPost, "/conn_1/reconnect", "", reconnectBody(allowedRedirect))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+// TestReconnect_Returns404ForAConnectionBelongingToAnotherOrganization is
+// AC11.
+func TestReconnect_Returns404ForAConnectionBelongingToAnotherOrganization(t *testing.T) {
+	r := newTestRouter(t)
+	created := doRequestAsOrg(r, http.MethodPost, "/initiate", testOrg, initiateBody(string(testUser), string(testIntegration), allowedRedirect))
+	var createdDTO initiatedConnectionDTO
+	if err := json.Unmarshal(created.Body.Bytes(), &createdDTO); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/disable", testOrg, "")
+
+	w := doRequestAsOrg(r, http.MethodPost, "/"+createdDTO.ID+"/reconnect", otherOrg, reconnectBody(allowedRedirect))
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
 	}
 }

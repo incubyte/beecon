@@ -42,11 +42,16 @@ import (
 // Deps are the externally supplied dependencies main.go hands to Wire.
 // ProviderDefinitions overrides the embedded provider definitions Wire would
 // otherwise load — nil in production; tests use it to point the Outlook
-// definition's OAuth endpoints at a fake Microsoft/Graph httptest server.
+// definition's OAuth endpoints at a fake Microsoft/Graph httptest server. Now
+// overrides every module's clock — nil in production (falls back to
+// systemNow); tests use it to travel time past a connect link's TTL, a
+// connection's token expiry, or an api-key rotation's overlap window without
+// a real sleep.
 type Deps struct {
 	Config              *config.Config
 	Logger              *slog.Logger
 	ProviderDefinitions []catalog.ProviderDefinition
+	Now                 func() time.Time
 }
 
 // Wired is the fully assembled application: the router main.go serves, the
@@ -75,6 +80,11 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
+	now := deps.Now
+	if now == nil {
+		now = systemNow
+	}
+
 	providerDefinitions := deps.ProviderDefinitions
 	if providerDefinitions == nil {
 		loaded, err := catalog.DefaultProviderDefinitions()
@@ -97,17 +107,17 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	}
 
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
-	organizationsFacade := buildOrganizationsFacade(database)
+	organizationsFacade := buildOrganizationsFacade(database, now)
 	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer)
-	accessFacade := buildAccessFacade(database)
+	accessFacade := buildAccessFacade(database, now)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
-	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault)
+	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now)
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("encrypt plaintext client secrets: %w", err)
 	}
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
-	loggingFacade := buildLoggingFacade(database)
+	loggingFacade := buildLoggingFacade(database, now)
 	loggingHandler := logginghttp.NewHandler(loggingFacade, errorRenderer)
 	connectionsFacade := buildConnectionsFacade(
 		database,
@@ -117,6 +127,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		tokenVault,
 		oauthhttp.NewClient(nil),
 		connectionsLogRecorder{logs: loggingFacade},
+		now,
 	)
 	connectionsHandler := connectionshttp.NewHandler(connectionsFacade, errorRenderer)
 	connectWebHandler, err := connectweb.NewHandler(connectionsFacade)
@@ -124,7 +135,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		_ = database.Close()
 		return nil, fmt.Errorf("parse connect-page templates: %w", err)
 	}
-	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder{logs: loggingFacade})
+	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder{logs: loggingFacade}, now)
 	executionHandler := executionhttp.NewHandler(executionFacade, errorRenderer)
 
 	router := buildRouter(
@@ -147,19 +158,19 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	}, nil
 }
 
-func buildOrganizationsFacade(database *upstreambun.DB) *organizations.Facade {
+func buildOrganizationsFacade(database *upstreambun.DB, now func() time.Time) *organizations.Facade {
 	repo := orgsbun.NewRepository(database)
-	return organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), systemNow)
+	return organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), now)
 }
 
-func buildAccessFacade(database *upstreambun.DB) *access.Facade {
+func buildAccessFacade(database *upstreambun.DB, now func() time.Time) *access.Facade {
 	repo := accessbun.NewRepository(database)
-	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), systemNow)
+	return access.NewFacade(repo, repo, idgen.Prefixed("key_"), now)
 }
 
-func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault) *catalog.Facade {
+func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault, now func() time.Time) *catalog.Facade {
 	repo := catalogbun.NewRepository(database)
-	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), systemNow, tokenVault)
+	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), now, tokenVault)
 }
 
 func buildConnectionsFacade(
@@ -170,6 +181,7 @@ func buildConnectionsFacade(
 	tokenVault *vault.Vault,
 	oauthClient connections.OAuthClient,
 	recorder connections.Recorder,
+	now func() time.Time,
 ) *connections.Facade {
 	repo := connectionsbun.NewRepository(database)
 	return connections.NewFacade(
@@ -186,13 +198,13 @@ func buildConnectionsFacade(
 		idgen.Prefixed(""),
 		idgen.Prefixed(""),
 		baseURL,
-		systemNow,
+		now,
 	)
 }
 
-func buildLoggingFacade(database *upstreambun.DB) *logging.Facade {
+func buildLoggingFacade(database *upstreambun.DB, now func() time.Time) *logging.Facade {
 	repo := loggingbun.NewRepository(database)
-	return logging.NewFacade(repo, idgen.Prefixed("log_"), systemNow)
+	return logging.NewFacade(repo, idgen.Prefixed("log_"), now)
 }
 
 func buildExecutionFacade(
@@ -200,6 +212,7 @@ func buildExecutionFacade(
 	connectionsFacade *connections.Facade,
 	provider execution.ProviderClient,
 	recorder execution.Recorder,
+	now func() time.Time,
 ) *execution.Facade {
-	return execution.NewFacade(catalogFacade, connectionsFacade, provider, recorder, systemNow)
+	return execution.NewFacade(catalogFacade, connectionsFacade, provider, recorder, now)
 }

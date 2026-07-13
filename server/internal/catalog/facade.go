@@ -2,10 +2,10 @@ package catalog
 
 import (
 	"context"
-	"encoding/base64"
 	"sort"
 	"time"
 
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 	"beecon/internal/vault"
 )
@@ -315,18 +315,18 @@ func normalizeToolLimit(requested int) int {
 }
 
 func encodeToolCursor(slug string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(slug))
+	return httpx.EncodeCursor(slug)
 }
 
 func decodeToolCursor(raw string) (string, error) {
-	if raw == "" {
-		return "", nil
-	}
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	fields, err := httpx.DecodeCursor(raw, 1)
 	if err != nil {
 		return "", ErrInvalidCursor()
 	}
-	return string(decoded), nil
+	if fields == nil {
+		return "", nil
+	}
+	return fields[0], nil
 }
 
 func (f *Facade) summarize(integration Integration) IntegrationSummary {

@@ -94,6 +94,13 @@ func (f *fakeOAuthClient) FetchAccount(_ context.Context, _ connections.AccountF
 	return f.accountResult, nil
 }
 
+// RefreshGrant is unused by this file's connect-page/callback rendering
+// tests (Slice 4); it satisfies connections.OAuthClient with a harmless
+// default.
+func (f *fakeOAuthClient) RefreshGrant(_ context.Context, _ connections.RefreshGrantRequest) (connections.TokenExchangeResult, error) {
+	return f.exchangeResult, f.exchangeErr
+}
+
 type failingExchangeError struct{}
 
 func (failingExchangeError) Error() string { return "provider rejected the exchange" }

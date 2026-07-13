@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"beecon/internal/catalog"
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 	"beecon/internal/vault"
 )
@@ -139,4 +140,166 @@ func (f *Facade) Get(ctx context.Context, org organizations.OrgID, id Connection
 // page, bound to exactly this connection attempt).
 func buildConnectURL(baseURL, token string) string {
 	return strings.TrimRight(baseURL, "/") + "/connect/" + token
+}
+
+// defaultListLimit and maxListLimit bound List's page size when a caller
+// supplies none, or supplies one larger than Beecon allows — the same
+// PD10-style bounds every other list endpoint applies.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 200
+)
+
+// ListParams is List's caller-facing filter shape (Slice 4, AC1): UserID
+// optionally restricts the page to one user's connections (empty means
+// every user in org); Cursor is the opaque cursor a consumer sends back
+// exactly as a previous page's NextCursor returned it.
+type ListParams struct {
+	UserID string
+	Cursor string
+	Limit  int
+}
+
+// ListResult is one cursor-paginated page of Connections, newest first;
+// NextCursor is empty when this was the last page.
+type ListResult struct {
+	Connections []Connection
+	NextCursor  string
+}
+
+// List returns a page of Connections scoped to org (AC1), optionally
+// narrowed to one user, newest first.
+func (f *Facade) List(ctx context.Context, org organizations.OrgID, params ListParams) (ListResult, error) {
+	cursor, err := decodeConnectionCursor(params.Cursor)
+	if err != nil {
+		return ListResult{}, err
+	}
+	limit := normalizeListLimit(params.Limit)
+
+	items, err := f.repo.List(ctx, org, ListFilter{
+		UserID: organizations.UserID(params.UserID),
+		Cursor: cursor,
+		Limit:  limit + 1,
+	})
+	if err != nil {
+		return ListResult{}, err
+	}
+	return paginateConnections(items, limit), nil
+}
+
+// Disable transitions a Connection to DISCONNECTED (AC2, PD19): its stored
+// tokens are retained, so Reconnect can bring it back to ACTIVE later, but
+// execution against it now surfaces a status-explaining failure. An unknown
+// id, or one belonging to another organization, is not-found (AC11).
+func (f *Facade) Disable(ctx context.Context, org organizations.OrgID, id ConnectionID) (Connection, error) {
+	connection, err := f.repo.FindByID(ctx, org, id)
+	if err != nil {
+		return Connection{}, err
+	}
+	if connection == nil {
+		return Connection{}, ErrNotFound()
+	}
+	disabled := connection.Disable()
+	if err := f.repo.Update(ctx, disabled); err != nil {
+		return Connection{}, err
+	}
+	return disabled, nil
+}
+
+// Delete permanently removes a Connection and its stored credentials (AC3,
+// PD19): a hard row delete, so a subsequent Get returns not-found and no
+// ciphertext belonging to this connection remains in the database. Log
+// entries recorded against this connection's id are untouched — they live
+// in their own table, keyed by the id string rather than a foreign key. An
+// unknown id, or one belonging to another organization, is not-found (AC11).
+func (f *Facade) Delete(ctx context.Context, org organizations.OrgID, id ConnectionID) error {
+	connection, err := f.repo.FindByID(ctx, org, id)
+	if err != nil {
+		return err
+	}
+	if connection == nil {
+		return ErrNotFound()
+	}
+	return f.repo.Delete(ctx, org, id)
+}
+
+// Reconnect starts a fresh connect-page handshake against an existing
+// Connection, reusing its immutable id (AC4, PD19): allowed from ACTIVE,
+// EXPIRED, or DISCONNECTED — never from INITIATED, whose own initiate
+// attempt is still open. redirectURI is validated against org's allow-list
+// exactly as Initiate validates it (PD4). The connection's current status
+// and existing tokens are left untouched until a completed callback
+// activates it (Connection.Activate) — ResolveForExecution keeps serving a
+// previously ACTIVE connection normally for the whole of a reconnect attempt
+// (AC6). An unknown id, or one belonging to another organization, is
+// not-found (AC11).
+func (f *Facade) Reconnect(ctx context.Context, org organizations.OrgID, id ConnectionID, redirectURI string) (InitiatedConnection, error) {
+	orgEntity, err := f.orgs.Get(ctx, org)
+	if err != nil {
+		return InitiatedConnection{}, err
+	}
+	if !orgEntity.AllowsRedirectURI(redirectURI) {
+		return InitiatedConnection{}, ErrRedirectURINotAllowed()
+	}
+	connection, err := f.repo.FindByID(ctx, org, id)
+	if err != nil {
+		return InitiatedConnection{}, err
+	}
+	if connection == nil {
+		return InitiatedConnection{}, ErrNotFound()
+	}
+	if !connection.CanReconnect() {
+		return InitiatedConnection{}, ErrReconnectNotAllowed(connection.Status)
+	}
+
+	prepared := connection.PrepareReconnect(f.newToken(), redirectURI, f.now().Add(ConnectLinkTTL))
+	if err := f.repo.Update(ctx, prepared); err != nil {
+		return InitiatedConnection{}, err
+	}
+	return InitiatedConnection{
+		Connection:  prepared,
+		RedirectURL: buildConnectURL(f.baseURL, prepared.ConnectToken),
+	}, nil
+}
+
+func paginateConnections(items []Connection, limit int) ListResult {
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	result := ListResult{Connections: items}
+	if hasMore {
+		last := items[len(items)-1]
+		result.NextCursor = encodeConnectionCursor(last.CreatedAt, last.ID)
+	}
+	return result
+}
+
+func normalizeListLimit(requested int) int {
+	if requested <= 0 {
+		return defaultListLimit
+	}
+	if requested > maxListLimit {
+		return maxListLimit
+	}
+	return requested
+}
+
+func encodeConnectionCursor(createdAt time.Time, id ConnectionID) string {
+	return httpx.EncodeCursor(createdAt.UTC().Format(time.RFC3339Nano), string(id))
+}
+
+func decodeConnectionCursor(raw string) (*ListCursor, error) {
+	fields, err := httpx.DecodeCursor(raw, 2)
+	if err != nil {
+		return nil, ErrInvalidCursor()
+	}
+	if fields == nil {
+		return nil, nil
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, fields[0])
+	if err != nil {
+		return nil, ErrInvalidCursor()
+	}
+	return &ListCursor{CreatedAt: createdAt, ID: ConnectionID(fields[1])}, nil
 }

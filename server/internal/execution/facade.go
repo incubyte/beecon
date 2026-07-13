@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -84,9 +85,12 @@ func connectionNotActiveMessage(status connections.Status) string {
 	return fmt.Sprintf("connection is %s, not ACTIVE", status)
 }
 
-// callProvider makes the one HTTP call a tool execution needs, times it,
-// records it (AC8), and turns the outcome into a Result: success (AC1), a
-// network failure reaching the provider, or an upstream 4xx/5xx (AC7).
+// callProvider makes the HTTP call a tool execution needs, times it, records
+// it (AC8), and turns the outcome into a Result: success (AC1), a network
+// failure reaching the provider, or an upstream 4xx/5xx (AC7). A 401
+// triggers PD18's reactive refresh path (Slice 4): exactly one on-demand
+// token refresh, then exactly one retried call — never a second refresh,
+// whatever that retried call itself returns.
 func (f *Facade) callProvider(
 	ctx context.Context,
 	org organizations.OrgID,
@@ -117,21 +121,74 @@ func (f *Facade) callProvider(
 		Body:        requestBody,
 	}
 
+	response, callErr := f.attemptCall(ctx, org, userID, connectionID, toolSlug, request)
+	if callErr == nil && response.StatusCode == http.StatusUnauthorized {
+		return f.retryAfterRefresh(ctx, org, userID, connectionID, toolSlug, request, tool.Mapping.Pagination)
+	}
+	return toolCallResult(response, callErr, tool.Mapping.Pagination), nil
+}
+
+// attemptCall makes one HTTP call to the provider, times it, and records it
+// (AC8) — shared by callProvider's first attempt and retryAfterRefresh's
+// single retry, so every attempt (not just the first) writes its own log
+// entry.
+func (f *Facade) attemptCall(
+	ctx context.Context,
+	org organizations.OrgID,
+	userID organizations.UserID,
+	connectionID connections.ConnectionID,
+	toolSlug string,
+	request ToolCallRequest,
+) (ToolCallResponse, error) {
 	started := f.now()
 	response, callErr := f.provider.Call(ctx, request)
 	duration := f.now().Sub(started)
 
 	status, responseBody := providerOutcome(response, callErr)
 	f.recordAttempt(ctx, org, userID, connectionID, toolSlug, request, status, duration, responseBody)
+	return response, callErr
+}
 
+// retryAfterRefresh is PD18's reactive refresh path (Slice 4, AC7-AC9): a
+// provider 401 triggers exactly one on-demand token refresh via the
+// connections module, then exactly one retried call with the refreshed
+// access token. A refresh that leaves the connection no longer ACTIVE (e.g.
+// a revoked refresh token transitions it to EXPIRED, AC9) is reported as the
+// same status-explaining tool-level failure a non-ACTIVE connection
+// produces up front, without ever retrying the call.
+func (f *Facade) retryAfterRefresh(
+	ctx context.Context,
+	org organizations.OrgID,
+	userID organizations.UserID,
+	connectionID connections.ConnectionID,
+	toolSlug string,
+	request ToolCallRequest,
+	pagination *catalog.Pagination,
+) (Result, error) {
+	access, err := f.connections.RefreshForExecution(ctx, org, userID, connectionID)
+	if err != nil {
+		return Result{}, err
+	}
+	if access.Status != connections.StatusActive {
+		return FailureResult(CodeConnectionNotActive, connectionNotActiveMessage(access.Status)), nil
+	}
+	request.AccessToken = access.AccessToken
+	response, callErr := f.attemptCall(ctx, org, userID, connectionID, toolSlug, request)
+	return toolCallResult(response, callErr, pagination), nil
+}
+
+// toolCallResult turns one provider call's outcome into a Result: success
+// (AC1), a network failure reaching the provider, or an upstream 4xx/5xx
+// (AC7).
+func toolCallResult(response ToolCallResponse, callErr error, pagination *catalog.Pagination) Result {
 	if callErr != nil {
-		return FailureResult(CodeProviderUnavailable, "the provider could not be reached"), nil
+		return FailureResult(CodeProviderUnavailable, "the provider could not be reached")
 	}
 	if response.StatusCode >= 400 {
-		return FailureResult(CodeProviderError, providerErrorMessage(response.StatusCode, response.Body)), nil
+		return FailureResult(CodeProviderError, providerErrorMessage(response.StatusCode, response.Body))
 	}
 	data := decodeResponseData(response.Body)
-	return SuccessResult(data, extractNextCursor(tool.Mapping.Pagination, data)), nil
+	return SuccessResult(data, extractNextCursor(pagination, data))
 }
 
 func providerOutcome(response ToolCallResponse, callErr error) (int, string) {

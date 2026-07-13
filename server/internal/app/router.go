@@ -74,7 +74,11 @@ func buildRouter(
 			r.Route("/connections", func(r chi.Router) {
 				r.Use(authmw.OrgAuth(verifyOrgKey))
 				r.Post("/initiate", connectionsHandler.Initiate)
+				r.Get("/", connectionsHandler.List)
 				r.Get("/{connectionId}", connectionsHandler.Get)
+				r.Post("/{connectionId}/disable", connectionsHandler.Disable)
+				r.Delete("/{connectionId}", connectionsHandler.Delete)
+				r.Post("/{connectionId}/reconnect", connectionsHandler.Reconnect)
 			})
 
 			r.Route("/tools", func(r chi.Router) {

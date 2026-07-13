@@ -52,6 +52,14 @@ func (fakeConnectionReader) ResolveForExecution(_ context.Context, org organizat
 	return connections.ExecutionAccess{Status: connections.StatusActive, AccessToken: "the-access-token"}, nil
 }
 
+// RefreshForExecution is unused by this file's tests (none exercise a
+// provider 401, Slice 4's PD18 retry path); it satisfies
+// execution.ConnectionReader with the same result ResolveForExecution
+// returns.
+func (r fakeConnectionReader) RefreshForExecution(ctx context.Context, org organizations.OrgID, userID organizations.UserID, id connections.ConnectionID) (connections.ExecutionAccess, error) {
+	return r.ResolveForExecution(ctx, org, userID, id)
+}
+
 type fakeProviderClient struct{}
 
 func (fakeProviderClient) Call(_ context.Context, _ execution.ToolCallRequest) (execution.ToolCallResponse, error) {

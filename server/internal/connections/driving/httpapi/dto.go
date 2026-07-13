@@ -64,3 +64,38 @@ func toConnectionDTO(connection connections.Connection) connectionDTO {
 	}
 	return dto
 }
+
+// connectionsPageDTO is List's response: one cursor-paginated page of
+// connections (Slice 4, AC1), newest first; nextCursor is absent when this
+// was the last page.
+type connectionsPageDTO struct {
+	Items      []connectionDTO `json:"items"`
+	NextCursor string          `json:"nextCursor,omitempty"`
+}
+
+func toConnectionsPageDTO(result connections.ListResult) connectionsPageDTO {
+	items := make([]connectionDTO, 0, len(result.Connections))
+	for _, connection := range result.Connections {
+		items = append(items, toConnectionDTO(connection))
+	}
+	return connectionsPageDTO{Items: items, NextCursor: result.NextCursor}
+}
+
+// connectionStatusDTO is Disable's response (Slice 4, AC2): the connection's
+// id and its new status.
+type connectionStatusDTO struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+func toConnectionStatusDTO(connection connections.Connection) connectionStatusDTO {
+	return connectionStatusDTO{ID: string(connection.ID), Status: string(connection.Status)}
+}
+
+// reconnectRequest is the POST /api/v1/connections/{connectionId}/reconnect
+// body (Slice 4, AC4): the redirectUri this reconnect attempt's connect page
+// forwards to, validated against the organization's allow-list exactly as
+// Initiate validates it (PD4).
+type reconnectRequest struct {
+	RedirectURI string `json:"redirectUri"`
+}

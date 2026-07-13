@@ -2,6 +2,7 @@ package connections
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"beecon/internal/httpx"
@@ -124,4 +125,25 @@ func MissingParamFields(err error) ([]string, bool) {
 	}
 	missing, _ := domainErr.Details["missing"].([]string)
 	return missing, true
+}
+
+// ErrInvalidCursor is returned when List is given a pagination cursor that
+// is not valid base64, or does not decode to the created_at/id shape List
+// itself encodes (Slice 4, AC1).
+func ErrInvalidCursor() *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
+		WithDetails(map[string]any{"field": "cursor", "issue": "malformed pagination cursor"})
+}
+
+// CodeReconnectNotAllowed is Reconnect's error code when a Connection's
+// current status doesn't allow a fresh handshake (PD19).
+const CodeReconnectNotAllowed = "reconnect_not_allowed"
+
+// ErrReconnectNotAllowed is returned when Reconnect is asked to start a
+// fresh handshake against a Connection that is still INITIATED — its own
+// initiate attempt has never finished, so there is nothing to redo (PD19:
+// reconnect is only defined for ACTIVE, EXPIRED, or DISCONNECTED).
+func ErrReconnectNotAllowed(status Status) *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeReconnectNotAllowed, "this connection cannot be reconnected right now").
+		WithDetails(map[string]any{"field": "status", "issue": fmt.Sprintf("connection is %s", status)})
 }

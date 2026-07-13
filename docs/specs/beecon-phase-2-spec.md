@@ -187,17 +187,17 @@ The mechanism rolai calls `getExpectedParamsForUser`: some providers need values
 H3's validation: disable, delete, reconnect-with-the-same-id, the two missing
 statuses, and on-demand refresh so ACTIVE actually stays usable.
 
-- [ ] Consumer can list a user's connections (status, provider, account metadata), cursor-paginated
-- [ ] Consumer can disable a connection: status becomes DISCONNECTED and execution against it returns `{successful: false, error, data: null}` with a status-explaining error
-- [ ] Consumer can delete a connection: it is not-found afterwards and its stored tokens are destroyed (a database dump contains no credentials for it)
-- [ ] Consumer can start a reconnect on a connection and receives a connect link through the standard middle-man pages — with the **same** `conn_` id
-- [ ] Completing a reconnect makes the connection ACTIVE with the same id, fresh tokens, and refreshed account metadata
-- [ ] A failed or abandoned reconnect leaves the connection's prior status and existing tokens untouched (a previously ACTIVE connection still executes)
-- [ ] Executing with an expired access token transparently refreshes it using the refresh token and completes the call — the consumer sees a normal success
-- [ ] When the provider returns a rotated refresh token during refresh, the stored refresh token is replaced
-- [ ] When refresh fails (e.g. refresh token revoked), the connection becomes EXPIRED and execution returns a status-explaining envelope error
-- [ ] Reconnecting an EXPIRED connection restores it to ACTIVE with the same id
-- [ ] Disable, delete, and reconnect against another organization's connection return not-found
+- [x] Consumer can list a user's connections (status, provider, account metadata), cursor-paginated
+- [x] Consumer can disable a connection: status becomes DISCONNECTED and execution against it returns `{successful: false, error, data: null}` with a status-explaining error
+- [x] Consumer can delete a connection: it is not-found afterwards and its stored tokens are destroyed (a database dump contains no credentials for it)
+- [x] Consumer can start a reconnect on a connection and receives a connect link through the standard middle-man pages — with the **same** `conn_` id
+- [x] Completing a reconnect makes the connection ACTIVE with the same id, fresh tokens, and refreshed account metadata
+- [x] A failed or abandoned reconnect leaves the connection's prior status and existing tokens untouched (a previously ACTIVE connection still executes)
+- [x] Executing with an expired access token transparently refreshes it using the refresh token and completes the call — the consumer sees a normal success
+- [x] When the provider returns a rotated refresh token during refresh, the stored refresh token is replaced
+- [x] When refresh fails (e.g. refresh token revoked), the connection becomes EXPIRED and execution returns a status-explaining envelope error
+- [x] Reconnecting an EXPIRED connection restores it to ACTIVE with the same id
+- [x] Disable, delete, and reconnect against another organization's connection return not-found
 
 ## Slice 5 — The browser gets a key: user-scoped short-lived tokens
 
