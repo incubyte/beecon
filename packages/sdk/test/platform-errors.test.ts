@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BeeconApiError } from '../src/errors.js';
+import { BeeconApiError, RateLimitedError } from '../src/errors.js';
 import { HttpClient } from '../src/http.js';
 import { asFetch, jsonResponse, noContentResponse, rawResponse } from './support/responses.js';
+
+function rateLimitedResponse(retryAfterHeader?: string): Response {
+  const body = JSON.stringify({ error: { code: 'rate_limited', message: 'upstream rate limit exhausted' } });
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (retryAfterHeader !== undefined) {
+    headers['Retry-After'] = retryAfterHeader;
+  }
+  return new Response(body, { status: 429, headers });
+}
 
 function buildClient(fetchMock: ReturnType<typeof vi.fn>): HttpClient {
   return new HttpClient({
@@ -80,5 +89,63 @@ describe('platform HTTP error handling', () => {
     const http = buildClient(fetchMock);
 
     await expect(http.get('/api/v1/integrations')).resolves.toBeUndefined();
+  });
+});
+
+describe('429 rate-limit responses', () => {
+  it('throws a RateLimitedError (not a plain BeeconApiError) on HTTP 429', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse('30'));
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toBeInstanceOf(
+      RateLimitedError,
+    );
+  });
+
+  it('is still catchable as a BeeconApiError, since RateLimitedError extends it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse('30'));
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toBeInstanceOf(
+      BeeconApiError,
+    );
+  });
+
+  it('parses retryAfter in whole seconds from the Retry-After header', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse('42'));
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toMatchObject({
+      retryAfter: 42,
+      status: 429,
+      code: 'rate_limited',
+    });
+  });
+
+  it('defaults retryAfter to 0 when the Retry-After header is absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse());
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toMatchObject({
+      retryAfter: 0,
+    });
+  });
+
+  it('defaults retryAfter to 0 when the Retry-After header is not a valid number', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse('not-a-number'));
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toMatchObject({
+      retryAfter: 0,
+    });
+  });
+
+  it('defaults retryAfter to 0 rather than a negative number when the Retry-After header is negative', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(rateLimitedResponse('-5'));
+    const http = buildClient(fetchMock);
+
+    await expect(http.get('/api/v1/tools/hubspot-list-contacts/execute')).rejects.toMatchObject({
+      retryAfter: 0,
+    });
   });
 });

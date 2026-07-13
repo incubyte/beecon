@@ -204,15 +204,15 @@ statuses, and on-demand refresh so ACTIVE actually stays usable.
 Membrane's per-user JWT, done properly: minted locally by the consumer's server,
 verified by Beecon, powering a client-driven connect UI.
 
-- [ ] Installation admin can issue an organization's user-token signing secret; the secret is shown exactly once, and listing shows only id, prefix, and created date
-- [ ] The SDK mints a user token locally (no network call) for a userId, signed with the configured signing secret, default expiry 2 hours
-- [ ] A browser request with a valid user token can list the integrations available to its organization
-- [ ] A browser request with a valid user token can initiate a connection — the userId comes from the token, and a userId in the request body is ignored
-- [ ] A browser request with a valid user token can list and get its own user's connections; other users' connections return not-found
-- [ ] A browser request with a valid user token can start a reconnect on its own connection
-- [ ] An expired user token is rejected as unauthorized
-- [ ] A token with a tampered payload or signed with the wrong secret is rejected as unauthorized
-- [ ] A user token cannot call server-only endpoints (user creation, logs, tool execution, file upload) — rejected as unauthorized
+- [x] Installation admin can issue an organization's user-token signing secret; the secret is shown exactly once, and listing shows only id, prefix, and created date
+- [x] The SDK mints a user token locally (no network call) for a userId, signed with the configured signing secret, default expiry 2 hours
+- [x] A browser request with a valid user token can list the integrations available to its organization
+- [x] A browser request with a valid user token can initiate a connection — the userId comes from the token, and a userId in the request body is ignored
+- [x] A browser request with a valid user token can list and get its own user's connections; other users' connections return not-found
+- [x] A browser request with a valid user token can start a reconnect on its own connection
+- [x] An expired user token is rejected as unauthorized
+- [x] A token with a tampered payload or signed with the wrong secret is rejected as unauthorized
+- [x] A user token cannot call server-only endpoints (user creation, logs, tool execution, file upload) — rejected as unauthorized
 
 ## Slice 6 — Politeness under pressure: rate-limit normalization + platform retry
 
@@ -220,50 +220,50 @@ The end of consumer-side backoff code: Graph's nested throttle codes and Hubspot
 rate-limit category collapse into one retriable shape — plus the metrics the reviewer
 asked for before production dependence.
 
-- [ ] An upstream rate-limit response (Graph 429 and Hubspot 429/RATE_LIMITS shapes both) is retried platform-side, honoring the provider's Retry-After
-- [ ] When a retry succeeds, the consumer receives a normal successful envelope — no rate-limit detail leaks
-- [ ] When retries are exhausted, the execute endpoint responds HTTP 429 with a Retry-After header and error code `rate_limited`
-- [ ] Non-retriable upstream errors (e.g. 400, 404) are not retried and surface once as envelope errors
-- [ ] Every upstream attempt — including rate-limited ones — writes its own log entry marked as rate-limited where applicable
-- [ ] A metrics endpoint (admin-guarded) exposes execution counts and durations by provider and status, rate-limit retries, OAuth handshake outcomes, and token-refresh outcomes
-- [ ] `code` fields in tool-execution log bodies are no longer redacted; `code` remains redacted in OAuth token-exchange log entries
+- [x] An upstream rate-limit response (Graph 429 and Hubspot 429/RATE_LIMITS shapes both) is retried platform-side, honoring the provider's Retry-After
+- [x] When a retry succeeds, the consumer receives a normal successful envelope — no rate-limit detail leaks
+- [x] When retries are exhausted, the execute endpoint responds HTTP 429 with a Retry-After header and error code `rate_limited`
+- [x] Non-retriable upstream errors (e.g. 400, 404) are not retried and surface once as envelope errors
+- [x] Every upstream attempt — including rate-limited ones — writes its own log entry marked as rate-limited where applicable
+- [x] A metrics endpoint (admin-guarded) exposes execution counts and durations by provider and status, rate-limit retries, OAuth handshake outcomes, and token-refresh outcomes
+- [x] `code` fields in tool-execution log bodies are no longer redacted; `code` remains redacted in OAuth token-exchange log entries
 
 ## Slice 7 — Files travel: upload → URI usable in tool arguments
 
 The Membrane `POST /files` equivalent, proven end-to-end by pushing a file into
 Hubspot's file manager.
 
-- [ ] Consumer can upload a file (multipart) and receives `{id: "file_...", name, mimeType, size, downloadUrl}`
-- [ ] The uploaded file is downloadable via its downloadUrl with the organization's auth; another organization's request returns not-found
-- [ ] An upload exceeding the configured size limit (default 20 MB) is rejected with a validation error
-- [ ] Executing `hubspot-upload-file` with a `file_` id in the arguments sends the stored file to Hubspot and returns the provider's file record (proves file-typed mapping inputs)
-- [ ] Executing with an unknown or cross-organization `file_` id returns an envelope error without calling the provider
-- [ ] File bytes never appear in log entries — the log records the file id and size only
+- [x] Consumer can upload a file (multipart) and receives `{id: "file_...", name, mimeType, size, downloadUrl}`
+- [x] The uploaded file is downloadable via its downloadUrl with the organization's auth; another organization's request returns not-found
+- [x] An upload exceeding the configured size limit (default 20 MB) is rejected with a validation error
+- [x] Executing `hubspot-upload-file` with a `file_` id in the arguments sends the stored file to Hubspot and returns the provider's file record (proves file-typed mapping inputs)
+- [x] Executing with an unknown or cross-organization `file_` id returns an envelope error without calling the provider
+- [x] File bytes never appear in log entries — the log records the file id and size only
 
 ## Slice 8 — Keys turn: API key rotation with overlap window
 
 Zero-downtime credential hygiene for the org server key.
 
-- [ ] Installation admin can rotate an organization API key; the new secret is returned exactly once
-- [ ] The old secret continues to authenticate during the overlap window (default 24 hours, settable per rotation)
-- [ ] After the overlap window ends, the old secret is rejected as unauthorized
-- [ ] The new secret authenticates immediately after rotation
-- [ ] Listing keys shows rotation state (rotated-at, overlap expiry) — never any secret
-- [ ] Revoking a rotated key immediately rejects both the old and the new secret
+- [x] Installation admin can rotate an organization API key; the new secret is returned exactly once
+- [x] The old secret continues to authenticate during the overlap window (default 24 hours, settable per rotation)
+- [x] After the overlap window ends, the old secret is rejected as unauthorized
+- [x] The new secret authenticates immediately after rotation
+- [x] Listing keys shows rotation state (rotated-at, overlap expiry) — never any secret
+- [x] Revoking a rotated key immediately rejects both the old and the new secret
 
 ## Slice 9 — The SDK catches up: Phase 2 surface in TypeScript
 
 Everything above, typed and mockable — the contract rolai will migrate onto.
 
-- [ ] `beecon.tools.list({ integrationId | providerSlug, includeDeprecated? })` returns typed tools with input and output schemas, cursor-paginated
-- [ ] `beecon.tools.get(slug)` returns one tool's detail
-- [ ] `beecon.integrations.getExpectedParams(integrationId)` returns the expected-param fields
-- [ ] `beecon.connections.list({ userId })`, `.disable(id)`, `.delete(id)`, and `.reconnect(id, { redirectUri })` cover the full lifecycle; reconnect returns the same connection id with a fresh redirectUrl
-- [ ] `beecon.userTokens.create({ userId, expiresIn? })` mints a token locally using the constructor-configured signing secret, and throws a clear error when no signing secret is configured
-- [ ] `beecon.files.upload(...)` returns the file id and downloadUrl
-- [ ] Tool execution results are typed with the optional `nextCursor`; an HTTP 429 from execute surfaces as a typed `RateLimitedError` carrying `retryAfter`
-- [ ] The SDK never writes the signing secret to logs, errors, or serialized output (parity with the API-key guarantee)
-- [ ] The quickstart is extended with: the browser-token connect flow, connecting Hubspot, paging through a list tool, and uploading a file into a tool call
+- [x] `beecon.tools.list({ integrationId | providerSlug, includeDeprecated? })` returns typed tools with input and output schemas, cursor-paginated
+- [x] `beecon.tools.get(slug)` returns one tool's detail
+- [x] `beecon.integrations.getExpectedParams(integrationId)` returns the expected-param fields
+- [x] `beecon.connections.list({ userId })`, `.disable(id)`, `.delete(id)`, and `.reconnect(id, { redirectUri })` cover the full lifecycle; reconnect returns the same connection id with a fresh redirectUrl
+- [x] `beecon.userTokens.create({ userId, expiresIn? })` mints a token locally using the constructor-configured signing secret, and throws a clear error when no signing secret is configured
+- [x] `beecon.files.upload(...)` returns the file id and downloadUrl
+- [x] Tool execution results are typed with the optional `nextCursor`; an HTTP 429 from execute surfaces as a typed `RateLimitedError` carrying `retryAfter`
+- [x] The SDK never writes the signing secret to logs, errors, or serialized output (parity with the API-key guarantee)
+- [x] The quickstart is extended with: the browser-token connect flow, connecting Hubspot, paging through a list tool, and uploading a file into a tool call
 
 ---
 

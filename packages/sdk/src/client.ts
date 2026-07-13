@@ -1,16 +1,21 @@
 import { HttpClient, type FetchLike } from './http.js';
 import { ConnectionsResource } from './resources/connections.js';
+import { FilesResource } from './resources/files.js';
 import { IntegrationsResource } from './resources/integrations.js';
 import { LogsResource } from './resources/logs.js';
 import { ToolsResource } from './resources/tools.js';
+import { UserTokensResource } from './resources/userTokens.js';
 import { UsersResource } from './resources/users.js';
 import type {
   BeeconClient,
   ConnectionsApi,
+  FilesApi,
   IntegrationsApi,
   LogsApi,
+  SigningSecretConfig,
   ToolsApi,
   UsersApi,
+  UserTokensApi,
 } from './types.js';
 
 export interface BeeconConfig {
@@ -18,6 +23,8 @@ export interface BeeconConfig {
   baseUrl: string;
   /** Injectable fetch implementation; defaults to globalThis.fetch (Node 18+). */
   fetch?: FetchLike;
+  /** User-token signing secret (PD20); required only for userTokens.create. */
+  signingSecret?: SigningSecretConfig;
 }
 
 const inspectSymbol = Symbol.for('nodejs.util.inspect.custom');
@@ -31,6 +38,8 @@ export class Beecon implements BeeconClient {
   readonly connections: ConnectionsApi;
   readonly tools: ToolsApi;
   readonly logs: LogsApi;
+  readonly userTokens: UserTokensApi;
+  readonly files: FilesApi;
 
   readonly #baseUrl: string;
 
@@ -46,6 +55,8 @@ export class Beecon implements BeeconClient {
     this.connections = new ConnectionsResource(http);
     this.tools = new ToolsResource(http);
     this.logs = new LogsResource(http);
+    this.userTokens = new UserTokensResource(config.signingSecret);
+    this.files = new FilesResource(http);
   }
 
   // AC9: the API key never entered a property of this instance, so

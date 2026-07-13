@@ -66,6 +66,34 @@ describe('tools.execute', () => {
     expect(result).toEqual(failureBody);
   });
 
+  it('carries nextCursor on the execution result for a paginated tool', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ successful: true, error: null, data: { results: [] }, nextCursor: 'cur_2' }),
+    );
+    const tools = buildResource(fetchMock);
+
+    const result = await tools.execute('hubspot-list-contacts', {
+      userId: 'user_1',
+      connectionId: 'conn_1',
+      arguments: { pageSize: 50 },
+    });
+
+    expect(result.nextCursor).toBe('cur_2');
+  });
+
+  it('leaves nextCursor undefined for a non-paginated tool result', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ successful: true, error: null, data: {} }));
+    const tools = buildResource(fetchMock);
+
+    const result = await tools.execute('outlook-get-message', {
+      userId: 'user_1',
+      connectionId: 'conn_1',
+      arguments: {},
+    });
+
+    expect(result.nextCursor).toBeUndefined();
+  });
+
   it('URL-encodes special characters in the tool slug', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ successful: true, error: null, data: null }));
     const tools = buildResource(fetchMock);

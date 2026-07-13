@@ -16,14 +16,20 @@ npm install @beecon/sdk
 import { Beecon, type BeeconClient } from '@beecon/sdk';
 
 // Type consumers against BeeconClient, not the Beecon class, so tests can
-// inject a vi.fn()-built double:
+// inject a vi.fn()-built double (every sub-api BeeconClient declares must be
+// present, or `satisfies BeeconClient` fails to compile):
 //
 //   const beecon: BeeconClient = {
 //     users: { create: vi.fn() },
-//     integrations: { list: vi.fn() },
-//     connections: { initiate: vi.fn(), get: vi.fn() },
-//     tools: { execute: vi.fn() },
+//     integrations: { list: vi.fn(), getExpectedParams: vi.fn() },
+//     connections: {
+//       initiate: vi.fn(), get: vi.fn(), list: vi.fn(),
+//       disable: vi.fn(), delete: vi.fn(), reconnect: vi.fn(),
+//     },
+//     tools: { list: vi.fn(), get: vi.fn(), execute: vi.fn() },
 //     logs: { list: vi.fn() },
+//     userTokens: { create: vi.fn() },
+//     files: { upload: vi.fn() },
 //   };
 export const beecon: BeeconClient = new Beecon({
   apiKey: process.env.BEECON_API_KEY!, // beecon_sk_...
@@ -194,3 +200,144 @@ try {
 
 Tool-level outcomes never throw — they come back as
 `{ successful, error, data }` from `tools.execute`, as shown above.
+
+An upstream rate limit that survives Beecon's own retry surfaces as a typed
+`RateLimitedError` (a `BeeconApiError` subclass) carrying `retryAfter` in
+seconds:
+
+```ts
+import { RateLimitedError } from '@beecon/sdk';
+
+try {
+  await beecon.tools.execute('hubspot-list-contacts', {
+    userId: user.id,
+    connectionId: connection.id,
+    arguments: {},
+  });
+} catch (err) {
+  if (err instanceof RateLimitedError) {
+    console.error(`rate limited, retry after ${err.retryAfter}s`);
+  }
+  throw err;
+}
+```
+
+## The browser-token connect flow
+
+The popup flow above works when your server already knows which user is
+connecting. When the connect action starts entirely in the browser (a
+Chrome-extension popup, an embedded widget with no server round-trip for the
+click itself), mint a short-lived user token instead of calling `initiate`
+with a server API key.
+
+Configure the client with a signing secret (issued once, server-side, via the
+admin signing-secrets endpoint) alongside the API key:
+
+```ts
+// server/beecon.ts
+export const beecon: BeeconClient = new Beecon({
+  apiKey: process.env.BEECON_API_KEY!,
+  baseUrl: process.env.BEECON_BASE_URL!,
+  signingSecret: {
+    id: process.env.BEECON_SIGNING_SECRET_ID!, // usk_...
+    secret: process.env.BEECON_SIGNING_SECRET!,
+  },
+});
+```
+
+Mint a token for the signed-in user and hand it to the browser — minting is
+entirely local (no network call), so it never throws `BeeconApiError`, only
+`MissingSigningSecretError` if `signingSecret` was never configured:
+
+```ts
+const userToken = beecon.userTokens.create({ userId: user.id }); // default 2h expiry
+// userToken -> { token: "eyJhbGciOiJIUzI1NiIs...", expiresAt: "2026-07-13T18:00:00.000Z" }
+```
+
+The browser calls the same Beecon API with `Authorization: Bearer <token>`
+instead of the server API key. The token's surface is intentionally narrow
+(PD20): list integrations, initiate a connection (the `userId` is always
+taken from the token, never the request body), and list/get/reconnect the
+token's **own** connections. Everything else — disabling or deleting a
+connection, uploading a file, rotating keys — stays server-key-only.
+
+## Connecting Hubspot
+
+Hubspot connects through the exact same `initiate` → popup → `redirectUri`
+round-trip as Outlook above — only the integration and tool slugs differ:
+
+```ts
+const integrations = await beecon.integrations.list();
+const hubspot = integrations.find((i) => i.providerSlug === 'hubspot')!;
+
+const initiated = await beecon.connections.initiate({
+  userId: user.id,
+  integrationId: hubspot.id,
+  redirectUri: 'https://app.example.com/integrations/connected',
+});
+// open the popup at initiated.redirectUrl exactly as in step 4 above
+```
+
+## Paging through a list tool
+
+`hubspot-list-contacts` (and any tool whose mapping declares pagination)
+accepts canonical `pageSize`/`cursor` arguments and returns the next page's
+cursor as a top-level `nextCursor` on the execution result — separate from
+`data`, which stays whatever shape the tool's own output schema declares:
+
+```ts
+let cursor: string | undefined;
+const allContacts: unknown[] = [];
+
+do {
+  const result = await beecon.tools.execute('hubspot-list-contacts', {
+    userId: user.id,
+    connectionId: connection.id,
+    arguments: { pageSize: 50, cursor },
+  });
+  if (!result.successful) {
+    throw new Error(result.error?.message);
+  }
+  allContacts.push(...(result.data as { results: unknown[] }).results);
+  cursor = result.nextCursor;
+} while (cursor);
+```
+
+You can also browse the catalog itself with cursor pagination, the same
+convention every Beecon list API uses:
+
+```ts
+const page = await beecon.tools.list({ providerSlug: 'hubspot', limit: 20 });
+console.log(page.items.map((tool) => tool.slug));
+if (page.nextCursor) {
+  const nextPage = await beecon.tools.list({ providerSlug: 'hubspot', cursor: page.nextCursor, limit: 20 });
+}
+```
+
+## Uploading a file into a tool call
+
+Upload a file first, then pass its returned `id` as the file-typed argument
+a tool's mapping expects (e.g. `hubspot-upload-file`):
+
+```ts
+import { readFile } from 'node:fs/promises';
+
+const bytes = await readFile('./invoice.pdf');
+const uploaded = await beecon.files.upload({
+  fileName: 'invoice.pdf',
+  mimeType: 'application/pdf',
+  content: bytes,
+});
+// uploaded -> { id: "file_...", name: "invoice.pdf", mimeType: "application/pdf",
+//               size: 84213, downloadUrl: "https://.../api/v1/files/file_.../download" }
+
+const result = await beecon.tools.execute('hubspot-upload-file', {
+  userId: user.id,
+  connectionId: connection.id,
+  arguments: { file: uploaded.id },
+});
+```
+
+File upload is org-key-only (never reachable with a browser user token) —
+route the upload through your server, then hand the resulting `id` to the
+browser if the tool call itself happens client-side.

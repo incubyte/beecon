@@ -22,3 +22,35 @@ export class BeeconApiError extends Error {
     Object.setPrototypeOf(this, BeeconApiError.prototype);
   }
 }
+
+// RateLimitedError is PD21's typed carve-out: an exhausted platform-side
+// retry surfaces as HTTP 429 with a Retry-After header, and the SDK raises
+// this subclass (rather than a plain BeeconApiError) so callers can branch
+// on `instanceof RateLimitedError` and read retryAfter directly, while still
+// catching it with a plain `instanceof BeeconApiError` handler if they want
+// one code path for every platform-level failure.
+export class RateLimitedError extends BeeconApiError {
+  /** Seconds to wait before retrying, parsed from the Retry-After header. */
+  readonly retryAfter: number;
+
+  constructor(retryAfter: number, body: ApiErrorBody) {
+    super(429, body);
+    this.name = 'RateLimitedError';
+    this.retryAfter = retryAfter;
+    Object.setPrototypeOf(this, RateLimitedError.prototype);
+  }
+}
+
+// MissingSigningSecretError is thrown by userTokens.create when the Beecon
+// client was constructed without a signingSecret (PD20) — minting a user
+// token is a purely local operation, so there is no server round-trip that
+// could otherwise surface this as a BeeconApiError.
+export class MissingSigningSecretError extends Error {
+  constructor() {
+    super(
+      'beecon.userTokens.create requires a signing secret: construct Beecon with signingSecret: { id, secret }.',
+    );
+    this.name = 'MissingSigningSecretError';
+    Object.setPrototypeOf(this, MissingSigningSecretError.prototype);
+  }
+}

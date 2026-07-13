@@ -1,4 +1,4 @@
-import { BeeconApiError } from './errors.js';
+import { BeeconApiError, RateLimitedError } from './errors.js';
 
 export type FetchLike = typeof fetch;
 
@@ -8,7 +8,7 @@ export interface HttpClientConfig {
   fetchImpl?: FetchLike;
 }
 
-type QueryParams = Record<string, string | number | undefined>;
+type QueryParams = Record<string, string | number | boolean | undefined>;
 
 // The Node "nodejs.util.inspect.custom" well-known symbol, obtained via
 // Symbol.for so the SDK never has to import the 'node:util' module (keeping
@@ -38,6 +38,23 @@ export class HttpClient {
 
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.send<T>('POST', path, body);
+  }
+
+  delete<T>(path: string): Promise<T> {
+    return this.send<T>('DELETE', path);
+  }
+
+  // postMultipart sends a multipart/form-data POST (files.upload's only
+  // caller today): fetch derives the correct Content-Type (with boundary)
+  // from the FormData body itself, so buildHeaders' JSON content type is
+  // deliberately not used here.
+  async postMultipart<T>(path: string, form: FormData): Promise<T> {
+    const response = await this.#fetchImpl(this.buildUrl(path), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.#apiKey}` },
+      body: form,
+    });
+    return handleResponse<T>(response);
   }
 
   toJSON(): { baseUrl: string } {
@@ -87,7 +104,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
   const text = await response.text();
   const parsed = text ? parseJsonSafely(text) : undefined;
   if (!response.ok) {
-    throw toApiError(response.status, parsed);
+    throw toApiError(response.status, parsed, response.headers.get('Retry-After'));
   }
   return parsed as T;
 }
@@ -100,13 +117,26 @@ function parseJsonSafely(text: string): unknown {
   }
 }
 
-function toApiError(status: number, body: unknown): BeeconApiError {
+// toApiError builds the platform-level error for a non-2xx response. A 429
+// is PD21's deliberate carve-out: it always becomes a RateLimitedError
+// (never a plain BeeconApiError) carrying retryAfter parsed from the
+// Retry-After header, in whole seconds.
+function toApiError(status: number, body: unknown, retryAfterHeader: string | null): BeeconApiError {
   const envelope = isErrorEnvelope(body) ? body.error : undefined;
-  return new BeeconApiError(status, {
+  const errorBody = {
     code: envelope?.code ?? 'unknown_error',
     message: envelope?.message ?? `Request failed with status ${status}`,
     details: envelope?.details,
-  });
+  };
+  if (status === 429) {
+    return new RateLimitedError(parseRetryAfter(retryAfterHeader), errorBody);
+  }
+  return new BeeconApiError(status, errorBody);
+}
+
+function parseRetryAfter(header: string | null): number {
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : 0;
 }
 
 function isErrorEnvelope(
