@@ -1,6 +1,7 @@
 package connections
 
 import (
+	"errors"
 	"net/http"
 
 	"beecon/internal/httpx"
@@ -96,4 +97,31 @@ func ErrStateAlreadyUsed() *httpx.DomainError {
 // callback (AC9). The connection stays INITIATED (PD11).
 func ErrTokenExchangeFailed() *httpx.DomainError {
 	return httpx.New(http.StatusBadGateway, CodeOAuthTokenExchangeFailed, "we couldn't complete the connection with the provider — please try again")
+}
+
+// CodeMissingRequiredParams names an expected pre-auth param SubmitParams
+// requires but the connect page's form omitted (Slice 3, AC4).
+const CodeMissingRequiredParams = "missing_required_params"
+
+// ErrMissingRequiredParams is returned when SubmitParams is given values
+// missing one or more of the provider definition's required expected params
+// (AC4): connectweb re-renders the param form with each named field marked
+// invalid, and never forwards to the provider. missing names every required
+// field that was empty or absent, retrievable via MissingParamFields.
+func ErrMissingRequiredParams(missing []string) *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeMissingRequiredParams, "validation failed").
+		WithDetails(map[string]any{"field": "params", "missing": missing})
+}
+
+// MissingParamFields extracts the list of expected-param names
+// ErrMissingRequiredParams carries, so connectweb can mark each one invalid
+// without switching on error internals itself. ok is false for any other
+// error.
+func MissingParamFields(err error) ([]string, bool) {
+	var domainErr *httpx.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != CodeMissingRequiredParams {
+		return nil, false
+	}
+	missing, _ := domainErr.Details["missing"].([]string)
+	return missing, true
 }

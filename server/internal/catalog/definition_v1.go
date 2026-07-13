@@ -14,15 +14,26 @@ import (
 // unvalidated so a Phase 3 definition can land in files before the code that
 // interprets it does.
 type definitionFileV1 struct {
-	FormatVersion int                   `yaml:"formatVersion"`
-	Slug          string                `yaml:"slug"`
-	Name          string                `yaml:"name"`
-	Logo          string                `yaml:"logo"`
-	AuthScheme    string                `yaml:"authScheme"`
-	OAuth         oauthConfigFileV1     `yaml:"oauth"`
-	Mapping       providerMappingFileV1 `yaml:"mapping"`
-	Tools         []providerToolFileV1  `yaml:"tools"`
-	Triggers      any                   `yaml:"triggers"`
+	FormatVersion  int                   `yaml:"formatVersion"`
+	Slug           string                `yaml:"slug"`
+	Name           string                `yaml:"name"`
+	Logo           string                `yaml:"logo"`
+	AuthScheme     string                `yaml:"authScheme"`
+	OAuth          oauthConfigFileV1     `yaml:"oauth"`
+	Mapping        providerMappingFileV1 `yaml:"mapping"`
+	ExpectedParams []expectedParamFileV1 `yaml:"expectedParams"`
+	Tools          []providerToolFileV1  `yaml:"tools"`
+	Triggers       any                   `yaml:"triggers"`
+}
+
+// expectedParamFileV1 is PD13's expectedParams shape (Slice 3): one pre-auth
+// value the end user must supply before OAuth can start.
+type expectedParamFileV1 struct {
+	Name        string `yaml:"name"`
+	DisplayName string `yaml:"displayName"`
+	Description string `yaml:"description"`
+	Required    bool   `yaml:"required"`
+	Secret      bool   `yaml:"secret"`
 }
 
 type oauthConfigFileV1 struct {
@@ -126,6 +137,26 @@ func validateDefinitionFileV1(name string, file definitionFileV1) error {
 			return err
 		}
 	}
+	for i, param := range file.ExpectedParams {
+		if err := validateExpectedParamFileV1(name, i, param); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateExpectedParamFileV1 checks one expectedParams entry (Slice 3, AC1):
+// name is what {params.x} templating and the stored values map address the
+// value by, and displayName is what the connect page's form labels it with —
+// both must be present for the field to mean anything.
+func validateExpectedParamFileV1(fileName string, index int, param expectedParamFileV1) error {
+	prefix := fmt.Sprintf("expectedParams[%d]", index)
+	if param.Name == "" {
+		return definitionError(fileName, prefix+".name", "must not be empty")
+	}
+	if param.DisplayName == "" {
+		return definitionError(fileName, prefix+".displayName", "must not be empty")
+	}
 	return nil
 }
 
@@ -185,8 +216,23 @@ func definitionFromFileV1(file definitionFileV1) ProviderDefinition {
 			EmailField:       file.OAuth.UserInfo.Email,
 			DisplayNameField: file.OAuth.UserInfo.DisplayName,
 		},
-		Tools: toolsFromFileV1(file.Tools),
+		ExpectedParams: expectedParamsFromFileV1(file.ExpectedParams),
+		Tools:          toolsFromFileV1(file.Tools),
 	}
+}
+
+func expectedParamsFromFileV1(files []expectedParamFileV1) []ExpectedParam {
+	params := make([]ExpectedParam, 0, len(files))
+	for _, f := range files {
+		params = append(params, ExpectedParam{
+			Name:        f.Name,
+			DisplayName: f.DisplayName,
+			Description: f.Description,
+			Required:    f.Required,
+			Secret:      f.Secret,
+		})
+	}
+	return params
 }
 
 func toolsFromFileV1(files []providerToolFileV1) []ProviderTool {

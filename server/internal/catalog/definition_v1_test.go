@@ -333,3 +333,128 @@ func TestLoadProviderDefinitions_DefaultsUserInfoFieldsToEmptyWhenOmitted(t *tes
 		t.Errorf("UserInfo = %+v, want both fields empty when the definition declares no userInfo block", defs[0].UserInfo)
 	}
 }
+
+// --- expectedParams (PD13, Slice 3, AC1) ---
+
+// validExpectedParamsYAML declares two pre-auth params: a required, non-secret
+// "region" and a required, secret "apiKey" — the same shape
+// fake_param_provider.go's fixture definition uses.
+const validExpectedParamsYAML = `
+formatVersion: 1
+slug: fake-provider
+name: Fake Provider
+logo: https://static.beecon.dev/providers/fake-provider.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://example.com/authorize
+  tokenUrl: https://example.com/token
+  scopes:
+    - read
+mapping:
+  baseUrl: https://example.com
+expectedParams:
+  - name: region
+    displayName: Region
+    description: Your account's region, e.g. eu or us.
+    required: true
+    secret: false
+  - name: apiKey
+    displayName: API Key
+    description: Your account's API key.
+    required: true
+    secret: true
+tools:
+  - slug: fake-provider-tool
+    name: Tool
+    description: A tool.
+    inputSchema:
+      type: object
+    outputSchema:
+      type: object
+    mapping:
+      method: GET
+      path: /tool
+`
+
+func TestLoadProviderDefinitions_ParsesExpectedParamsNameDisplayNameDescriptionRequiredAndSecret(t *testing.T) {
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("fake-provider.yaml", validExpectedParamsYAML))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(defs[0].ExpectedParams) != 2 {
+		t.Fatalf("len(ExpectedParams) = %d, want 2", len(defs[0].ExpectedParams))
+	}
+	region := defs[0].ExpectedParams[0]
+	if region.Name != "region" || region.DisplayName != "Region" || region.Description != "Your account's region, e.g. eu or us." {
+		t.Errorf("region param = %+v, want name/displayName/description parsed from the file", region)
+	}
+	if !region.Required {
+		t.Error("region.Required = false, want true")
+	}
+	if region.Secret {
+		t.Error("region.Secret = true, want false")
+	}
+	apiKey := defs[0].ExpectedParams[1]
+	if apiKey.Name != "apiKey" || apiKey.DisplayName != "API Key" {
+		t.Errorf("apiKey param = %+v, want name/displayName parsed from the file", apiKey)
+	}
+	if !apiKey.Required {
+		t.Error("apiKey.Required = false, want true")
+	}
+	if !apiKey.Secret {
+		t.Error("apiKey.Secret = false, want true")
+	}
+}
+
+// TestLoadProviderDefinitions_DefaultsToNoExpectedParamsWhenOmitted proves a
+// definition that declares no expectedParams block at all (Outlook, Hubspot —
+// AC6) leaves the slice empty rather than failing boot.
+func TestLoadProviderDefinitions_DefaultsToNoExpectedParamsWhenOmitted(t *testing.T) {
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", validDefinitionYAML))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(defs[0].ExpectedParams) != 0 {
+		t.Errorf("ExpectedParams = %+v, want empty when the definition declares no expectedParams block", defs[0].ExpectedParams)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenAnExpectedParamIsMissingItsName(t *testing.T) {
+	// Blanking the value (rather than dropping the whole line) keeps the
+	// expectedParams entry's "- " YAML sequence-item marker intact.
+	invalid := strings.Replace(validExpectedParamsYAML, "name: region", "name: ''", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("fake-provider.yaml", invalid))
+
+	wantMessage := `invalid provider definition fake-provider.yaml: field "expectedParams[0].name" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenAnExpectedParamIsMissingItsDisplayName(t *testing.T) {
+	invalid := strings.Replace(validExpectedParamsYAML, "displayName: Region", "displayName: ''", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("fake-provider.yaml", invalid))
+
+	wantMessage := `invalid provider definition fake-provider.yaml: field "expectedParams[0].displayName" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenTheSecondExpectedParamIsMissingItsName
+// proves the index in the field-precise error names the specific entry that
+// is invalid, not always the first.
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenTheSecondExpectedParamIsMissingItsName(t *testing.T) {
+	invalid := strings.Replace(validExpectedParamsYAML, "name: apiKey", "name: ''", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("fake-provider.yaml", invalid))
+
+	wantMessage := `invalid provider definition fake-provider.yaml: field "expectedParams[1].name" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}

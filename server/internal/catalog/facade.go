@@ -119,6 +119,28 @@ func (f *Facade) withDecryptedClientSecret(integration Integration) (Integration
 	return integration, nil
 }
 
+// GetExpectedParams returns id's provider's expected pre-auth params (Slice
+// 3's catalog API): the fields the connect page must collect before OAuth
+// can start, plus the provider's own name. An unknown integration id is
+// ErrIntegrationNotFound; a loaded Integration whose provider slug names no
+// loaded definition is ErrUnknownProvider (the same defensive case
+// GetIntegration's callers already treat as fatal — definitions and
+// Integrations are validated against each other at CreateIntegration).
+func (f *Facade) GetExpectedParams(ctx context.Context, id IntegrationID) (ExpectedParamsView, error) {
+	integration, err := f.repo.FindByID(ctx, id)
+	if err != nil {
+		return ExpectedParamsView{}, err
+	}
+	if integration == nil {
+		return ExpectedParamsView{}, ErrIntegrationNotFound()
+	}
+	definition, ok := f.definitions[integration.ProviderSlug]
+	if !ok {
+		return ExpectedParamsView{}, ErrUnknownProvider(integration.ProviderSlug)
+	}
+	return ExpectedParamsView{ProviderName: definition.Name, Fields: definition.ExpectedParams}, nil
+}
+
 // ListIntegrations returns every integration in the installation (PD7: every
 // organization sees the same list in Phase 1), summarized with the provider
 // name, logo, and auth scheme a consumer needs to start a connection.

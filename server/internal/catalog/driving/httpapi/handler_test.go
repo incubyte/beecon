@@ -5,6 +5,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -337,6 +338,97 @@ func TestGetTool_Returns404ForAnUnknownSlug(t *testing.T) {
 	r := newToolsTestRouter(t)
 
 	w := doRequestAsOrg(r, http.MethodGet, "/tools/does-not-exist", "org_1", "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
+	}
+}
+
+// --- GetExpectedParams (Slice 3, AC2) ---
+
+// fakeDefinitionsWithExpectedParams is fakeDefinitions' Outlook provider plus
+// a required non-secret "region" and a required secret "apiKey" expected
+// param.
+func fakeDefinitionsWithExpectedParams() []catalog.ProviderDefinition {
+	defs := fakeDefinitions()
+	defs[0].ExpectedParams = []catalog.ExpectedParam{
+		{Name: "region", DisplayName: "Region", Description: "Your account's region.", Required: true, Secret: false},
+		{Name: "apiKey", DisplayName: "API Key", Description: "Your account's API key.", Required: true, Secret: true},
+	}
+	return defs
+}
+
+// newExpectedParamsTestRouter wires GetExpectedParams behind the same route
+// pattern app/router.go uses, returning the created integration's id so tests
+// can address it.
+func newExpectedParamsTestRouter(t *testing.T) (chi.Router, string) {
+	t.Helper()
+	facade, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: fakeDefinitionsWithExpectedParams()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	created, err := facade.CreateIntegration(context.Background(), "outlook", "cid", "csecret")
+	if err != nil {
+		t.Fatalf("CreateIntegration: %v", err)
+	}
+	errorRenderer := httpx.NewErrorRenderer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(facade, errorRenderer)
+
+	r := chi.NewRouter()
+	r.Get("/integrations/{intgId}/expected-params", h.GetExpectedParams)
+	return r, string(created.ID)
+}
+
+func TestGetExpectedParams_Returns200WithTheProvidersNameAndFieldShapes(t *testing.T) {
+	r, integrationID := newExpectedParamsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/integrations/"+integrationID+"/expected-params", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var dto expectedParamsDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if dto.ProviderName != "Outlook" {
+		t.Errorf("providerName = %q, want %q", dto.ProviderName, "Outlook")
+	}
+	if len(dto.Fields) != 2 {
+		t.Fatalf("len(fields) = %d, want 2", len(dto.Fields))
+	}
+	byName := map[string]expectedParamFieldDTO{}
+	for _, field := range dto.Fields {
+		byName[field.Name] = field
+	}
+	region, ok := byName["region"]
+	if !ok || !region.Required || region.Secret {
+		t.Errorf("region field = %+v (present=%v), want required=true secret=false", region, ok)
+	}
+	apiKey, ok := byName["apiKey"]
+	if !ok || !apiKey.Required || !apiKey.Secret {
+		t.Errorf("apiKey field = %+v (present=%v), want required=true secret=true", apiKey, ok)
+	}
+}
+
+func TestGetExpectedParams_Returns401WhenNoOrgContext(t *testing.T) {
+	r, integrationID := newExpectedParamsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/integrations/"+integrationID+"/expected-params", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestGetExpectedParams_Returns404ForAnUnknownIntegrationID(t *testing.T) {
+	r, _ := newExpectedParamsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/integrations/intg_does_not_exist/expected-params", "org_1", "")
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())

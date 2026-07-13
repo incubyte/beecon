@@ -40,6 +40,7 @@ func buildRouter(
 	// outside the logged group below so the connect token and the OAuth
 	// authorization code never land in the chi request log's path/query.
 	r.Get("/connect/{token}", connectWebHandler.ConnectPage)
+	r.Post("/connect/{token}/params", connectWebHandler.SubmitParams)
 	r.Get("/connect/oauth/callback", connectWebHandler.Callback)
 
 	r.Group(func(r chi.Router) {
@@ -61,6 +62,7 @@ func buildRouter(
 			r.Route("/integrations", func(r chi.Router) {
 				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
 				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/", catalogHandler.List)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/{intgId}/expected-params", catalogHandler.GetExpectedParams)
 			})
 
 			r.Route("/users", func(r chi.Router) {

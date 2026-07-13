@@ -12,13 +12,16 @@ import (
 
 // ExecutionAccess is what a tool execution needs from a Connection: its
 // current status (a non-ACTIVE connection is a tool-level failure the caller
-// decides how to report, AC4) and — only meaningful when ACTIVE — the
-// connection's access token, decrypted for this one call. It is never held
-// longer than the single provider call it authorizes, put on a DTO, or
-// written to a log line unredacted.
+// decides how to report, AC4), and — only meaningful when ACTIVE — the
+// connection's access token and its collected pre-auth param values,
+// decrypted for this one call (Slice 3, AC8: usable via {params.x}
+// templating in tool mappings). Neither is ever held longer than the single
+// provider call it authorizes, put on a DTO, or written to a log line
+// unredacted.
 type ExecutionAccess struct {
 	Status      Status
 	AccessToken string
+	Params      map[string]string
 }
 
 // ResolveForExecution looks up a Connection scoped to org and confirms it
@@ -44,5 +47,9 @@ func (f *Facade) ResolveForExecution(ctx context.Context, org organizations.OrgI
 	if err != nil {
 		return ExecutionAccess{}, err
 	}
-	return ExecutionAccess{Status: connection.Status, AccessToken: accessToken}, nil
+	params, err := f.decryptParams(connection.EncryptedParams)
+	if err != nil {
+		return ExecutionAccess{}, err
+	}
+	return ExecutionAccess{Status: connection.Status, AccessToken: accessToken, Params: params}, nil
 }

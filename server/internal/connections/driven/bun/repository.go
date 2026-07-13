@@ -32,6 +32,7 @@ type ConnectionRow struct {
 	EncryptedRefreshToken string    `bun:"encrypted_refresh_token,notnull"`
 	AccountEmail          string    `bun:"account_email,notnull"`
 	AccountDisplayName    string    `bun:"account_display_name,notnull"`
+	EncryptedParams       string    `bun:"encrypted_params,notnull"`
 	CreatedAt             time.Time `bun:"created_at,notnull"`
 }
 
@@ -82,14 +83,16 @@ func (r *Repository) FindByID(ctx context.Context, org organizations.OrgID, id c
 	return &connection, nil
 }
 
-// Update persists a previously initiated Connection's mutable fields: status
-// and the OAuth callback's activation payload (encrypted tokens, account
-// metadata).
+// Update persists a previously initiated Connection's mutable fields: status,
+// the OAuth callback's activation payload (encrypted tokens, account
+// metadata), and the connect page's collected pre-auth param values
+// (encrypted_params, Slice 3) — the same call SubmitParams uses to persist
+// params ahead of activation.
 func (r *Repository) Update(ctx context.Context, connection connections.Connection) error {
 	row := rowFromConnection(connection)
 	_, err := r.db.NewUpdate().
 		Model(&row).
-		Column("status", "encrypted_access_token", "encrypted_refresh_token", "account_email", "account_display_name").
+		Column("status", "encrypted_access_token", "encrypted_refresh_token", "account_email", "account_display_name", "encrypted_params").
 		Where("id = ?", row.ID).
 		Exec(ctx)
 	return err
@@ -209,6 +212,7 @@ func rowFromConnection(connection connections.Connection) ConnectionRow {
 		EncryptedRefreshToken: connection.EncryptedRefreshToken,
 		AccountEmail:          connection.AccountEmail,
 		AccountDisplayName:    connection.AccountDisplayName,
+		EncryptedParams:       connection.EncryptedParams,
 		CreatedAt:             connection.CreatedAt,
 	}
 }
@@ -227,6 +231,7 @@ func connectionFromRow(row *ConnectionRow) connections.Connection {
 		EncryptedRefreshToken: row.EncryptedRefreshToken,
 		AccountEmail:          row.AccountEmail,
 		AccountDisplayName:    row.AccountDisplayName,
+		EncryptedParams:       row.EncryptedParams,
 		CreatedAt:             row.CreatedAt,
 	}
 }

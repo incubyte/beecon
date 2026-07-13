@@ -29,7 +29,11 @@ const (
 // connection attempt. EncryptedAccessToken and EncryptedRefreshToken hold
 // only Vault ciphertext (AC10: the raw token values are never held on this
 // struct); AccountEmail and AccountDisplayName are populated once the OAuth
-// callback activates the connection (PD9, AC6).
+// callback activates the connection (PD9, AC6). EncryptedParams holds the
+// connect page's collected pre-auth param values (Slice 3, PD13/PD17),
+// vault-encrypted as one JSON blob under the same rule — never plaintext,
+// never held anywhere else; empty when the provider declares no
+// expectedParams, or before the connect page's form has been submitted.
 type Connection struct {
 	ID                    ConnectionID
 	OrgID                 organizations.OrgID
@@ -43,6 +47,7 @@ type Connection struct {
 	EncryptedRefreshToken string
 	AccountEmail          string
 	AccountDisplayName    string
+	EncryptedParams       string
 	CreatedAt             time.Time
 }
 
@@ -84,4 +89,14 @@ func (c Connection) Activate(encryptedAccessToken, encryptedRefreshToken, accoun
 	activated.AccountEmail = accountEmail
 	activated.AccountDisplayName = accountDisplayName
 	return activated
+}
+
+// WithParams returns a copy of c carrying encryptedParams — the vault
+// ciphertext of the pre-auth param values collected via the connect page's
+// param-collection form (Slice 3, AC7), submitted before the OAuth handshake
+// proceeds. c's id, status, and every other field are untouched.
+func (c Connection) WithParams(encryptedParams string) Connection {
+	updated := c
+	updated.EncryptedParams = encryptedParams
+	return updated
 }

@@ -1,8 +1,8 @@
 // template.go implements the {input.x}/{params.x} substitution the
 // finalized definition format (PD13) declares for a tool's mapping: path
 // templating, and the query/header mapping values Facade.callProvider
-// evaluates against a call's arguments (params arrive in Slice 3 — nil until
-// then).
+// evaluates against a call's arguments and a connection's decrypted pre-auth
+// param values (Slice 3, AC8) — nil for a connection that collected none.
 package execution
 
 import (

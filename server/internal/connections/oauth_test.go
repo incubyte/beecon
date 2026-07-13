@@ -9,7 +9,9 @@ package connections_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"beecon/internal/connections"
 	memory "beecon/internal/connections/driven/memory"
 	"beecon/internal/organizations"
+	"beecon/internal/vault"
 )
 
 type fakeProviderReader struct {
@@ -84,31 +87,53 @@ func testProviderDefinition() catalog.ProviderDefinition {
 	}
 }
 
+// handshakeFixtureVaultKey is a fixed 32-byte AES-256 key every
+// handshakeFixture's Vault is built from, so a test can decrypt exactly what
+// SubmitParams/HandleCallback encrypted (rather than only asserting the
+// ciphertext isn't the raw value) without depending on the memory package's
+// own unexported default key.
+var handshakeFixtureVaultKey = []byte("oauth-test-fixture-vault-key-32!")
+
 // handshakeFixture wires a connections.Facade with every reader port the
-// OAuth handshake needs, a controllable clock, and a scripted OAuthClient.
+// OAuth handshake needs, a controllable clock, a scripted OAuthClient, and
+// the exact Vault the facade encrypts through — so a test can decrypt stored
+// ciphertext back to its plaintext instead of pattern-matching on it.
 type handshakeFixture struct {
 	facade      *connections.Facade
 	oauthClient *fakeOAuthClient
 	clock       *mutableClock
+	vault       *vault.Vault
 }
 
 func newHandshakeFixture(oauthClient *fakeOAuthClient) *handshakeFixture {
+	return newHandshakeFixtureWithDefinition(oauthClient, testProviderDefinition())
+}
+
+// newHandshakeFixtureWithDefinition is newHandshakeFixture, letting a test
+// supply its own provider definition (e.g. an expected-params shape a
+// specific test needs that testProviderDefinitionWithParams doesn't declare).
+func newHandshakeFixtureWithDefinition(oauthClient *fakeOAuthClient, definition catalog.ProviderDefinition) *handshakeFixture {
 	orgs := map[organizations.OrgID]organizations.Organization{
 		testOrg: {ID: testOrg, Name: "Acme", AllowedRedirectURIs: []string{allowedRedirect}},
 	}
 	user := organizations.User{ID: testUser, OrgID: testOrg, Name: "Ada"}
 	integration := catalog.Integration{ID: testIntegration, ProviderSlug: testProviderSlug, ClientID: "the-client-id", ClientSecret: "the-client-secret"}
 	clock := &mutableClock{now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+	tokenVault, err := vault.NewVault(handshakeFixtureVaultKey)
+	if err != nil {
+		panic(err) // handshakeFixtureVaultKey is a fixed valid 32-byte key; this can never fail.
+	}
 
 	facade := memory.NewFacadeWithOverrides(memory.Overrides{
 		Organizations: fakeOrgReader{orgs: orgs},
 		Users:         fakeUserReader{users: map[organizations.UserID]organizations.User{testUser: user}},
 		Integrations:  fakeIntegrationReader{integrations: map[catalog.IntegrationID]catalog.Integration{testIntegration: integration}},
-		Providers:     fakeProviderReader{definitions: map[string]catalog.ProviderDefinition{testProviderSlug: testProviderDefinition()}},
+		Providers:     fakeProviderReader{definitions: map[string]catalog.ProviderDefinition{testProviderSlug: definition}},
 		OAuthClient:   oauthClient,
+		Vault:         tokenVault,
 		Now:           clock.Now,
 	})
-	return &handshakeFixture{facade: facade, oauthClient: oauthClient, clock: clock}
+	return &handshakeFixture{facade: facade, oauthClient: oauthClient, clock: clock, vault: tokenVault}
 }
 
 func newHappyPathOAuthClient() *fakeOAuthClient {
@@ -511,6 +536,326 @@ func TestHandleCallback_AccountFetchFailureShowsAnErrorAndConnectionStaysInitiat
 
 	assertDomainError(t, err, connections.CodeOAuthTokenExchangeFailed, 502)
 	assertConnectionStatus(t, f, initiated.Connection.ID, connections.StatusInitiated)
+}
+
+// --- Expected pre-auth params (Slice 3, AC3, AC4, AC7, AC8) ---
+
+// testProviderDefinitionWithParams is testProviderDefinition plus a required
+// non-secret "region" and a required secret "apiKey" expected param, and
+// AuthorizeURL/TokenURL templated with {params.region} — the same shape
+// fake_param_provider.go's fixture uses, proving {params.x} templating (AC8)
+// without depending on that integration-test-only fixture.
+func testProviderDefinitionWithParams() catalog.ProviderDefinition {
+	definition := testProviderDefinition()
+	definition.AuthorizeURL = "https://login.microsoftonline.com/{params.region}/oauth2/v2.0/authorize"
+	definition.TokenURL = "https://login.microsoftonline.com/{params.region}/oauth2/v2.0/token"
+	definition.ExpectedParams = []catalog.ExpectedParam{
+		{Name: "region", DisplayName: "Region", Description: "Your account's region.", Required: true, Secret: false},
+		{Name: "apiKey", DisplayName: "API Key", Description: "Your account's API key.", Required: true, Secret: true},
+	}
+	return definition
+}
+
+// newParamsHandshakeFixture is newHandshakeFixture wired against
+// testProviderDefinitionWithParams instead of the plain testProviderDefinition.
+func newParamsHandshakeFixture(oauthClient *fakeOAuthClient) *handshakeFixture {
+	return newHandshakeFixtureWithDefinition(oauthClient, testProviderDefinitionWithParams())
+}
+
+// TestOpenConnectPage_ShowsTheParamCollectionFormWhenTheDefinitionDeclaresExpectedParams
+// is AC3: the form must render (and nothing must forward to the provider)
+// before any params have been submitted.
+func TestOpenConnectPage_ShowsTheParamCollectionFormWhenTheDefinitionDeclaresExpectedParams(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	view, err := f.facade.OpenConnectPage(context.Background(), initiated.Connection.ConnectToken)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !view.ParamsRequired {
+		t.Fatal("ParamsRequired = false, want true when the definition declares expected params and none have been submitted yet")
+	}
+	if view.AuthorizeURL != "" {
+		t.Errorf("AuthorizeURL = %q, want empty — nothing must forward to the provider before params are collected", view.AuthorizeURL)
+	}
+	if len(view.ParamFields) != 2 {
+		t.Fatalf("len(ParamFields) = %d, want 2", len(view.ParamFields))
+	}
+}
+
+// --- SubmitParams shares validateConnectToken with OpenConnectPage (AC2) ---
+//
+// SubmitParams calls the same validateConnectToken helper OpenConnectPage
+// does (oauth.go:120-123), rather than re-implementing the check — these
+// three tests pin that sharing to the POST path specifically, so a future
+// refactor that accidentally drops the call on this path fails loudly here
+// rather than only being covered indirectly via OpenConnectPage's own tests.
+
+// TestSubmitParams_ReturnsInvalidLinkErrorForATokenThatNamesNoConnection is
+// AC2 on the POST path: a token nobody minted.
+func TestSubmitParams_ReturnsInvalidLinkErrorForATokenThatNamesNoConnection(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+
+	view, err := f.facade.SubmitParams(context.Background(), "does-not-exist", map[string]string{"region": "eu", "apiKey": "k"})
+
+	assertDomainError(t, err, connections.CodeConnectLinkInvalid, 404)
+	if view.AuthorizeURL != "" {
+		t.Errorf("AuthorizeURL = %q, want empty — an invalid token must never forward to the provider", view.AuthorizeURL)
+	}
+}
+
+// TestSubmitParams_ReturnsExpiredLinkErrorPastTheConnectLinkTTL is AC2 on the
+// POST path: a connect link opened past ConnectLinkTTL, using the fixture's
+// injected clock rather than a real sleep.
+func TestSubmitParams_ReturnsExpiredLinkErrorPastTheConnectLinkTTL(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+	f.clock.now = f.clock.now.Add(connections.ConnectLinkTTL + time.Minute)
+
+	_, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"})
+
+	assertDomainError(t, err, connections.CodeConnectLinkExpired, 410)
+}
+
+// TestSubmitParams_ReturnsAlreadyCompletedErrorForAConnectionNoLongerInitiated
+// is AC2 on the POST path: a connection already activated by a prior
+// handshake must reject a second params submission.
+func TestSubmitParams_ReturnsAlreadyCompletedErrorForAConnectionNoLongerInitiated(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+	if _, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"}); err != nil {
+		t.Fatalf("SubmitParams: %v", err)
+	}
+	activateConnection(t, f, initiated)
+
+	_, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"})
+
+	assertDomainError(t, err, connections.CodeConnectLinkAlreadyCompleted, 410)
+}
+
+// TestSubmitParams_RejectsAMissingRequiredFieldAndNeverPersistsOrForwards is
+// AC4: a required field left empty is an inline validation error, and nothing
+// is stored or forwarded.
+func TestSubmitParams_RejectsAMissingRequiredFieldAndNeverPersistsOrForwards(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	view, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu"})
+
+	missing, ok := connections.MissingParamFields(err)
+	if !ok {
+		t.Fatalf("expected a missing-required-params error, got %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "apiKey" {
+		t.Errorf("missing fields = %v, want [apiKey]", missing)
+	}
+	if view.AuthorizeURL != "" {
+		t.Errorf("AuthorizeURL = %q, want empty — a rejected submission must never forward to the provider", view.AuthorizeURL)
+	}
+	if !view.ParamsRequired {
+		t.Error("ParamsRequired = false, want true — the form must be shown again after a rejected submission")
+	}
+	got, getErr := f.facade.Get(context.Background(), testOrg, initiated.Connection.ID)
+	if getErr != nil {
+		t.Fatalf("Get: %v", getErr)
+	}
+	if got.EncryptedParams != "" {
+		t.Errorf("EncryptedParams = %q, want empty — a rejected submission must not persist anything", got.EncryptedParams)
+	}
+}
+
+// TestSubmitParams_StoresSubmittedValuesEncryptedNeverInPlaintext is AC7's
+// storage half. It decrypts EncryptedParams with the fixture's own vault and
+// compares the exact stored values, rather than pattern-matching the
+// ciphertext for a submitted value's substring: random-nonce AES-GCM
+// ciphertext, base64-encoded, can coincidentally contain a short value like
+// "eu" — a decrypt-and-compare is the only assertion that can't false-fail.
+func TestSubmitParams_StoresSubmittedValuesEncryptedNeverInPlaintext(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	_, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "super-secret-api-key-value"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := f.facade.Get(context.Background(), testOrg, initiated.Connection.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.EncryptedParams == "" {
+		t.Fatal("EncryptedParams is empty after a successful submission")
+	}
+	if strings.Contains(got.EncryptedParams, "super-secret-api-key-value") {
+		t.Errorf("EncryptedParams %q contains the raw secret value in plaintext — it must be vault ciphertext", got.EncryptedParams)
+	}
+
+	plaintext, err := f.vault.Decrypt(got.EncryptedParams)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal([]byte(plaintext), &stored); err != nil {
+		t.Fatalf("unmarshal decrypted params: %v", err)
+	}
+	if stored["region"] != "eu" || stored["apiKey"] != "super-secret-api-key-value" {
+		t.Errorf("decrypted stored params = %v, want {region: \"eu\", apiKey: \"super-secret-api-key-value\"}", stored)
+	}
+}
+
+// TestSubmitParams_DropsAnyUndeclaredPostedFieldBeforeStoringIt is
+// encryptParams' own guard (oauth.go:438-453): a browser-forged extra field
+// the connect page's form never declared must never be stored, since a
+// stored undeclared field could later be injected into a provider's own
+// {params.x} templating. Facade-level with the fixture's own vault is enough
+// to prove this — no HTTP layer needed.
+func TestSubmitParams_DropsAnyUndeclaredPostedFieldBeforeStoringIt(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	_, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{
+		"region":   "eu",
+		"apiKey":   "super-secret-api-key-value",
+		"injected": "value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := f.facade.Get(context.Background(), testOrg, initiated.Connection.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	plaintext, err := f.vault.Decrypt(got.EncryptedParams)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal([]byte(plaintext), &stored); err != nil {
+		t.Fatalf("unmarshal decrypted params: %v", err)
+	}
+	if _, ok := stored["injected"]; ok {
+		t.Fatalf("decrypted stored params = %v, want no \"injected\" key — an undeclared posted field must never be stored", stored)
+	}
+	if len(stored) != 2 || stored["region"] != "eu" || stored["apiKey"] != "super-secret-api-key-value" {
+		t.Errorf("decrypted stored params = %v, want exactly {region: \"eu\", apiKey: \"super-secret-api-key-value\"}", stored)
+	}
+}
+
+// TestSubmitParams_ReturnsTheForwardingViewOnceParamsAreCollected proves a
+// successful submission returns exactly what OpenConnectPage would return for
+// an integration with no expected params: a provider consent link, no form.
+func TestSubmitParams_ReturnsTheForwardingViewOnceParamsAreCollected(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	view, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "super-secret-api-key-value"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if view.ParamsRequired {
+		t.Error("ParamsRequired = true, want false — the form must not render again after a successful submission")
+	}
+	if view.AuthorizeURL == "" {
+		t.Fatal("AuthorizeURL is empty, want the provider's consent link now that params are collected")
+	}
+}
+
+// TestSubmitParams_TemplatesTheCollectedParamIntoTheAuthorizeURL is AC8's
+// OAuth-URL half.
+func TestSubmitParams_TemplatesTheCollectedParamIntoTheAuthorizeURL(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+
+	view, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "super-secret-api-key-value"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(view.AuthorizeURL, "/eu/oauth2/v2.0/authorize") {
+		t.Errorf("AuthorizeURL = %q, want the {params.region} token substituted with the collected value %q", view.AuthorizeURL, "eu")
+	}
+	if strings.Contains(view.AuthorizeURL, "{params.region}") {
+		t.Errorf("AuthorizeURL = %q, still carries an unsubstituted {params.region} token", view.AuthorizeURL)
+	}
+}
+
+// TestSubmitParams_LeavesAnUnsuppliedOptionalParamsTemplateTokenUntouched
+// covers renderParamsTemplate's other branch (oauth.go:423-431): a {params.x}
+// token whose param the caller never supplied is left untouched rather than
+// substituted with an empty string. SubmitParams already rejects any
+// submission missing a required field before reaching buildAuthorizeURL, so
+// this only ever fires for an optional param — the definition here declares
+// "tenant" optional and never supplies it.
+func TestSubmitParams_LeavesAnUnsuppliedOptionalParamsTemplateTokenUntouched(t *testing.T) {
+	definition := testProviderDefinitionWithParams()
+	definition.AuthorizeURL = "https://login.microsoftonline.com/{params.region}/{params.tenant}/oauth2/v2.0/authorize"
+	definition.ExpectedParams = append(definition.ExpectedParams, catalog.ExpectedParam{
+		Name: "tenant", DisplayName: "Tenant", Description: "Optional tenant override.", Required: false, Secret: false,
+	})
+	f := newHandshakeFixtureWithDefinition(newHappyPathOAuthClient(), definition)
+	initiated := initiateConnection(t, f)
+
+	view, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(view.AuthorizeURL, "/eu/{params.tenant}/oauth2/v2.0/authorize") {
+		t.Errorf("AuthorizeURL = %q, want {params.region} substituted but the unsupplied optional {params.tenant} left untouched", view.AuthorizeURL)
+	}
+}
+
+// TestOpenConnectPage_ReopeningAfterParamsAreCollectedGoesStraightToTheForwardingView
+// proves needsParamsForm only fires once: a link opened again after
+// submission must not show the form a second time.
+func TestOpenConnectPage_ReopeningAfterParamsAreCollectedGoesStraightToTheForwardingView(t *testing.T) {
+	f := newParamsHandshakeFixture(newHappyPathOAuthClient())
+	initiated := initiateConnection(t, f)
+	if _, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"}); err != nil {
+		t.Fatalf("SubmitParams: %v", err)
+	}
+
+	view, err := f.facade.OpenConnectPage(context.Background(), initiated.Connection.ConnectToken)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if view.ParamsRequired {
+		t.Error("ParamsRequired = true, want false — reopening after params are collected must not show the form again")
+	}
+	if view.AuthorizeURL == "" {
+		t.Error("AuthorizeURL is empty, want the provider's consent link")
+	}
+}
+
+// TestHandleCallback_TemplatesTheCollectedParamIntoTheTokenExchangeRequestURL
+// is AC8's other half: the collected param also reaches the token exchange's
+// own URL, not just the authorize link.
+func TestHandleCallback_TemplatesTheCollectedParamIntoTheTokenExchangeRequestURL(t *testing.T) {
+	client := newHappyPathOAuthClient()
+	f := newParamsHandshakeFixture(client)
+	initiated := initiateConnection(t, f)
+	if _, err := f.facade.SubmitParams(context.Background(), initiated.Connection.ConnectToken, map[string]string{"region": "eu", "apiKey": "k"}); err != nil {
+		t.Fatalf("SubmitParams: %v", err)
+	}
+	view, err := f.facade.OpenConnectPage(context.Background(), initiated.Connection.ConnectToken)
+	if err != nil {
+		t.Fatalf("OpenConnectPage: %v", err)
+	}
+	state := queryParam(t, view.AuthorizeURL, "state")
+
+	_, err = f.facade.HandleCallback(context.Background(), "the-auth-code", state, "")
+
+	if err != nil {
+		t.Fatalf("HandleCallback: %v", err)
+	}
+	if !strings.Contains(client.lastExchangeRequest.TokenURL, "/eu/oauth2/v2.0/token") {
+		t.Errorf("TokenURL = %q, want the {params.region} token substituted with %q", client.lastExchangeRequest.TokenURL, "eu")
+	}
 }
 
 func assertConnectionStatus(t *testing.T, f *handshakeFixture, id connections.ConnectionID, want connections.Status) {

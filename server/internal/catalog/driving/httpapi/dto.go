@@ -83,6 +83,40 @@ func toToolSummaryDTO(tool catalog.ToolSummary) toolSummaryDTO {
 	}
 }
 
+// expectedParamFieldDTO is one field of GET
+// /api/v1/integrations/{intgId}/expected-params' response (Slice 3, AC2):
+// never a value — only the field's own shape (name, display label,
+// description, required/secret flags).
+type expectedParamFieldDTO struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	Secret      bool   `json:"secret"`
+}
+
+// expectedParamsDTO is GET /api/v1/integrations/{intgId}/expected-params'
+// response shape (Slice 3, AC2): the provider's name plus its expected
+// fields.
+type expectedParamsDTO struct {
+	ProviderName string                  `json:"providerName"`
+	Fields       []expectedParamFieldDTO `json:"fields"`
+}
+
+func toExpectedParamsDTO(view catalog.ExpectedParamsView) expectedParamsDTO {
+	fields := make([]expectedParamFieldDTO, 0, len(view.Fields))
+	for _, field := range view.Fields {
+		fields = append(fields, expectedParamFieldDTO{
+			Name:        field.Name,
+			DisplayName: field.DisplayName,
+			Description: field.Description,
+			Required:    field.Required,
+			Secret:      field.Secret,
+		})
+	}
+	return expectedParamsDTO{ProviderName: view.ProviderName, Fields: fields}
+}
+
 func toToolsPageDTO(page catalog.ToolPage) toolsPageDTO {
 	items := make([]toolSummaryDTO, 0, len(page.Items))
 	for _, tool := range page.Items {

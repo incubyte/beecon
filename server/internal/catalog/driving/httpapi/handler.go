@@ -104,6 +104,22 @@ func (h *Handler) GetTool(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, toToolSummaryDTO(tool))
 }
 
+// GetExpectedParams handles GET /api/v1/integrations/{intgId}/expected-params
+// (org-scoped route; Slice 3's AC2): an unknown integration id is not-found.
+func (h *Handler) GetExpectedParams(w http.ResponseWriter, r *http.Request) {
+	if _, ok := organizations.OrgIDFromContext(r.Context()); !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+	id := catalog.IntegrationID(chi.URLParam(r, "intgId"))
+	view, err := h.facade.GetExpectedParams(r.Context(), id)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toExpectedParamsDTO(view))
+}
+
 func parseBoolQueryParam(raw string) bool {
 	parsed, _ := strconv.ParseBool(raw)
 	return parsed

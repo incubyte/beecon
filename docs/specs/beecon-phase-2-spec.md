@@ -173,14 +173,14 @@ and runs tools — with the client-secret encryption Phase 1 deferred.
 The mechanism rolai calls `getExpectedParamsForUser`: some providers need values
 (subdomains, API keys) from the end user before OAuth can even start.
 
-- [ ] A provider definition may declare expected pre-auth params (name, displayName, description, required, secret flag); invalid declarations fail boot with a clear message
-- [ ] Consumer can fetch an integration's expected params (fields + provider name) via the API
-- [ ] When a definition declares expected params, the connect page shows a param-collection form before forwarding to the provider
-- [ ] Submitting the form with a required param missing shows an inline validation error and does not forward to the provider
-- [ ] Params flagged secret are masked in the form input
-- [ ] Providers without expected params (Outlook, Hubspot) skip the form entirely — their connect flow is unchanged
-- [ ] Submitted param values are stored encrypted with the connection's credentials and appear in no API response and no log entry
-- [ ] Collected values are usable via `{params.x}` templating in OAuth URLs and tool mappings (proven with a test-fixture provider definition, since neither Outlook nor Hubspot needs params)
+- [x] A provider definition may declare expected pre-auth params (name, displayName, description, required, secret flag); invalid declarations fail boot with a clear message
+- [x] Consumer can fetch an integration's expected params (fields + provider name) via the API
+- [x] When a definition declares expected params, the connect page shows a param-collection form before forwarding to the provider
+- [x] Submitting the form with a required param missing shows an inline validation error and does not forward to the provider
+- [x] Params flagged secret are masked in the form input
+- [x] Providers without expected params (Outlook, Hubspot) skip the form entirely — their connect flow is unchanged
+- [x] Submitted param values are stored encrypted with the connection's credentials and appear in no API response and no log entry
+- [x] Collected values are usable via `{params.x}` templating in OAuth URLs and tool mappings (proven with a test-fixture provider definition, since neither Outlook nor Hubspot needs params)
 
 ## Slice 4 — Connections live and die: full lifecycle with stable ids
 

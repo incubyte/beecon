@@ -193,6 +193,77 @@ func TestGetIntegration_ReturnsTypedNotFoundForAnUnknownID(t *testing.T) {
 	assertDomainError(t, err, catalog.CodeNotFound, 404)
 }
 
+// --- GetExpectedParams (Slice 3, AC2) ---
+
+// fakeDefinitionsWithExpectedParams is fakeDefinitions' Outlook provider plus
+// a required non-secret "region" and a required secret "apiKey" expected
+// param, so GetExpectedParams has something to return besides an empty list.
+func fakeDefinitionsWithExpectedParams() []catalog.ProviderDefinition {
+	defs := fakeDefinitions()
+	defs[0].ExpectedParams = []catalog.ExpectedParam{
+		{Name: "region", DisplayName: "Region", Description: "Your account's region.", Required: true, Secret: false},
+		{Name: "apiKey", DisplayName: "API Key", Description: "Your account's API key.", Required: true, Secret: true},
+	}
+	return defs
+}
+
+func TestGetExpectedParams_ReturnsTheProvidersNameAndDeclaredFields(t *testing.T) {
+	f, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: fakeDefinitionsWithExpectedParams()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	created, err := f.CreateIntegration(context.Background(), "outlook", "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("CreateIntegration: %v", err)
+	}
+
+	view, err := f.GetExpectedParams(context.Background(), created.ID)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if view.ProviderName != "Outlook" {
+		t.Errorf("ProviderName = %q, want %q", view.ProviderName, "Outlook")
+	}
+	if len(view.Fields) != 2 {
+		t.Fatalf("len(Fields) = %d, want 2", len(view.Fields))
+	}
+	if view.Fields[0].Name != "region" || view.Fields[0].Required != true || view.Fields[0].Secret != false {
+		t.Errorf("Fields[0] = %+v, want the region field (required, non-secret)", view.Fields[0])
+	}
+	if view.Fields[1].Name != "apiKey" || view.Fields[1].Secret != true {
+		t.Errorf("Fields[1] = %+v, want the apiKey field flagged secret", view.Fields[1])
+	}
+}
+
+// TestGetExpectedParams_ReturnsEmptyFieldsForAProviderWithNoExpectedParams is
+// AC6's read-path half: Outlook/Hubspot-shaped integrations report no fields
+// to collect.
+func TestGetExpectedParams_ReturnsEmptyFieldsForAProviderWithNoExpectedParams(t *testing.T) {
+	f := newCatalogFacade(t)
+	created, err := f.CreateIntegration(context.Background(), "outlook", "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("CreateIntegration: %v", err)
+	}
+
+	view, err := f.GetExpectedParams(context.Background(), created.ID)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(view.Fields) != 0 {
+		t.Errorf("Fields = %+v, want empty for a provider with no expectedParams", view.Fields)
+	}
+}
+
+func TestGetExpectedParams_ReturnsNotFoundForAnUnknownIntegrationID(t *testing.T) {
+	f := newCatalogFacade(t)
+
+	_, err := f.GetExpectedParams(context.Background(), catalog.IntegrationID("intg_missing"))
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
 // --- Client-secret encryption (PD17, Slice 2) ---
 
 // newCatalogFacadeWithRepo is newCatalogFacade plus a handle on the

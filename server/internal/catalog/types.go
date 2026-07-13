@@ -44,6 +44,33 @@ const (
 	CredentialStyleBasicAuth = "basicAuth"
 )
 
+// ExpectedParam is one pre-auth value a provider definition may declare that
+// the end user must supply before OAuth can even start (PD13's
+// expectedParams, Slice 3) — a subdomain, an API key, anything the provider
+// needs that is not part of the OAuth grant itself. Name is the key
+// {params.x} templating and the connect page's submitted values address it
+// by; DisplayName and Description are shown on the connect page's
+// param-collection form. Secret marks a value masked in that form's input
+// (type="password", AC5) and, like an OAuth token, always vault-encrypted
+// before storage — it never appears in an API response or a log entry
+// (AC7).
+type ExpectedParam struct {
+	Name        string
+	DisplayName string
+	Description string
+	Required    bool
+	Secret      bool
+}
+
+// ExpectedParamsView is what GetExpectedParams returns (Slice 3's catalog
+// API): the provider's expected pre-auth param fields, plus the provider's
+// own name — a consumer addressing an Integration by id alone still needs to
+// know which provider it names.
+type ExpectedParamsView struct {
+	ProviderName string
+	Fields       []ExpectedParam
+}
+
 // UserInfoMapping names which field of a provider's user-info/token-metadata
 // response (PD13's userInfo mapping) the OAuth callback reads into a
 // Connection's captured account metadata (PD9): Outlook's GET /v1.0/me
@@ -75,6 +102,7 @@ type ProviderDefinition struct {
 	Scopes          []string
 	CredentialStyle string
 	UserInfo        UserInfoMapping
+	ExpectedParams  []ExpectedParam
 	Tools           []ProviderTool
 }
 

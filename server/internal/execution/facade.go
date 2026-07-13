@@ -61,7 +61,23 @@ func (f *Facade) Execute(
 		return FailureResult(CodeInvalidArguments, violation.Error()), nil
 	}
 
-	return f.callProvider(ctx, org, userID, connectionID, toolSlug, definition, tool, access.AccessToken, arguments)
+	return f.callProvider(ctx, org, userID, connectionID, toolSlug, definition, tool, access.AccessToken, arguments, toAnyMap(access.Params))
+}
+
+// toAnyMap converts a connection's decrypted pre-auth param values (Slice 3)
+// into the map[string]any shape RenderPath/RenderMappedValue's params bag
+// expects. Returns nil for a connection with no collected params, so a tool
+// mapping with no {params.x} tokens behaves exactly as it did before params
+// existed.
+func toAnyMap(values map[string]string) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]any, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func connectionNotActiveMessage(status connections.Status) string {
@@ -81,12 +97,13 @@ func (f *Facade) callProvider(
 	tool catalog.ProviderTool,
 	accessToken string,
 	arguments map[string]any,
+	params map[string]any,
 ) (Result, error) {
-	requestURL, err := buildToolCallURL(definition.BaseURL, tool.Path, arguments)
+	requestURL, err := buildToolCallURL(definition.BaseURL, tool.Path, arguments, params)
 	if err != nil {
 		return FailureResult(CodeInvalidArguments, err.Error()), nil
 	}
-	requestBody, err := buildToolBody(tool.Mapping, arguments)
+	requestBody, err := buildToolBody(tool.Mapping, arguments, params)
 	if err != nil {
 		return FailureResult(CodeInvalidArguments, err.Error()), nil
 	}
@@ -95,8 +112,8 @@ func (f *Facade) callProvider(
 		Method:      tool.Method,
 		URL:         requestURL,
 		AccessToken: accessToken,
-		Query:       buildToolQuery(tool.Mapping, arguments),
-		Headers:     buildToolHeaders(tool.Mapping, arguments),
+		Query:       buildToolQuery(tool.Mapping, arguments, params),
+		Headers:     buildToolHeaders(tool.Mapping, arguments, params),
 		Body:        requestBody,
 	}
 
@@ -170,13 +187,14 @@ func stringifyArguments(arguments map[string]any) map[string]string {
 }
 
 // buildToolCallURL renders {input.x}/{params.x} tokens in the tool's mapping
-// path (params is nil until Slice 3), then joins the result onto the
-// provider's BaseURL. A tool built with no BaseURL (Phase 1's shape) treats
-// its Path as the full call URL: RenderPath leaves a token-free path
-// untouched, and joinBaseURLAndPath returns the path as-is when baseURL is
-// empty.
-func buildToolCallURL(baseURL, pathTemplate string, arguments map[string]any) (string, error) {
-	renderedPath, err := RenderPath(pathTemplate, arguments, nil)
+// path — params carries the connection's decrypted pre-auth param values
+// (Slice 3, AC8), nil for a connection that collected none — then joins the
+// result onto the provider's BaseURL. A tool built with no BaseURL (Phase 1's
+// shape) treats its Path as the full call URL: RenderPath leaves a
+// token-free path untouched, and joinBaseURLAndPath returns the path as-is
+// when baseURL is empty.
+func buildToolCallURL(baseURL, pathTemplate string, arguments, params map[string]any) (string, error) {
+	renderedPath, err := RenderPath(pathTemplate, arguments, params)
 	if err != nil {
 		return "", err
 	}
@@ -191,20 +209,21 @@ func joinBaseURLAndPath(baseURL, path string) string {
 }
 
 // buildToolQuery evaluates the tool's declared query mapping against
-// arguments, then applies its declared pagination's canonical pageSize/
-// cursor arguments (PD15b): a mapping entry whose input/param was not
-// supplied is dropped (an optional argument the caller omitted). A tool with
-// no declared query mapping, body mapping, or pagination at all falls back
-// to stringifyArguments (Phase 1's generic pass-through) — a tool that
-// declares only a body mapping (e.g. hubspot-create-contact) or only
-// pagination (e.g. hubspot-list-contacts) does not.
-func buildToolQuery(mapping catalog.Mapping, arguments map[string]any) map[string]string {
+// arguments and params (Slice 3, AC8), then applies its declared
+// pagination's canonical pageSize/cursor arguments (PD15b): a mapping entry
+// whose input/param was not supplied is dropped (an optional argument the
+// caller omitted). A tool with no declared query mapping, body mapping, or
+// pagination at all falls back to stringifyArguments (Phase 1's generic
+// pass-through) — a tool that declares only a body mapping (e.g.
+// hubspot-create-contact) or only pagination (e.g. hubspot-list-contacts)
+// does not.
+func buildToolQuery(mapping catalog.Mapping, arguments, params map[string]any) map[string]string {
 	if len(mapping.Query) == 0 && len(mapping.Body) == 0 && mapping.Pagination == nil {
 		return stringifyArguments(arguments)
 	}
 	query := make(map[string]string, len(mapping.Query))
 	for param, expression := range mapping.Query {
-		if value, ok := RenderMappedValue(expression, arguments, nil); ok {
+		if value, ok := RenderMappedValue(expression, arguments, params); ok {
 			query[param] = value
 		}
 	}
@@ -213,15 +232,16 @@ func buildToolQuery(mapping catalog.Mapping, arguments map[string]any) map[strin
 }
 
 // buildToolHeaders evaluates the tool's declared header mapping against
-// arguments the same way buildToolQuery does for query parameters. A tool
-// with no declared header mapping sends no extra headers.
-func buildToolHeaders(mapping catalog.Mapping, arguments map[string]any) map[string]string {
+// arguments and params the same way buildToolQuery does for query
+// parameters. A tool with no declared header mapping sends no extra
+// headers.
+func buildToolHeaders(mapping catalog.Mapping, arguments, params map[string]any) map[string]string {
 	if len(mapping.Header) == 0 {
 		return nil
 	}
 	headers := make(map[string]string, len(mapping.Header))
 	for name, expression := range mapping.Header {
-		if value, ok := RenderMappedValue(expression, arguments, nil); ok {
+		if value, ok := RenderMappedValue(expression, arguments, params); ok {
 			headers[name] = value
 		}
 	}
@@ -229,17 +249,17 @@ func buildToolHeaders(mapping catalog.Mapping, arguments map[string]any) map[str
 }
 
 // buildToolBody evaluates the tool's declared JSON body mapping against
-// arguments (PD13, Hubspot's create-contact): a mapping entry whose
-// input/param was not supplied is dropped, and a dotted key (e.g.
-// "properties.email") builds a nested JSON object. A tool with no declared
-// body mapping sends no request body at all.
-func buildToolBody(mapping catalog.Mapping, arguments map[string]any) (string, error) {
+// arguments and params (PD13, Hubspot's create-contact; Slice 3's {params.x},
+// AC8): a mapping entry whose input/param was not supplied is dropped, and a
+// dotted key (e.g. "properties.email") builds a nested JSON object. A tool
+// with no declared body mapping sends no request body at all.
+func buildToolBody(mapping catalog.Mapping, arguments, params map[string]any) (string, error) {
 	if len(mapping.Body) == 0 {
 		return "", nil
 	}
 	body := map[string]any{}
 	for key, expression := range mapping.Body {
-		value, ok := RenderMappedValue(expression, arguments, nil)
+		value, ok := RenderMappedValue(expression, arguments, params)
 		if !ok {
 			continue
 		}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,11 +47,18 @@ func (s OAuthState) IsExpired(now time.Time) bool {
 // ConnectPageView is what the connect-page driving adapter (connectweb)
 // needs to render the provider's connect page: its name/logo and the
 // Microsoft consent link, already carrying the Integration's client id, the
-// provider definition's scopes, and a single-use CSRF state (AC1, AC3).
+// provider definition's scopes, and a single-use CSRF state (AC1, AC3). When
+// the provider declares expected pre-auth params and none have been
+// submitted yet (Slice 3, AC3), ParamsRequired is true, ParamFields carries
+// the fields the connect page's form must collect, and AuthorizeURL is
+// empty — nothing is minted or forwarded to the provider until SubmitParams
+// succeeds.
 type ConnectPageView struct {
-	ProviderName string
-	ProviderLogo string
-	AuthorizeURL string
+	ProviderName   string
+	ProviderLogo   string
+	AuthorizeURL   string
+	ParamsRequired bool
+	ParamFields    []catalog.ExpectedParam
 }
 
 // CallbackOutcome tells the connectweb driving adapter where to send the
@@ -62,31 +70,105 @@ type CallbackOutcome struct {
 	RedirectURL string
 }
 
-// OpenConnectPage validates the connect token — rejecting an invalid,
-// expired, or already-completed connect link before it ever reaches the
-// provider (AC2) — then mints a single-use CSRF state bound to this
-// connection attempt and returns everything the connect page needs to
-// render the Microsoft consent link (AC1, AC3).
-func (f *Facade) OpenConnectPage(ctx context.Context, token string) (ConnectPageView, error) {
+// validateConnectToken looks up the connect token's connection and rejects
+// an invalid, expired, or already-completed connect link (AC2) before it
+// ever reaches the provider — shared by OpenConnectPage and SubmitParams so
+// both entry points into the connect flow enforce the same rules.
+func (f *Facade) validateConnectToken(ctx context.Context, token string) (*Connection, error) {
 	connection, err := f.oauthRepo.FindByConnectToken(ctx, token)
 	if err != nil {
-		return ConnectPageView{}, err
+		return nil, err
 	}
 	if connection == nil {
-		return ConnectPageView{}, ErrConnectLinkInvalid()
+		return nil, ErrConnectLinkInvalid()
 	}
 	if connection.Status != StatusInitiated {
-		return ConnectPageView{}, ErrConnectLinkAlreadyCompleted()
+		return nil, ErrConnectLinkAlreadyCompleted()
 	}
 	if f.now().Sub(connection.CreatedAt) > ConnectLinkTTL {
-		return ConnectPageView{}, ErrConnectLinkExpired()
+		return nil, ErrConnectLinkExpired()
 	}
+	return connection, nil
+}
 
-	integration, err := f.integrations.GetIntegration(ctx, connection.IntegrationID)
+// OpenConnectPage validates the connect token (AC2) and returns either the
+// param-collection form — when the provider declares expected params and
+// none have been submitted yet (Slice 3, AC3) — or the provider's consent
+// link, minting the single-use CSRF state that binds it to this connection
+// attempt (AC1, AC3).
+func (f *Facade) OpenConnectPage(ctx context.Context, token string) (ConnectPageView, error) {
+	connection, err := f.validateConnectToken(ctx, token)
 	if err != nil {
 		return ConnectPageView{}, err
 	}
 	definition, err := f.providers.GetProviderDefinition(ctx, connection.ProviderSlug)
+	if err != nil {
+		return ConnectPageView{}, err
+	}
+	if needsParamsForm(definition, *connection) {
+		return paramsFormView(definition), nil
+	}
+	return f.buildForwardingView(ctx, *connection, definition)
+}
+
+// SubmitParams validates the connect token exactly as OpenConnectPage does,
+// then either rejects the submission with ErrMissingRequiredParams — naming
+// every required field the caller's values left empty or absent, without
+// persisting anything (AC4) — or stores the submitted values vault-encrypted
+// (AC7) and returns the same forwarding view OpenConnectPage would return
+// now that params are collected.
+func (f *Facade) SubmitParams(ctx context.Context, token string, values map[string]string) (ConnectPageView, error) {
+	connection, err := f.validateConnectToken(ctx, token)
+	if err != nil {
+		return ConnectPageView{}, err
+	}
+	definition, err := f.providers.GetProviderDefinition(ctx, connection.ProviderSlug)
+	if err != nil {
+		return ConnectPageView{}, err
+	}
+	if missing := missingRequiredParams(definition.ExpectedParams, values); len(missing) > 0 {
+		return paramsFormView(definition), ErrMissingRequiredParams(missing)
+	}
+	encryptedParams, err := f.encryptParams(definition.ExpectedParams, values)
+	if err != nil {
+		return ConnectPageView{}, err
+	}
+	updated := connection.WithParams(encryptedParams)
+	if err := f.repo.Update(ctx, updated); err != nil {
+		return ConnectPageView{}, err
+	}
+	return f.buildForwardingView(ctx, updated, definition)
+}
+
+// needsParamsForm reports whether OpenConnectPage must show the
+// param-collection form rather than forward to the provider: the definition
+// declares at least one expected param, and none have been submitted yet.
+func needsParamsForm(definition catalog.ProviderDefinition, connection Connection) bool {
+	return len(definition.ExpectedParams) > 0 && connection.EncryptedParams == ""
+}
+
+// paramsFormView builds the ConnectPageView connectweb renders as the
+// param-collection form (AC3): no state is minted and no AuthorizeURL is
+// built until the required fields are collected.
+func paramsFormView(definition catalog.ProviderDefinition) ConnectPageView {
+	return ConnectPageView{
+		ProviderName:   definition.Name,
+		ProviderLogo:   definition.Logo,
+		ParamsRequired: true,
+		ParamFields:    definition.ExpectedParams,
+	}
+}
+
+// buildForwardingView mints the single-use CSRF state bound to connection
+// and returns the Microsoft consent link (AC1, AC3), decrypting any
+// previously collected params so they are usable in the provider's own
+// authorize URL via {params.x} templating (AC8).
+func (f *Facade) buildForwardingView(ctx context.Context, connection Connection, definition catalog.ProviderDefinition) (ConnectPageView, error) {
+	integration, err := f.integrations.GetIntegration(ctx, connection.IntegrationID)
+	if err != nil {
+		return ConnectPageView{}, err
+	}
+	params, err := f.decryptParams(connection.EncryptedParams)
 	if err != nil {
 		return ConnectPageView{}, err
 	}
@@ -103,8 +185,24 @@ func (f *Facade) OpenConnectPage(ctx context.Context, token string) (ConnectPage
 	return ConnectPageView{
 		ProviderName: definition.Name,
 		ProviderLogo: definition.Logo,
-		AuthorizeURL: buildAuthorizeURL(definition, integration.ClientID, f.baseURL, state.State),
+		AuthorizeURL: buildAuthorizeURL(definition, integration.ClientID, f.baseURL, state.State, params),
 	}, nil
+}
+
+// missingRequiredParams returns the name of every ExpectedParam marked
+// Required whose value is empty or absent from values (AC4). Optional
+// params are never checked.
+func missingRequiredParams(fields []catalog.ExpectedParam, values map[string]string) []string {
+	var missing []string
+	for _, field := range fields {
+		if !field.Required {
+			continue
+		}
+		if strings.TrimSpace(values[field.Name]) == "" {
+			missing = append(missing, field.Name)
+		}
+	}
+	return missing
 }
 
 // HandleCallback validates the CSRF state — a missing, unknown, expired, or
@@ -191,9 +289,13 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 	if err != nil {
 		return Connection{}, err
 	}
+	params, err := f.decryptParams(connection.EncryptedParams)
+	if err != nil {
+		return Connection{}, err
+	}
 
 	request := TokenExchangeRequest{
-		TokenURL:        definition.TokenURL,
+		TokenURL:        renderParamsTemplate(definition.TokenURL, params),
 		ClientID:        integration.ClientID,
 		ClientSecret:    integration.ClientSecret,
 		Code:            code,
@@ -294,15 +396,77 @@ func tokenExchangeResponseLogBody(tokens TokenExchangeResult) string {
 
 // buildAuthorizeURL builds the Microsoft consent link the connect page's
 // Connect action points at: the Integration's client id, the provider
-// definition's scopes, and the single-use CSRF state (AC3).
-func buildAuthorizeURL(definition catalog.ProviderDefinition, clientID, baseURL, state string) string {
+// definition's scopes, the single-use CSRF state (AC3), and — when the
+// provider declared expected params — their collected values, templated
+// into the definition's own AuthorizeURL via {params.x} (Slice 3, AC8).
+func buildAuthorizeURL(definition catalog.ProviderDefinition, clientID, baseURL, state string, params map[string]string) string {
 	query := url.Values{}
 	query.Set("client_id", clientID)
 	query.Set("response_type", "code")
 	query.Set("redirect_uri", buildCallbackURL(baseURL))
 	query.Set("scope", strings.Join(definition.Scopes, " "))
 	query.Set("state", state)
-	return definition.AuthorizeURL + "?" + query.Encode()
+	return renderParamsTemplate(definition.AuthorizeURL, params) + "?" + query.Encode()
+}
+
+// paramTemplatePattern matches a {params.x} token (Slice 3, AC8).
+var paramTemplatePattern = regexp.MustCompile(`\{params\.([A-Za-z0-9_]+)\}`)
+
+// renderParamsTemplate substitutes every {params.x} token in template with
+// its value from params — the same substitution execution/template.go
+// applies to tool mappings, kept as its own small copy here because
+// connections cannot import execution (BOUNDARIES: execution depends on
+// connections, not the reverse). A token whose param was not supplied is
+// left untouched: SubmitParams already rejects any submission missing a
+// required param before a connection ever reaches this path, so this only
+// ever fires for an optional param the caller left out.
+func renderParamsTemplate(template string, params map[string]string) string {
+	return paramTemplatePattern.ReplaceAllStringFunc(template, func(token string) string {
+		name := paramTemplatePattern.FindStringSubmatch(token)[1]
+		if value, ok := params[name]; ok {
+			return value
+		}
+		return token
+	})
+}
+
+// encryptParams keeps only the values named by fields (dropping anything
+// else the connect page's form posted), JSON-encodes them, and vault-
+// encrypts the whole blob (PD17) — a connection's collected pre-auth param
+// values are never persisted in plaintext, the same rule as its OAuth
+// tokens. Returns "" when fields declares no params or none were supplied.
+func (f *Facade) encryptParams(fields []catalog.ExpectedParam, values map[string]string) (string, error) {
+	filtered := make(map[string]string, len(fields))
+	for _, field := range fields {
+		if value, ok := values[field.Name]; ok {
+			filtered[field.Name] = value
+		}
+	}
+	if len(filtered) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(filtered)
+	if err != nil {
+		return "", err
+	}
+	return f.vault.Encrypt(string(encoded))
+}
+
+// decryptParams reverses encryptParams, returning nil for a connection that
+// carries no collected params.
+func (f *Facade) decryptParams(encryptedParams string) (map[string]string, error) {
+	if encryptedParams == "" {
+		return nil, nil
+	}
+	plaintext, err := f.vault.Decrypt(encryptedParams)
+	if err != nil {
+		return nil, err
+	}
+	var values map[string]string
+	if err := json.Unmarshal([]byte(plaintext), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 // buildCallbackURL joins baseURL with the OAuth callback path every
