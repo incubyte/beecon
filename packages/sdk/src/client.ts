@@ -1,21 +1,29 @@
 import { HttpClient, type FetchLike } from './http.js';
 import { ConnectionsResource } from './resources/connections.js';
+import { EventsResource } from './resources/events.js';
 import { FilesResource } from './resources/files.js';
 import { IntegrationsResource } from './resources/integrations.js';
 import { LogsResource } from './resources/logs.js';
 import { ToolsResource } from './resources/tools.js';
+import { TriggersResource } from './resources/triggers.js';
 import { UserTokensResource } from './resources/userTokens.js';
 import { UsersResource } from './resources/users.js';
+import { WebhookEndpointResource } from './resources/webhookEndpoint.js';
+import { verify } from './webhooks.js';
 import type {
   BeeconClient,
   ConnectionsApi,
+  EventsApi,
   FilesApi,
   IntegrationsApi,
   LogsApi,
   SigningSecretConfig,
   ToolsApi,
+  TriggersApi,
   UsersApi,
   UserTokensApi,
+  WebhookEndpointApi,
+  WebhooksApi,
 } from './types.js';
 
 export interface BeeconConfig {
@@ -40,6 +48,10 @@ export class Beecon implements BeeconClient {
   readonly logs: LogsApi;
   readonly userTokens: UserTokensApi;
   readonly files: FilesApi;
+  readonly triggers: TriggersApi;
+  readonly webhookEndpoint: WebhookEndpointApi;
+  readonly events: EventsApi;
+  readonly webhooks: WebhooksApi;
 
   readonly #baseUrl: string;
 
@@ -57,6 +69,13 @@ export class Beecon implements BeeconClient {
     this.logs = new LogsResource(http);
     this.userTokens = new UserTokensResource(config.signingSecret);
     this.files = new FilesResource(http);
+    this.triggers = new TriggersResource(http);
+    this.webhookEndpoint = new WebhookEndpointResource(http);
+    this.events = new EventsResource(http);
+    // webhooks.verify is a pure function (no network, no client state) —
+    // exposed here purely for the `beecon.webhooks.verify(...)` call shape
+    // (also available standalone as the top-level `webhooks` export).
+    this.webhooks = { verify };
   }
 
   // AC9: the API key never entered a property of this instance, so

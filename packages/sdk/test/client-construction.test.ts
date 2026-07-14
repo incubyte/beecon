@@ -99,6 +99,27 @@ describe('BeeconClient interface mockability', () => {
           downloadUrl: 'https://x/files/file_1/download',
         }),
       },
+      triggers: {
+        listDefinitions: vi.fn().mockResolvedValue({ items: [] }),
+        getDefinition: vi.fn(),
+        create: vi.fn(),
+        list: vi.fn().mockResolvedValue({ items: [] }),
+        get: vi.fn(),
+        enable: vi.fn(),
+        disable: vi.fn(),
+        delete: vi.fn(),
+      },
+      webhookEndpoint: {
+        set: vi.fn(),
+        get: vi.fn(),
+        rotateSecret: vi.fn(),
+        sendTest: vi.fn(),
+      },
+      events: {
+        list: vi.fn().mockResolvedValue({ items: [] }),
+        redeliver: vi.fn(),
+      },
+      webhooks: { verify: vi.fn() },
     } satisfies BeeconClient;
 
     async function createUser(client: BeeconClient, name: string): Promise<string> {

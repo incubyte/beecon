@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Beecon } from '../src/client.js';
-import { MissingSigningSecretError } from '../src/errors.js';
+import { MissingSigningSecretError, UserTokenExpiryTooLongError } from '../src/errors.js';
 import { UserTokensResource } from '../src/resources/userTokens.js';
 import { asFetch } from './support/responses.js';
 
@@ -177,6 +177,37 @@ describe('userTokens.create — never calls the network', () => {
     expect(result).not.toBeInstanceOf(Promise);
     expect(typeof result.token).toBe('string');
   });
+});
+
+describe('userTokens.create — PD38a 24-hour lifetime cap', () => {
+  const ONE_DAY_SECONDS = 24 * 60 * 60;
+
+  it('mints a token when expiresIn is exactly the 24h cap', () => {
+    const userTokens = new UserTokensResource({ id: 'usk_config_1', secret: 'sekrit' });
+
+    const result = userTokens.create({ userId: 'user_1', expiresIn: ONE_DAY_SECONDS });
+
+    const [, payloadSegment] = result.token.split('.');
+    const claims = decodeSegment(payloadSegment) as { iat: number; exp: number };
+    expect(claims.exp - claims.iat).toBe(ONE_DAY_SECONDS);
+  });
+
+  it('throws UserTokenExpiryTooLongError when expiresIn exceeds the 24h cap by one second', () => {
+    const userTokens = new UserTokensResource({ id: 'usk_config_1', secret: 'sekrit' });
+
+    expect(() => userTokens.create({ userId: 'user_1', expiresIn: ONE_DAY_SECONDS + 1 })).toThrow(
+      UserTokenExpiryTooLongError,
+    );
+  });
+
+  it('names the requested and maximum expiresIn values in the error message', () => {
+    const userTokens = new UserTokensResource({ id: 'usk_config_1', secret: 'sekrit' });
+
+    expect(() => userTokens.create({ userId: 'user_1', expiresIn: ONE_DAY_SECONDS + 3600 })).toThrow(
+      new RegExp(`${ONE_DAY_SECONDS + 3600}.*${ONE_DAY_SECONDS}`),
+    );
+  });
+
 });
 
 describe('userTokens.create — misconfiguration', () => {

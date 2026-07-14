@@ -194,7 +194,11 @@ export interface SigningSecretConfig {
 
 export interface CreateUserTokenInput {
   userId: string;
-  /** Seconds until expiry; defaults to 2 hours (PD20). */
+  /**
+   * Seconds until expiry; defaults to 2 hours (PD20). Must not exceed 24
+   * hours (86400s) — the server rejects a longer-lived token anyway (PD38a),
+   * so create throws UserTokenExpiryTooLongError rather than minting one.
+   */
   expiresIn?: number;
 }
 
@@ -263,6 +267,253 @@ export interface LogsApi {
   list(filters?: LogsFilter): Promise<LogsPage>;
 }
 
+// TriggerDefinitionProvider is the provider identity nested inside a
+// TriggerDefinition (PD35) — mirrors ToolProvider: a trigger addressed by
+// slug alone (PD14) still needs to know which provider it belongs to.
+export interface TriggerDefinitionProvider {
+  slug: string;
+  name: string;
+  logo: string;
+}
+
+// TriggerDefinition is one catalog entry as GET /api/v1/trigger-definitions
+// and GET /api/v1/trigger-definitions/{slug} return it: config and payload
+// JSON Schemas (PD32), and the ingestion mode (poll-only in Phase 3, PD28).
+export interface TriggerDefinition {
+  slug: string;
+  name: string;
+  description: string;
+  configSchema: Record<string, unknown>;
+  payloadSchema: Record<string, unknown>;
+  ingestion: 'poll';
+  provider: TriggerDefinitionProvider;
+}
+
+// TriggerDefinitionsFilter mirrors GET /api/v1/trigger-definitions' query
+// params: scope by provider slug or integration id, cursor-paginated.
+export interface TriggerDefinitionsFilter {
+  providerSlug?: string;
+  integrationId?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface TriggerDefinitionsPage {
+  items: TriggerDefinition[];
+  nextCursor?: string;
+}
+
+// TriggerInstanceStatus mirrors PD33's lifecycle: born ACTIVE, DISABLED
+// stops firing without losing poll state, re-enabling resumes.
+export type TriggerInstanceStatus = 'ACTIVE' | 'DISABLED';
+
+// CreateTriggerInstanceInput is POST /api/v1/trigger-instances' body (API
+// Shape). `slug` names the trigger definition; the wire field is
+// `triggerSlug` — TriggerInstance below uses that same wire name once the
+// instance exists, since GET/list responses echo the server's own DTO.
+export interface CreateTriggerInstanceInput {
+  connectionId: string;
+  slug: string;
+  config: Record<string, unknown>;
+}
+
+export interface CreatedTriggerInstance {
+  id: string;
+  status: TriggerInstanceStatus;
+}
+
+// TriggerInstance is Get's and List's per-item response: status, trigger
+// slug, connection, config, and owning user (PD33).
+export interface TriggerInstance {
+  id: string;
+  status: TriggerInstanceStatus;
+  connectionId: string;
+  triggerSlug: string;
+  config: Record<string, unknown>;
+  userId: string;
+  createdAt: string;
+}
+
+// TriggerInstancesListFilter mirrors GET /api/v1/trigger-instances' query
+// params: scope by connection or user, cursor-paginated.
+export interface TriggerInstancesListFilter {
+  connectionId?: string;
+  userId?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface TriggerInstancesPage {
+  items: TriggerInstance[];
+  nextCursor?: string;
+}
+
+// TriggerInstanceStatusResult is Disable's and Enable's response: the
+// instance's id and its new status.
+export interface TriggerInstanceStatusResult {
+  id: string;
+  status: TriggerInstanceStatus;
+}
+
+export interface TriggersApi {
+  listDefinitions(filter?: TriggerDefinitionsFilter): Promise<TriggerDefinitionsPage>;
+  getDefinition(slug: string): Promise<TriggerDefinition>;
+  create(input: CreateTriggerInstanceInput): Promise<CreatedTriggerInstance>;
+  list(filter?: TriggerInstancesListFilter): Promise<TriggerInstancesPage>;
+  get(triggerInstanceId: string): Promise<TriggerInstance>;
+  enable(triggerInstanceId: string): Promise<TriggerInstanceStatusResult>;
+  disable(triggerInstanceId: string): Promise<TriggerInstanceStatusResult>;
+  delete(triggerInstanceId: string): Promise<void>;
+}
+
+export interface SetWebhookEndpointInput {
+  url: string;
+}
+
+// WebhookEndpointCreated is SetEndpoint's response (API Shape, PD31): secret
+// is present only on first creation — a later URL-only update leaves it
+// undefined (mirrors the server's `omitempty`). It is returned exactly once;
+// nothing in this SDK stores it (AC: never logged, never serialized).
+export interface WebhookEndpointCreated {
+  id: string;
+  url: string;
+  secret?: string;
+  createdAt: string;
+}
+
+// WebhookEndpoint is GetEndpoint's response: URL, secret prefix, and
+// creation date — never the full secret.
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  secretPrefix: string;
+  createdAt: string;
+}
+
+// RotateSecretInput is RotateSecret's body (PD31): overlapHours defaults to
+// the server's own default (24h) when omitted.
+export interface RotateSecretInput {
+  overlapHours?: number;
+}
+
+// RotatedSecret is RotateSecret's response: the new secret, returned
+// exactly once.
+export interface RotatedSecret {
+  secret: string;
+}
+
+export interface WebhookEndpointApi {
+  set(input: SetWebhookEndpointInput): Promise<WebhookEndpointCreated>;
+  get(): Promise<WebhookEndpoint>;
+  rotateSecret(input?: RotateSecretInput): Promise<RotatedSecret>;
+  sendTest(): Promise<void>;
+}
+
+// EventDeliveryStatus mirrors the outbox's delivery lifecycle (PD30):
+// PENDING awaiting/retrying, DELIVERED on a 2xx, FAILED after exhausting the
+// retry schedule, NO_ENDPOINT when the organization has none configured yet.
+export type EventDeliveryStatus = 'PENDING' | 'DELIVERED' | 'FAILED' | 'NO_ENDPOINT';
+
+// OutboxEvent is one item in GET /api/v1/events' response (API Shape) —
+// metadata only, never the event body (fetch a redelivery to see it land at
+// your own endpoint).
+export interface OutboxEvent {
+  id: string;
+  type: string;
+  createdAt: string;
+  deliveryStatus: EventDeliveryStatus;
+  attempts: number;
+  lastAttemptAt?: string;
+}
+
+export interface EventsFilter {
+  type?: string;
+  deliveryStatus?: EventDeliveryStatus;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface EventsPage {
+  items: OutboxEvent[];
+  nextCursor?: string;
+}
+
+export interface EventsApi {
+  list(filters?: EventsFilter): Promise<EventsPage>;
+  redeliver(eventId: string): Promise<void>;
+}
+
+// --- PD32 event envelope: the typed union webhooks.verify returns --------
+
+export interface TriggerEventData {
+  triggerInstanceId: string;
+  triggerSlug: string;
+  connectionId: string;
+  userId: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ConnectionExpiredEventData {
+  connectionId: string;
+  userId: string;
+  integrationId: string;
+  providerSlug: string;
+  reason: string;
+}
+
+// WebhookTestEventData is always empty — webhook.test proves the channel
+// works before anything real depends on it (PD32).
+export type WebhookTestEventData = Record<string, never>;
+
+export interface TriggerEvent {
+  id: string;
+  type: 'trigger.event';
+  createdAt: string;
+  data: TriggerEventData;
+}
+
+export interface ConnectionExpiredEvent {
+  id: string;
+  type: 'connection.expired';
+  createdAt: string;
+  data: ConnectionExpiredEventData;
+}
+
+export interface WebhookTestEvent {
+  id: string;
+  type: 'webhook.test';
+  createdAt: string;
+  data: WebhookTestEventData;
+}
+
+// WebhookEvent is the typed union webhooks.verify returns once a delivery's
+// signature and timestamp both check out (PD32). The `id` is the
+// idempotency key: identical across retries and manual redeliveries —
+// consumers deduplicate on it.
+export type WebhookEvent = TriggerEvent | ConnectionExpiredEvent | WebhookTestEvent;
+
+// VerifyWebhookHeaders accepts either a plain header map (Express/Node
+// style — Record, case-sensitivity of keys not assumed) or a WHATWG Headers
+// instance (Next.js Request-style), so webhooks.verify drops into either
+// framework's handler unchanged.
+export type VerifyWebhookHeaders = Headers | Record<string, string | string[] | undefined>;
+
+export interface VerifyWebhookInput {
+  /** The exact raw request body bytes/string Beecon signed — do not re-serialize a parsed object. */
+  payload: string;
+  headers: VerifyWebhookHeaders;
+  /** A single active endpoint secret. Mutually exclusive with `secrets`. */
+  secret?: string;
+  /** Every secret the consumer currently holds (rotation overlap, PD31) — verification succeeds if any one matches. */
+  secrets?: string[];
+  /** Injectable clock for tests; defaults to `new Date()`. */
+  now?: Date;
+}
+
+export interface WebhooksApi {
+  verify(input: VerifyWebhookInput): WebhookEvent;
+}
+
 // BeeconClient is the SDK's full public surface. Consumers type against this
 // interface (not the Beecon class) so a test double built with vi.fn() —
 // e.g. `{ users: { create: vi.fn() }, ... } satisfies BeeconClient` — is a
@@ -275,4 +526,8 @@ export interface BeeconClient {
   readonly logs: LogsApi;
   readonly userTokens: UserTokensApi;
   readonly files: FilesApi;
+  readonly triggers: TriggersApi;
+  readonly webhookEndpoint: WebhookEndpointApi;
+  readonly events: EventsApi;
+  readonly webhooks: WebhooksApi;
 }

@@ -59,4 +59,21 @@ describe('quickstart document', () => {
     expect(content).toContain('files.upload');
     expect(content).toContain('hubspot-upload-file');
   });
+
+  it('has a section covering receiving and verifying webhooks end-to-end, referencing the real SDK call shapes', () => {
+    const content = readFileSync(quickstartPath, 'utf8');
+
+    expect(content).toMatch(/##\s+Receiving and verifying webhooks/i);
+    for (const mustMention of [
+      'webhookEndpoint.set',
+      'webhookEndpoint.sendTest',
+      'triggers.listDefinitions',
+      'triggers.create',
+      'webhooks.verify',
+      'WebhookVerificationError',
+      'event.id',
+    ]) {
+      expect(content).toContain(mustMention);
+    }
+  });
 });

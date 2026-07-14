@@ -54,3 +54,44 @@ export class MissingSigningSecretError extends Error {
     Object.setPrototypeOf(this, MissingSigningSecretError.prototype);
   }
 }
+
+// UserTokenExpiryTooLongError is thrown by userTokens.create when the
+// requested expiresIn exceeds the 24-hour maximum lifetime (PD38a, Phase 2
+// review carry-forward): the server's VerifyUserToken rejects exp − iat
+// beyond that span anyway, so the SDK refuses to mint one at all rather than
+// handing back a token that can never verify.
+export class UserTokenExpiryTooLongError extends Error {
+  constructor(requestedExpiresIn: number, maxExpiresIn: number) {
+    super(
+      `beecon.userTokens.create: expiresIn (${requestedExpiresIn}s) exceeds the maximum user token lifetime of ${maxExpiresIn}s (24h).`,
+    );
+    this.name = 'UserTokenExpiryTooLongError';
+    Object.setPrototypeOf(this, UserTokenExpiryTooLongError.prototype);
+  }
+}
+
+// WebhookVerificationReason names why webhooks.verify rejected a delivery
+// (PD27): malformed-header (one of the three Standard Webhooks headers is
+// missing, empty, or unparseable), signature (the webhook-signature header
+// carries no recognized "v1," entry), tampered (a v1 entry is present but no
+// provided secret's HMAC matches it -- the payload was altered after
+// signing, or the wrong secret was supplied; the two are cryptographically
+// indistinguishable from the verifier's side, so they share this reason),
+// and timestamp (webhook-timestamp is outside the +/-5-minute tolerance).
+export type WebhookVerificationReason = 'malformed-header' | 'signature' | 'tampered' | 'timestamp';
+
+// WebhookVerificationError is thrown by webhooks.verify. It carries only a
+// typed reason and a human message -- never the secret(s) it was given to
+// verify with, never the raw signature bytes -- so catching and logging
+// this error (stack, message, JSON.stringify) can never leak a whsec_ value
+// (parity with the API-key/signing-secret guarantee).
+export class WebhookVerificationError extends Error {
+  readonly reason: WebhookVerificationReason;
+
+  constructor(reason: WebhookVerificationReason, message: string) {
+    super(message);
+    this.name = 'WebhookVerificationError';
+    this.reason = reason;
+    Object.setPrototypeOf(this, WebhookVerificationError.prototype);
+  }
+}

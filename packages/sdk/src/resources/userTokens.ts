@@ -1,8 +1,14 @@
 import { createHmac } from 'node:crypto';
-import { MissingSigningSecretError } from '../errors.js';
+import { MissingSigningSecretError, UserTokenExpiryTooLongError } from '../errors.js';
 import type { CreateUserTokenInput, SigningSecretConfig, UserToken, UserTokensApi } from '../types.js';
 
 const DEFAULT_EXPIRES_IN_SECONDS = 2 * 60 * 60;
+
+// MAX_EXPIRES_IN_SECONDS is PD38a's 24-hour cap on a user token's lifetime
+// (exp − iat): the server's VerifyUserToken rejects anything longer
+// (server/internal/access/usertoken.go), so create refuses to mint one at
+// all rather than handing back a token that can never verify.
+const MAX_EXPIRES_IN_SECONDS = 24 * 60 * 60;
 
 const inspectSymbol = Symbol.for('nodejs.util.inspect.custom');
 
@@ -26,8 +32,11 @@ export class UserTokensResource implements UserTokensApi {
 
   create(input: CreateUserTokenInput): UserToken {
     const signingSecret = this.requireSigningSecret();
-    const issuedAt = Math.floor(Date.now() / 1000);
     const expiresIn = input.expiresIn ?? DEFAULT_EXPIRES_IN_SECONDS;
+    if (expiresIn > MAX_EXPIRES_IN_SECONDS) {
+      throw new UserTokenExpiryTooLongError(expiresIn, MAX_EXPIRES_IN_SECONDS);
+    }
+    const issuedAt = Math.floor(Date.now() / 1000);
     const claims: UserTokenClaims = { sub: input.userId, iat: issuedAt, exp: issuedAt + expiresIn };
     return {
       token: mintHS256Token(signingSecret, claims),
