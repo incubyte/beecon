@@ -18,6 +18,15 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Admin UI build output embedded via //go:embed (FD2): the built dist/ is
+# git-ignored so it's never committed, except the placeholder index.html +
+# .gitkeep that let `//go:embed dist` compile on a clean checkout that
+# hasn't run `make build-ui` yet. Do not commit the real build artifact.
+!server/internal/adminui/dist/
+server/internal/adminui/dist/*
+!server/internal/adminui/dist/index.html
+!server/internal/adminui/dist/.gitkeep
+
 # Local databases
 *.db
 *.sqlite
