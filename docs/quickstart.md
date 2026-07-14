@@ -341,3 +341,149 @@ const result = await beecon.tools.execute('hubspot-upload-file', {
 File upload is org-key-only (never reachable with a browser user token) —
 route the upload through your server, then hand the resulting `id` to the
 browser if the tool call itself happens client-side.
+
+## Receiving and verifying webhooks
+
+Triggers and connection lifecycle events (PD32) arrive at your own HTTP
+endpoint as signed deliveries — Standard Webhooks (PD27). This walks
+registering the endpoint, creating a trigger instance, and verifying and
+handling a delivery in an Express (or Next.js Route Handler) handler.
+
+### 1. Register your endpoint (once, server-side)
+
+```ts
+const endpoint = await beecon.webhookEndpoint.set({
+  url: 'https://app.example.com/webhooks/beecon',
+});
+// endpoint -> { id: "wep_...", url, secret: "whsec_..." (present only on
+//               this first call), createdAt }
+
+// Store endpoint.secret somewhere your webhook handler can read it
+// (an environment variable, a secrets manager) — it is returned exactly
+// once. A later `webhookEndpoint.get()` only ever returns a secretPrefix.
+```
+
+Prove the channel works before anything real depends on it:
+
+```ts
+await beecon.webhookEndpoint.sendTest(); // 202 — a webhook.test event lands shortly at your endpoint
+```
+
+### 2. Create a trigger instance (server-side)
+
+```ts
+const definitions = await beecon.triggers.listDefinitions({ providerSlug: 'outlook' });
+const messageReceived = definitions.items.find((d) => d.slug === 'outlook-message-received')!;
+
+const instance = await beecon.triggers.create({
+  connectionId: connection.id, // an ACTIVE connection (see step 6 above)
+  slug: messageReceived.slug,
+  config: { folderId: 'Inbox' },
+});
+// instance -> { id: "trg_...", status: "ACTIVE" }
+```
+
+### 3. Verify and handle a delivery (Express)
+
+Read the **raw** request body — `webhooks.verify` signs over the exact bytes
+Beecon sent, so a body-parser that re-serializes JSON will break signature
+verification:
+
+```ts
+// server/webhooks.ts
+import express from 'express';
+import { webhooks, WebhookVerificationError } from '@beecon/sdk';
+
+const app = express();
+const seenEventIds = new Set<string>(); // replace with persistent storage
+
+app.post(
+  '/webhooks/beecon',
+  express.raw({ type: 'application/json' }), // keeps req.body as a Buffer
+  (req, res) => {
+    let event;
+    try {
+      event = webhooks.verify({
+        payload: req.body.toString('utf8'),
+        headers: req.headers as Record<string, string | string[] | undefined>,
+        secret: process.env.BEECON_WEBHOOK_SECRET!, // the whsec_... from step 1
+      });
+    } catch (err) {
+      if (err instanceof WebhookVerificationError) {
+        console.error('rejected webhook delivery:', err.reason, err.message);
+        return res.status(400).send('invalid signature');
+      }
+      throw err;
+    }
+
+    // The evt_ id is stable across retries and manual redeliveries (PD32) —
+    // deduplicate on it before acting on the event.
+    if (seenEventIds.has(event.id)) {
+      return res.status(200).send('already processed');
+    }
+    seenEventIds.add(event.id);
+
+    switch (event.type) {
+      case 'trigger.event':
+        console.log('new record', event.data.triggerSlug, event.data.payload);
+        break;
+      case 'connection.expired':
+        console.log('connection needs reconnect', event.data.connectionId, event.data.reason);
+        break;
+      case 'webhook.test':
+        console.log('webhook.test received — the channel works');
+        break;
+    }
+
+    res.status(200).send('ok');
+  },
+);
+```
+
+The same `webhooks.verify` call works in a Next.js Route Handler — read
+`await request.text()` for the raw payload and pass `request.headers`
+(a WHATWG `Headers` instance) straight through:
+
+```ts
+// app/api/webhooks/beecon/route.ts
+import { webhooks, WebhookVerificationError } from '@beecon/sdk';
+
+export async function POST(request: Request) {
+  const payload = await request.text();
+  try {
+    const event = webhooks.verify({
+      payload,
+      headers: request.headers,
+      secret: process.env.BEECON_WEBHOOK_SECRET!,
+    });
+    // ...same event.type switch and webhook-id dedupe as above
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    if (err instanceof WebhookVerificationError) {
+      return new Response('invalid signature', { status: 400 });
+    }
+    throw err;
+  }
+}
+```
+
+`webhooks.verify` also accepts `secrets: string[]` instead of `secret` —
+pass both the new and old secret during a rotation overlap window and
+verification succeeds against either one:
+
+```ts
+webhooks.verify({
+  payload,
+  headers: request.headers,
+  secrets: [process.env.BEECON_WEBHOOK_SECRET!, process.env.BEECON_WEBHOOK_SECRET_PREVIOUS!],
+});
+```
+
+### 4. Manage delivery history
+
+```ts
+const events = await beecon.events.list({ deliveryStatus: 'FAILED' });
+for (const event of events.items) {
+  await beecon.events.redeliver(event.id); // 202 — re-queues the same evt_ id and body
+}
+```

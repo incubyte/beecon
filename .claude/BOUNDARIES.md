@@ -5,14 +5,14 @@
 
 ## Modules
 
-- `server/internal/{httpx,idgen,config,db,vault,metrics}` — shared infrastructure leaf packages; importable by any module; import no domain module.
+- `server/internal/{httpx,idgen,config,db,vault,metrics,schema,worker}` — shared infrastructure leaf packages; importable by any module; import no domain module.
 - `organizations/` — owns: Organization, User, org governance rules, data-isolation policy. Depends on: (none)
-- `access/` — owns: ServerApiKey, UserToken, WebhookSigningSecret, key verification and rotation. Depends on: organizations
+- `access/` — owns: ServerApiKey, UserToken, WebhookSigningSecret (webhook endpoint signing secrets, `whs_`/`whsec_`, incl. rotation overlap), key verification and rotation. Depends on: organizations
 - `catalog/` — owns: Provider, Integration, Tool, Mapping, TriggerDefinition, definition bundles and versions, registry-sync (import/diff/activate). Depends on: organizations
 - `connections/` — owns: Connection, CredentialVault (encrypted tokens), OAuth flows, token auto-refresh, reconciliation. Depends on: organizations, access, catalog
 - `execution/` — owns: ToolExecution, rate-limit normalization, retry policy, pagination, FileUpload. Depends on: connections, catalog, organizations (org-scoping every execution the same way connections and catalog do)
-- `triggers/` — owns: TriggerInstance, subscription lifecycle, inbound provider event normalization (push + poll). Depends on: connections, catalog
-- `delivery/` — owns: Outbox, WebhookDelivery (signing, retries, idempotency), ServiceBusDelivery, reverse messages. Depends on: access, organizations
+- `triggers/` — owns: TriggerInstance, subscription lifecycle, inbound provider event normalization (push + poll), poll watermarks and scheduling (push ingestion listed but deferred, PD28). Depends on: connections, catalog, organizations
+- `delivery/` — owns: WebhookEndpoint (`wep_`), Outbox, WebhookDelivery (signing, retries, idempotency), ServiceBusDelivery, reverse messages. Depends on: access, organizations
 - `logging/` — owns: EventLog, redaction rules, retention. Depends on: organizations
 - `apps/api/` — HTTP adapter composing the modules (Go). Depends on: all above
 - `apps/connect-ui/` — middle-man pages (Go templates, served by the api binary). Depends on: api
@@ -28,4 +28,4 @@
 - When in doubt, duplicate code rather than create a coupling that violates boundaries
 - Domain modules are hexagonal: domain + ports inside, adapters outside
 - The term for the tenant entity is **Organization** — the word "tenant" is retired everywhere (code, docs, schema)
-- One immutable id per entity, forever: CUID2 with type prefixes (`conn_`, `tool_`, `trg_`), generated via github.com/akshayvadher/cuid2
+- One immutable id per entity, forever: CUID2 with type prefixes (`conn_`, `tool_`, `trg_`, `evt_`, `wep_`, `whs_`), generated via github.com/akshayvadher/cuid2
