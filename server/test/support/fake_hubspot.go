@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -66,6 +67,16 @@ type FakeHubspotScript struct {
 	// rate-limited attempt; empty sends no header at all, exercising
 	// retry.go's jittered-backoff fallback instead.
 	RateLimitRetryAfter string
+
+	// RefreshAccessToken and RefreshRefreshToken, when set, are what a
+	// refresh_token grant returns instead of AccessToken/RefreshToken (Phase
+	// 3 Slice 5, PD36): RefreshRefreshToken left empty simulates a provider
+	// that does not rotate the refresh token.
+	RefreshAccessToken  string
+	RefreshRefreshToken string
+	// FailRefresh makes a refresh_token grant return 400 invalid_grant,
+	// simulating a revoked refresh token.
+	FailRefresh bool
 }
 
 // FakeHubspot is a running fake Hubspot server plus the request details it
@@ -104,6 +115,120 @@ type FakeHubspot struct {
 	// cross-organization file_ id must short-circuit before any provider
 	// call).
 	FilesCallCount int
+
+	// mu guards the contacts-search polling state below (Phase 3 Slice 4):
+	// the crucial_path polling journey appends a new contact mid-test, from
+	// the same goroutine that then calls PollOnce — mirrors FakeGraph's own
+	// mu for the identical reason.
+	mu                        sync.Mutex
+	searchContacts            []FakeHubspotSearchContact
+	failNextSearchesRemaining int
+
+	// LastSearchBody is the most recent decoded JSON body posted to
+	// /crm/v3/objects/contacts/search (the hubspot-contact-created poll
+	// mapping's own call, PD35) — its filterGroups/sorts shape, so a test can
+	// assert the {watermark} templating actually reached the request body.
+	LastSearchBody map[string]any
+	// SearchCallCount counts every call to /crm/v3/objects/contacts/search.
+	SearchCallCount int
+
+	// RefreshCallCount counts every refresh_token grant (Phase 3 Slice 5,
+	// PD36), independent of the initial authorization_code exchange.
+	RefreshCallCount int
+
+	// refreshMu guards refreshOutcomes/userInfoProbeStatuses below — the
+	// token-self-heal journey's concurrent scenarios call into this fake
+	// from more than one goroutine at once (mirrors FakeMicrosoft's own mu).
+	refreshMu             sync.Mutex
+	refreshOutcomes       []FakeHubspotRefreshOutcome
+	userInfoProbeStatuses []int
+}
+
+// FakeHubspotRefreshOutcome mirrors FakeMicrosoft's RefreshOutcome (Phase 3
+// Slice 5): one scripted refresh_token grant response, consumed FIFO.
+type FakeHubspotRefreshOutcome struct {
+	AccessToken  string
+	RefreshToken string
+
+	InvalidGrant bool
+	ServerError  bool
+	NetworkDrop  bool
+}
+
+// QueueRefreshOutcomes appends outcomes to the FIFO queue future
+// refresh_token grant calls consume from, one per call, before falling back
+// to the script's static FailRefresh/RefreshAccessToken/RefreshRefreshToken
+// fields once the queue is empty.
+func (fh *FakeHubspot) QueueRefreshOutcomes(outcomes ...FakeHubspotRefreshOutcome) {
+	fh.refreshMu.Lock()
+	defer fh.refreshMu.Unlock()
+	fh.refreshOutcomes = append(fh.refreshOutcomes, outcomes...)
+}
+
+// QueueUserInfoProbeStatuses appends statuses (200 or 401) to the FIFO queue
+// future token-metadata probe calls consume from, one per call — the
+// reconciliation probe's own scripting (PD37), independent of the OAuth
+// callback's own FailUserInfo static field.
+func (fh *FakeHubspot) QueueUserInfoProbeStatuses(statuses ...int) {
+	fh.refreshMu.Lock()
+	defer fh.refreshMu.Unlock()
+	fh.userInfoProbeStatuses = append(fh.userInfoProbeStatuses, statuses...)
+}
+
+func (fh *FakeHubspot) nextRefreshOutcome() (FakeHubspotRefreshOutcome, bool) {
+	fh.refreshMu.Lock()
+	defer fh.refreshMu.Unlock()
+	if len(fh.refreshOutcomes) == 0 {
+		return FakeHubspotRefreshOutcome{}, false
+	}
+	next := fh.refreshOutcomes[0]
+	fh.refreshOutcomes = fh.refreshOutcomes[1:]
+	return next, true
+}
+
+func (fh *FakeHubspot) nextUserInfoProbeStatus() (int, bool) {
+	fh.refreshMu.Lock()
+	defer fh.refreshMu.Unlock()
+	if len(fh.userInfoProbeStatuses) == 0 {
+		return 0, false
+	}
+	next := fh.userInfoProbeStatuses[0]
+	fh.userInfoProbeStatuses = fh.userInfoProbeStatuses[1:]
+	return next, true
+}
+
+func (fh *FakeHubspot) recordRefreshCall() {
+	fh.refreshMu.Lock()
+	defer fh.refreshMu.Unlock()
+	fh.RefreshCallCount++
+}
+
+// FakeHubspotSearchContact is one contact FakeHubspot's contacts-search
+// route (hubspot-contact-created's poll mapping, PD35) serves. CreatedAt is
+// an RFC3339 string carried at the result's own top level — matching
+// hubspot.yaml's recordTimestampPath ("createdAt"), distinct from the
+// "createdate" property real Hubspot also carries inside Properties.
+type FakeHubspotSearchContact struct {
+	ID         string
+	Properties map[string]string
+	CreatedAt  string
+}
+
+// AddSearchContact appends a new contact observable by the very next poll
+// (Phase 3 Slice 4's crucial_path journey: "a new contact appears" mid-test).
+func (fh *FakeHubspot) AddSearchContact(contact FakeHubspotSearchContact) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	fh.searchContacts = append(fh.searchContacts, contact)
+}
+
+// FailNextSearch makes the next call (and only the next call) to
+// /crm/v3/objects/contacts/search return 500 — the same "one scripted
+// failure" shape as FakeGraph.FailNextMailFolderPoll.
+func (fh *FakeHubspot) FailNextSearch() {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	fh.failNextSearchesRemaining++
 }
 
 // FakeHubspotUpload is one multipart file part FakeHubspot's /files/v3/files
@@ -125,6 +250,7 @@ func NewFakeHubspot(t *testing.T, script FakeHubspotScript) *FakeHubspot {
 	mux.HandleFunc("/oauth/v1/token", fh.tokenHandler(script))
 	mux.HandleFunc("/oauth/v1/access-tokens/", fh.userInfoHandler(script))
 	mux.HandleFunc("/crm/v3/objects/contacts", fh.contactsHandler(script))
+	mux.HandleFunc("/crm/v3/objects/contacts/search", fh.contactsSearchHandler())
 	mux.HandleFunc("/files/v3/files", fh.filesHandler(script))
 
 	server := httptest.NewServer(mux)
@@ -136,28 +262,101 @@ func NewFakeHubspot(t *testing.T, script FakeHubspotScript) *FakeHubspot {
 	return fh
 }
 
+// tokenHandler serves both the authorization_code grant (the OAuth
+// callback's token exchange) and the refresh_token grant (Phase 3 Slice 5,
+// PD36), distinguished by the form's own grant_type — mirroring
+// FakeMicrosoft's own tokenHandler. A refresh_token grant first consumes
+// QueueRefreshOutcomes' queue when non-empty; once empty, it falls back to
+// the static FailRefresh/RefreshAccessToken/RefreshRefreshToken fields.
 func (fh *FakeHubspot) tokenHandler(script FakeHubspotScript) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if script.FailTokenExchange {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
 		if err := r.ParseForm(); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		isRefresh := r.Form.Get("grant_type") == "refresh_token"
+
+		if isRefresh {
+			if outcome, ok := fh.nextRefreshOutcome(); ok {
+				fh.serveScriptedRefreshOutcome(w, outcome)
+				return
+			}
+			if script.FailRefresh {
+				fh.recordRefreshCall()
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+				return
+			}
+		} else if script.FailTokenExchange {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
 		fh.LastTokenForm = r.Form
+		accessToken, refreshToken := script.AccessToken, script.RefreshToken
+		if isRefresh {
+			fh.recordRefreshCall()
+			if script.RefreshAccessToken != "" {
+				accessToken = script.RefreshAccessToken
+			}
+			refreshToken = script.RefreshRefreshToken
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"access_token":  script.AccessToken,
-			"refresh_token": script.RefreshToken,
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
 		})
 	}
 }
 
+// serveScriptedRefreshOutcome mirrors FakeMicrosoft's own
+// serveScriptedRefreshOutcome for FakeHubspotRefreshOutcome's shape.
+func (fh *FakeHubspot) serveScriptedRefreshOutcome(w http.ResponseWriter, outcome FakeHubspotRefreshOutcome) {
+	fh.recordRefreshCall()
+
+	if outcome.NetworkDrop {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_ = conn.Close()
+		return
+	}
+	if outcome.ServerError {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if outcome.InvalidGrant {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"access_token":  outcome.AccessToken,
+		"refresh_token": outcome.RefreshToken,
+	})
+}
+
+// userInfoHandler serves GET /oauth/v1/access-tokens/{token}: first
+// consuming QueueUserInfoProbeStatuses' queue (the reconciliation probe's
+// own scripting, PD37) when non-empty, otherwise the static FailUserInfo
+// behavior every OAuth-callback test already relies on.
 func (fh *FakeHubspot) userInfoHandler(script FakeHubspotScript) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if script.FailUserInfo {
+		if status, ok := fh.nextUserInfoProbeStatus(); ok {
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+				return
+			}
+		} else if script.FailUserInfo {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -198,6 +397,51 @@ func respondHubspotRateLimited(w http.ResponseWriter, retryAfter string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusTooManyRequests)
 	_, _ = w.Write([]byte(`{"category":"RATE_LIMITS","message":"You have reached your secondly limit."}`))
+}
+
+// contactsSearchHandler serves POST /crm/v3/objects/contacts/search (the
+// hubspot-contact-created poll mapping's own call, PD35): every
+// currently-held search contact, unfiltered — production's own watermark
+// decision (triggers.ApplyWatermark) is what actually selects which of these
+// are new, exactly as it does against the real Hubspot search endpoint's own
+// createdate filter, so this fake does not need to interpret the posted
+// filterGroups itself to be a faithful stand-in (mirrors FakeGraph's
+// mailFolderMessagesHandler's identical reasoning).
+func (fh *FakeHubspot) contactsSearchHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fh.mu.Lock()
+		fh.SearchCallCount++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fh.LastSearchBody = body
+		shouldFail := fh.failNextSearchesRemaining > 0
+		if shouldFail {
+			fh.failNextSearchesRemaining--
+		}
+		contacts := append([]FakeHubspotSearchContact(nil), fh.searchContacts...)
+		fh.mu.Unlock()
+
+		if shouldFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		results := make([]map[string]any, 0, len(contacts))
+		for _, c := range contacts {
+			properties := make(map[string]any, len(c.Properties))
+			for k, v := range c.Properties {
+				properties[k] = v
+			}
+			results = append(results, map[string]any{
+				"id":         c.ID,
+				"createdAt":  c.CreatedAt,
+				"properties": properties,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+	}
 }
 
 func (fh *FakeHubspot) handleCreateContact(w http.ResponseWriter, r *http.Request, script FakeHubspotScript) {

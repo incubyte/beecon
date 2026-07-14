@@ -79,3 +79,16 @@ type SigningSecrets interface {
 type SigningSecretLookup interface {
 	FindByKid(ctx context.Context, id SigningSecretID) (*SigningSecret, error)
 }
+
+// WebhookSecrets is the access module's org-scoped driven port for webhook
+// endpoint signing secrets (PD27/PD31, Phase 3 Slice 3). Unlike
+// SigningSecrets, a WebhookSigningSecret belongs directly to an
+// organization (there is no intermediate "key" entity), but it rotates with
+// an overlap window like ApiKeySecret does — so this port mirrors
+// ApiKeySecrets' own shape (Save, a listing method, MarkExpiring) rather
+// than SigningSecrets' simpler one.
+type WebhookSecrets interface {
+	Save(ctx context.Context, secret WebhookSigningSecret) error
+	ListByOrg(ctx context.Context, org organizations.OrgID) ([]WebhookSigningSecret, error)
+	MarkExpiring(ctx context.Context, org organizations.OrgID, id WebhookSecretID, expiresAt time.Time) error
+}

@@ -22,7 +22,9 @@ type VerifyUserToken func(ctx context.Context, token string) (organizations.OrgI
 // them only through organizations.OrgIDFromContext and
 // organizations.UserIDFromContext — never from path, body, or query. A
 // missing, malformed, tampered, wrong-secret, or expired token is rejected
-// with the PD5 unauthorized envelope.
+// with the PD5 unauthorized envelope; an infrastructure failure while
+// verifying (e.g. a database error) surfaces as 500, never 401 (PD38b,
+// Phase 2 review carry-forward) — see writeAuthError.
 func UserAuth(verify VerifyUserToken) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +35,7 @@ func UserAuth(verify VerifyUserToken) func(http.Handler) http.Handler {
 			}
 			org, userID, err := verify(r.Context(), token)
 			if err != nil {
-				httpx.WriteDomainError(w, httpx.Unauthorized("invalid or expired user token"))
+				writeAuthError(w, err)
 				return
 			}
 			ctx := organizations.WithUserID(organizations.WithOrgID(r.Context(), org), userID)
@@ -50,7 +52,13 @@ func UserAuth(verify VerifyUserToken) func(http.Handler) http.Handler {
 // back to verifyUser; a request that satisfies neither is rejected with the
 // PD5 unauthorized envelope. Handlers distinguish the two paths via
 // organizations.UserIDFromContext: present only when a user token
-// authenticated the request.
+// authenticated the request. An infrastructure failure while verifying
+// either credential form (e.g. a database error) surfaces as 500, never
+// 401 (PD38b, Phase 2 review carry-forward): OrgOrUser tries both paths
+// before giving up, so it only reports 401 once both have failed as
+// genuine business rejections — if either failed for an infrastructure
+// reason instead, that is reported as 500 rather than being silently
+// swallowed by falling through to the other path's own rejection.
 func OrgOrUser(verifyOrg Verify, verifyUser VerifyUserToken) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,13 +67,19 @@ func OrgOrUser(verifyOrg Verify, verifyUser VerifyUserToken) func(http.Handler) 
 				httpx.WriteDomainError(w, httpx.Unauthorized("missing or malformed authorization header"))
 				return
 			}
-			if org, err := verifyOrg(r.Context(), token); err == nil {
+			org, orgErr := verifyOrg(r.Context(), token)
+			if orgErr == nil {
 				next.ServeHTTP(w, r.WithContext(organizations.WithOrgID(r.Context(), org)))
 				return
 			}
-			if org, userID, err := verifyUser(r.Context(), token); err == nil {
-				ctx := organizations.WithUserID(organizations.WithOrgID(r.Context(), org), userID)
+			userOrg, userID, userErr := verifyUser(r.Context(), token)
+			if userErr == nil {
+				ctx := organizations.WithUserID(organizations.WithOrgID(r.Context(), userOrg), userID)
 				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			if isInfrastructureFailure(orgErr) || isInfrastructureFailure(userErr) {
+				httpx.WriteDomainError(w, nil)
 				return
 			}
 			httpx.WriteDomainError(w, httpx.Unauthorized("invalid or expired credential"))

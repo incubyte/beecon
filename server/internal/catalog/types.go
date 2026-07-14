@@ -104,6 +104,75 @@ type ProviderDefinition struct {
 	UserInfo        UserInfoMapping
 	ExpectedParams  []ExpectedParam
 	Tools           []ProviderTool
+	Triggers        []TriggerDefinition
+}
+
+// TriggerPollMapping is a trigger definition's poll-ingestion mapping (PD28,
+// PD13's finalized definition format v1): which HTTP call the poller issues
+// each tick, and how it reads records and their payload back out of the
+// response. Path and Query/Body values are {config.x}/{watermark} templated
+// the same way a tool's Mapping is {input.x}/{params.x} templated
+// (execution/template.go). Slice 1 only parses and validates this shape;
+// evaluating it against a live provider call is execution/poll.go's job
+// (Slice 4).
+type TriggerPollMapping struct {
+	Method              string
+	Path                string
+	Query               map[string]string
+	Body                map[string]string
+	RecordsPath         string
+	RecordIDPath        string
+	RecordTimestampPath string
+	Payload             map[string]string
+}
+
+// TriggerDefinition is one trigger a ProviderDefinition declares (PD28,
+// PD35): ConfigSchema validates a trigger instance's config at creation
+// (triggers.Facade.Create, Slice 2); PayloadSchema is the shape every fired
+// trigger.event's data.payload conforms to. Ingestion is always "poll" today
+// — a definition declaring "push" fails boot (AC5) — the field exists so a
+// future push value arrives without a format bump (PD28). PollIntervalSeconds
+// defaults to 60 and is clamped to the platform minimum when a definition
+// declares less (with a boot log line).
+type TriggerDefinition struct {
+	Slug                string
+	Name                string
+	Description         string
+	ConfigSchema        map[string]any
+	PayloadSchema       map[string]any
+	Ingestion           string
+	PollIntervalSeconds int
+	Poll                TriggerPollMapping
+}
+
+// TriggerDefinitionSummary is one trigger definition as
+// ListTriggerDefinitions/TriggerDefinitionDetail return it (Slice 1's catalog
+// API): the trigger's own fields plus the identifying details of the
+// ProviderDefinition that owns it (API Shape's nested provider
+// {slug, name, logo}) — the same shape ToolSummary already carries for
+// tools. PollIntervalSeconds (Slice 4) is not part of the public API's
+// documented response shape, but carries the already-clamped interval
+// (PD28) the triggers module schedules each poll tick against — the same
+// convention TriggerDefinition.PollIntervalSeconds already established.
+type TriggerDefinitionSummary struct {
+	Slug                string
+	Name                string
+	Description         string
+	ConfigSchema        map[string]any
+	PayloadSchema       map[string]any
+	Ingestion           string
+	PollIntervalSeconds int
+	ProviderSlug        string
+	ProviderName        string
+	ProviderLogo        string
+}
+
+// TriggerDefinitionPage is one cursor-paginated page of trigger definitions
+// (PD15's platform-wide convention), sorted by slug (mirrors ToolPage):
+// NextCursor is empty when this was the last page.
+type TriggerDefinitionPage struct {
+	Items      []TriggerDefinitionSummary
+	NextCursor string
 }
 
 // IntegrationID is minted only by CreateIntegration.

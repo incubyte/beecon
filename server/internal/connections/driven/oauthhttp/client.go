@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -59,37 +60,41 @@ func (c *Client) ExchangeCode(ctx context.Context, req connections.TokenExchange
 	form.Set("code", req.Code)
 	form.Set("redirect_uri", req.RedirectURI)
 
-	body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
+	status, body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
 	if err != nil {
 		return connections.TokenExchangeResult{}, err
 	}
-	return tokenExchangeResultFrom(body), nil
+	if status != http.StatusOK {
+		return connections.TokenExchangeResult{}, fmt.Errorf("token endpoint returned status %d", status)
+	}
+	return decodeTokenExchangeResponse(body)
 }
 
-// RefreshGrant completes a refresh_token grant against req.TokenURL (PD18):
-// the same credential-style-aware client authentication ExchangeCode uses,
-// carrying a stored refresh token instead of a fresh authorization code. A
-// response with an empty refresh_token means the provider did not rotate
-// it — the caller keeps the one it already has (AC8's other branch).
+// RefreshGrant completes a refresh_token grant against req.TokenURL (PD18).
+// A non-200 response naming one of permanentRefreshErrorCodes (FD3) returns
+// a typed connections.RefreshDenied; any other failure is transient.
 func (c *Client) RefreshGrant(ctx context.Context, req connections.RefreshGrantRequest) (connections.TokenExchangeResult, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", req.RefreshToken)
 
-	body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
+	status, body, err := c.doTokenGrant(ctx, req.TokenURL, form, req.CredentialStyle, req.ClientID, req.ClientSecret)
 	if err != nil {
 		return connections.TokenExchangeResult{}, err
 	}
-	return tokenExchangeResultFrom(body), nil
+	if status != http.StatusOK {
+		if code, denied := permanentRefreshErrorCode(body); denied {
+			return connections.TokenExchangeResult{}, connections.RefreshDenied{OAuthErrorCode: code}
+		}
+		return connections.TokenExchangeResult{}, fmt.Errorf("token endpoint returned status %d", status)
+	}
+	return decodeTokenExchangeResponse(body)
 }
 
-// doTokenGrant executes one token-endpoint round trip: form already carries
-// the grant's own fields (grant_type plus either code/redirect_uri or
-// refresh_token); credentialStyle decides whether clientID/clientSecret ride
-// in form or an HTTP Basic Authorization header (PD13) — shared by
-// ExchangeCode's authorization_code grant and RefreshGrant's refresh_token
-// grant, which differ only in which grant fields the form carries.
-func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Values, credentialStyle, clientID, clientSecret string) (tokenExchangeResponse, error) {
+// doTokenGrant executes one token-endpoint round trip and returns the raw
+// HTTP status and body; err is non-nil only for a network-level failure —
+// callers interpret a non-200 status themselves.
+func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Values, credentialStyle, clientID, clientSecret string) (status int, body []byte, err error) {
 	if credentialStyle != connections.CredentialStyleBasicAuth {
 		form.Set("client_id", clientID)
 		form.Set("client_secret", clientSecret)
@@ -97,7 +102,7 @@ func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Val
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return tokenExchangeResponse{}, fmt.Errorf("build token grant request: %w", err)
+		return 0, nil, fmt.Errorf("build token grant request: %w", err)
 	}
 	if credentialStyle == connections.CredentialStyleBasicAuth {
 		httpReq.SetBasicAuth(clientID, clientSecret)
@@ -107,22 +112,48 @@ func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Val
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return tokenExchangeResponse{}, fmt.Errorf("call token endpoint: %w", err)
+		return 0, nil, fmt.Errorf("call token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return tokenExchangeResponse{}, fmt.Errorf("token endpoint returned status %d", resp.StatusCode)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read token endpoint response: %w", err)
 	}
+	return resp.StatusCode, respBody, nil
+}
 
-	var body tokenExchangeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return tokenExchangeResponse{}, fmt.Errorf("decode token endpoint response: %w", err)
+// permanentRefreshErrorCodes are PD36's "invalid_grant and kin" (FD3).
+var permanentRefreshErrorCodes = map[string]bool{
+	"invalid_grant":       true,
+	"invalid_client":      true,
+	"unauthorized_client": true,
+}
+
+// permanentRefreshErrorCode reads a token endpoint's OAuth-shaped error body
+// ({"error": "..."}), reporting whether its code is a permanent refusal.
+func permanentRefreshErrorCode(body []byte) (string, bool) {
+	var parsed struct {
+		Error string `json:"error"`
 	}
-	if body.AccessToken == "" {
-		return tokenExchangeResponse{}, errors.New("token endpoint response carried no access_token")
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Error == "" {
+		return "", false
 	}
-	return body, nil
+	if !permanentRefreshErrorCodes[parsed.Error] {
+		return "", false
+	}
+	return parsed.Error, true
+}
+
+func decodeTokenExchangeResponse(body []byte) (connections.TokenExchangeResult, error) {
+	var decoded tokenExchangeResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return connections.TokenExchangeResult{}, fmt.Errorf("decode token endpoint response: %w", err)
+	}
+	if decoded.AccessToken == "" {
+		return connections.TokenExchangeResult{}, errors.New("token endpoint response carried no access_token")
+	}
+	return tokenExchangeResultFrom(decoded), nil
 }
 
 func tokenExchangeResultFrom(body tokenExchangeResponse) connections.TokenExchangeResult {
@@ -177,6 +208,35 @@ func (c *Client) FetchAccount(ctx context.Context, req connections.AccountFetchR
 		Email:       stringField(body, req.EmailField),
 		DisplayName: stringField(body, req.DisplayNameField),
 	}, nil
+}
+
+// FetchUserInfo performs PD37's reconciliation probe: a bearer-authenticated
+// GET against userInfoURL, discarding the response body. A 401 returns
+// connections.ErrProbeUnauthorized (FD9's only evidence of revocation); any
+// other non-2xx or network failure returns a plain error.
+func (c *Client) FetchUserInfo(ctx context.Context, userInfoURL, accessToken string) error {
+	resolvedURL := strings.ReplaceAll(userInfoURL, accessTokenURLPlaceholder, url.PathEscape(accessToken))
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resolvedURL, nil)
+	if err != nil {
+		return fmt.Errorf("build reconciliation probe request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("call reconciliation probe endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return connections.ErrProbeUnauthorized
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("reconciliation probe endpoint returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // stringField reads field out of body as a string, or "" when field is

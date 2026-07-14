@@ -152,3 +152,61 @@ tools:
       path: /me/messages/{input.messageId}
       query:
         $select: "{input.select}"
+
+# Phase 3 (PD28/PD35): the first-class replacement of
+# temp/outlook-message-received-trigger.yaml — same folderId-with-default
+# config and 60s polling cadence, without the Membrane flow-naming hack.
+# Execution (evaluating the poll mapping against a live Graph call) arrives
+# in Slice 4; this section is parsed and validated starting Slice 1.
+triggers:
+  - slug: outlook-message-received
+    name: New message received
+    description: >-
+      Triggered when a new message arrives in the configured mailbox folder.
+      Polls Microsoft Graph messages newer than the trigger's watermark
+      (PD34).
+    ingestion: poll
+    pollIntervalSeconds: 60
+    configSchema:
+      type: object
+      properties:
+        folderId:
+          type: string
+          description: >-
+            Outlook folder to monitor: a well-known folder name (e.g. Inbox)
+            or a folder id. Defaults to Inbox.
+          default: Inbox
+    payloadSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        from:
+          type: string
+        receivedDateTime:
+          type: string
+        bodyPreview:
+          type: string
+        folderId:
+          type: string
+      required:
+        - id
+        - receivedDateTime
+    poll:
+      method: GET
+      path: /me/mailFolders/{config.folderId}/messages
+      query:
+        $filter: "receivedDateTime gt {watermark}"
+        $orderby: receivedDateTime
+      recordsPath: value
+      recordIdPath: id
+      recordTimestampPath: receivedDateTime
+      payload:
+        id: id
+        subject: subject
+        from: from.emailAddress.address
+        receivedDateTime: receivedDateTime
+        bodyPreview: bodyPreview
+        folderId: parentFolderId

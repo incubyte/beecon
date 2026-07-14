@@ -15,10 +15,12 @@ type Facade struct {
 	apiKeySecrets       ApiKeySecrets
 	signingSecrets      SigningSecrets
 	signingSecretLookup SigningSecretLookup
+	webhookSecrets      WebhookSecrets
 	vault               *vault.Vault
 	newID               func() string
 	newSecretID         func() string
 	newSigningSecretID  func() string
+	newWebhookSecretID  func() string
 	now                 func() time.Time
 }
 
@@ -26,19 +28,22 @@ type Facade struct {
 // identity itself, its secrets — PD23, Slice 8 — and the pre-auth,
 // installation-level PrefixLookup), the user-token signing-secret ports
 // (org-scoped SigningSecrets plus the pre-auth, installation-level
-// SigningSecretLookup — PD20), the shared vault a signing secret is
-// encrypted under, and injected id minters and a clock so tests can supply
-// deterministic ids and a fixed time.
+// SigningSecretLookup — PD20), the org-scoped webhook-secret port
+// (WebhookSecrets — PD27/PD31, Phase 3 Slice 3), the shared vault a
+// signing/webhook secret is encrypted under, and injected id minters and a
+// clock so tests can supply deterministic ids and a fixed time.
 func NewFacade(
 	repo Repository,
 	prefixLookup PrefixLookup,
 	apiKeySecrets ApiKeySecrets,
 	signingSecrets SigningSecrets,
 	signingSecretLookup SigningSecretLookup,
+	webhookSecrets WebhookSecrets,
 	secretVault *vault.Vault,
 	newID func() string,
 	newSecretID func() string,
 	newSigningSecretID func() string,
+	newWebhookSecretID func() string,
 	now func() time.Time,
 ) *Facade {
 	return &Facade{
@@ -47,10 +52,12 @@ func NewFacade(
 		apiKeySecrets:       apiKeySecrets,
 		signingSecrets:      signingSecrets,
 		signingSecretLookup: signingSecretLookup,
+		webhookSecrets:      webhookSecrets,
 		vault:               secretVault,
 		newID:               newID,
 		newSecretID:         newSecretID,
 		newSigningSecretID:  newSigningSecretID,
+		newWebhookSecretID:  newWebhookSecretID,
 		now:                 now,
 	}
 }

@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"beecon/internal/config"
 )
@@ -251,6 +252,170 @@ func TestLoad_NonPositiveFileMaxBytesFailsFastWithClearMessage(t *testing.T) {
 				t.Errorf("error = %q, want it to name BEECON_FILE_MAX_BYTES", err.Error())
 			}
 		})
+	}
+}
+
+// --- BEECON_DELIVERY_TIMEOUT (PD29/PD30, Phase 3 Slice 3): unset falls
+// back to DefaultDeliveryTimeoutSeconds (10s); a set value must parse as a
+// positive integer number of seconds. ---
+
+func TestLoad_UnsetDeliveryTimeoutFallsBackToTheDefaultTenSeconds(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_DELIVERY_TIMEOUT", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantDefault := config.DefaultDeliveryTimeoutSeconds * time.Second
+	if cfg.DeliveryTimeout != wantDefault {
+		t.Errorf("DeliveryTimeout = %v, want the default %v", cfg.DeliveryTimeout, wantDefault)
+	}
+	if config.DefaultDeliveryTimeoutSeconds != 10 {
+		t.Fatalf("DefaultDeliveryTimeoutSeconds = %d, want exactly 10", config.DefaultDeliveryTimeoutSeconds)
+	}
+}
+
+func TestLoad_ASetDeliveryTimeoutValueIsUsedAsSeconds(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_DELIVERY_TIMEOUT", "30")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DeliveryTimeout != 30*time.Second {
+		t.Errorf("DeliveryTimeout = %v, want %v", cfg.DeliveryTimeout, 30*time.Second)
+	}
+}
+
+func TestLoad_NonIntegerDeliveryTimeoutFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_DELIVERY_TIMEOUT", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_DELIVERY_TIMEOUT, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_DELIVERY_TIMEOUT") {
+		t.Errorf("error = %q, want it to name BEECON_DELIVERY_TIMEOUT", err.Error())
+	}
+}
+
+func TestLoad_NonPositiveDeliveryTimeoutFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_DELIVERY_TIMEOUT", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_DELIVERY_TIMEOUT=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_DELIVERY_TIMEOUT") {
+				t.Errorf("error = %q, want it to name BEECON_DELIVERY_TIMEOUT", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_WhitespaceOnlyDeliveryTimeoutIsTreatedAsUnsetAndFallsBackToTheDefault(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_DELIVERY_TIMEOUT", "   ")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DeliveryTimeout != config.DefaultDeliveryTimeoutSeconds*time.Second {
+		t.Errorf("DeliveryTimeout = %v, want the default", cfg.DeliveryTimeout)
+	}
+}
+
+// --- BEECON_POLL_MIN_INTERVAL (PD28, Phase 3 Slice 4): unset falls back to
+// DefaultPollMinIntervalSeconds (30s); a set value must parse as a positive
+// integer number of seconds. ---
+
+func TestLoad_UnsetPollMinIntervalFallsBackToTheDefaultThirtySeconds(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_POLL_MIN_INTERVAL", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantDefault := config.DefaultPollMinIntervalSeconds * time.Second
+	if cfg.PollMinInterval != wantDefault {
+		t.Errorf("PollMinInterval = %v, want the default %v", cfg.PollMinInterval, wantDefault)
+	}
+	if config.DefaultPollMinIntervalSeconds != 30 {
+		t.Fatalf("DefaultPollMinIntervalSeconds = %d, want exactly 30", config.DefaultPollMinIntervalSeconds)
+	}
+}
+
+func TestLoad_ASetPollMinIntervalValueIsUsedAsSeconds(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_POLL_MIN_INTERVAL", "45")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PollMinInterval != 45*time.Second {
+		t.Errorf("PollMinInterval = %v, want %v", cfg.PollMinInterval, 45*time.Second)
+	}
+}
+
+func TestLoad_NonIntegerPollMinIntervalFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_POLL_MIN_INTERVAL", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_POLL_MIN_INTERVAL, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_POLL_MIN_INTERVAL") {
+		t.Errorf("error = %q, want it to name BEECON_POLL_MIN_INTERVAL", err.Error())
+	}
+}
+
+func TestLoad_NonPositivePollMinIntervalFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_POLL_MIN_INTERVAL", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_POLL_MIN_INTERVAL=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_POLL_MIN_INTERVAL") {
+				t.Errorf("error = %q, want it to name BEECON_POLL_MIN_INTERVAL", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_WhitespaceOnlyPollMinIntervalIsTreatedAsUnsetAndFallsBackToTheDefault(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_POLL_MIN_INTERVAL", "   ")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PollMinInterval != config.DefaultPollMinIntervalSeconds*time.Second {
+		t.Errorf("PollMinInterval = %v, want the default", cfg.PollMinInterval)
 	}
 }
 

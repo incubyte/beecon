@@ -3,11 +3,11 @@ package authmw_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 
 	"beecon/internal/access/driving/authmw"
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 )
 
@@ -17,15 +17,21 @@ const validOrg = organizations.OrgID("org_1")
 
 // fakeVerify stands in for (*access.Facade).Verify: authmw depends on the
 // Verify func type, not the concrete access.Facade, so a crafted fake is
-// enough to exercise every rejection path without wiring real keys.
+// enough to exercise every rejection path without wiring real keys. Every
+// business rejection returns a *httpx.DomainError (httpx.Unauthorized) —
+// exactly what the real access.Facade.Verify returns for an unknown or
+// revoked key (access/facade.go's own ErrUnauthorized() — a thin wrapper
+// over the same httpx.Unauthorized) — never a plain error, which authmw's
+// own PD38b logic (autherror.go) would instead treat as an infrastructure
+// failure and render as 500.
 func fakeVerify(_ context.Context, secret string) (organizations.OrgID, error) {
 	switch secret {
 	case validSecret:
 		return validOrg, nil
 	case revokedSecret:
-		return "", errors.New("revoked api key")
+		return "", httpx.Unauthorized("revoked api key")
 	default:
-		return "", errors.New("unknown api key")
+		return "", httpx.Unauthorized("unknown api key")
 	}
 }
 

@@ -7,9 +7,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"beecon/internal/organizations"
 )
+
+// userTokenMaxLifetime is the longest span a user token's exp − iat may
+// cover (PD38a, Phase 2 review carry-forward): the SDK's userTokens.create
+// refuses to mint anything longer (packages/sdk/src/resources/userTokens.ts),
+// and VerifyUserToken refuses to honor one anyway even if minted by another
+// client — iat finally has a job, rather than existing only to be echoed
+// back unchecked.
+const userTokenMaxLifetime = 24 * time.Hour
 
 // userTokenAlgorithm is the only JWT algorithm VerifyUserToken accepts
 // (Flagged Decision 2): a hand-rolled, verify-only HS256 implementation
@@ -40,7 +49,12 @@ type userTokenClaims struct {
 // exactly like access.PrefixLookup — decrypts it from the vault, and
 // compares the signature in constant time via crypto/hmac.Equal. A missing,
 // malformed, tampered, wrong-secret, or expired token is rejected as
-// unauthorized (PD5) — the caller never learns which.
+// unauthorized (PD5) — the caller never learns which. A vault decrypt
+// failure is different in kind from all of those: it is Beecon's own crypto
+// layer failing, an infrastructure error rather than a verdict on the
+// presented token, so it is returned as-is (PD38b) — mirroring
+// ActiveWebhookSecrets (webhook_secret.go) — for authmw to surface as 500,
+// not 401.
 func (f *Facade) VerifyUserToken(ctx context.Context, token string) (organizations.OrgID, organizations.UserID, error) {
 	headerB64, payloadB64, signatureB64, ok := splitUserToken(token)
 	if !ok {
@@ -61,7 +75,7 @@ func (f *Facade) VerifyUserToken(ctx context.Context, token string) (organizatio
 	}
 	secret, err := f.vault.Decrypt(secretRecord.EncryptedSecret)
 	if err != nil {
-		return "", "", ErrUnauthorized()
+		return "", "", err // infra failure, not a verdict on the token — mirrors ActiveWebhookSecrets
 	}
 
 	signature, ok := decodeUserTokenSegment(signatureB64)
@@ -70,11 +84,19 @@ func (f *Facade) VerifyUserToken(ctx context.Context, token string) (organizatio
 	}
 
 	claims, ok := decodeUserTokenClaims(payloadB64)
-	if !ok || f.now().Unix() >= claims.Exp {
+	if !ok || f.now().Unix() >= claims.Exp || exceedsUserTokenMaxLifetime(claims) {
 		return "", "", ErrUnauthorized()
 	}
 
 	return secretRecord.OrgID, organizations.UserID(claims.Sub), nil
+}
+
+// exceedsUserTokenMaxLifetime reports whether claims names a lifetime
+// (exp − iat) longer than userTokenMaxLifetime allows (PD38a) — rejected
+// the same unauthorized way as an already-expired token, so the caller
+// never learns which rule a token failed.
+func exceedsUserTokenMaxLifetime(claims userTokenClaims) bool {
+	return time.Duration(claims.Exp-claims.Iat)*time.Second > userTokenMaxLifetime
 }
 
 // splitUserToken splits a "header.payload.signature" compact JWT into its

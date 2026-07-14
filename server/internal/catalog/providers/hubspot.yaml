@@ -136,3 +136,43 @@ tools:
       # made.
       fileInputs:
         - file
+
+# Phase 3 (PD28/PD35): the second provider's trigger, proving the format is
+# not Outlook-shaped — polls CRM contacts by createdate. Execution
+# (evaluating the poll mapping against a live Hubspot call) arrives in Slice
+# 4; this section is parsed and validated starting Slice 1.
+triggers:
+  - slug: hubspot-contact-created
+    name: New contact created
+    description: Triggered when a new CRM contact is created, polled by createdate.
+    ingestion: poll
+    pollIntervalSeconds: 60
+    configSchema:
+      type: object
+    payloadSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        properties:
+          type: object
+      required:
+        - id
+    poll:
+      method: POST
+      path: /crm/v3/objects/contacts/search
+      # Hubspot's contacts-search endpoint takes its filter as a JSON body
+      # rather than query parameters (unlike hubspot-list-contacts' plain GET
+      # list, PD15b) — dotted body keys build the nested filterGroups shape
+      # the same way hubspot-create-contact's properties.* mapping does.
+      body:
+        filterGroups.0.filters.0.propertyName: createdate
+        filterGroups.0.filters.0.operator: GT
+        filterGroups.0.filters.0.value: "{watermark}"
+        sorts.0: createdate
+      recordsPath: results
+      recordIdPath: id
+      recordTimestampPath: createdAt
+      payload:
+        id: id
+        properties: properties

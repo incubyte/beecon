@@ -53,6 +53,13 @@ func (c *refreshScriptedOAuthClient) RefreshGrant(_ context.Context, req connect
 	return c.refreshResult, nil
 }
 
+// FetchUserInfo is unused by this file's refresh-focused tests (Slice 5's
+// reconciliation tests live in their own file); it satisfies
+// connections.OAuthClient with a harmless default.
+func (c *refreshScriptedOAuthClient) FetchUserInfo(_ context.Context, _, _ string) error {
+	return nil
+}
+
 // executionAccessFixture wires a connections.Facade with an explicit
 // Repository handle (so a test can seed a Connection's TokenExpiresAt
 // directly — a nil-migrated-row simulation, AC7's self-heal case) and a
@@ -131,7 +138,10 @@ func (f *executionAccessFixture) decrypt(t *testing.T, ciphertext string) string
 	return plaintext
 }
 
-var errRefreshRejected = errors.New("invalid_grant")
+// errTransientRefreshFailure stands in for a network error or a provider 5xx
+// during a refresh_token grant (FD3): a plain error, carrying no typed
+// connections.RefreshDenied — the only outcome PD36 treats as permanent.
+var errTransientRefreshFailure = errors.New("connection reset by peer")
 
 // --- ResolveForExecution's inline refresh (AC7) ---
 
@@ -280,13 +290,18 @@ func TestRefresh_EmptyRotatedRefreshTokenKeepsTheStoredOne(t *testing.T) {
 	}
 }
 
-// --- Refresh failure (AC9) ---
+// --- Refresh failure (AC9, corrected by FD3/PD36 — Slice 5) ---
 
-func TestRefresh_FailureTransitionsTheConnectionToExpiredAndReturnsNoErrorFromResolve(t *testing.T) {
+// TestRefresh_APermanentRefusalTransitionsTheConnectionToExpiredAndReturnsNoErrorFromResolve
+// pins FD3's permanent half: only a typed connections.RefreshDenied (the
+// provider's own "invalid_grant and kin" refusal, PD36) expires the
+// connection — surfaced as a status, not an error, so a resolving caller
+// reports it the same way it reports any other non-ACTIVE connection.
+func TestRefresh_APermanentRefusalTransitionsTheConnectionToExpiredAndReturnsNoErrorFromResolve(t *testing.T) {
 	client := &refreshScriptedOAuthClient{
 		exchangeResult: connections.TokenExchangeResult{AccessToken: "raw-access-token", RefreshToken: "raw-refresh-token", ExpiresIn: 60},
 		accountResult:  connections.AccountInfo{Email: "ada@example.com", DisplayName: "Ada"},
-		refreshErr:     errRefreshRejected,
+		refreshErr:     connections.RefreshDenied{OAuthErrorCode: "invalid_grant"},
 	}
 	f := newExecutionAccessFixture(t, client)
 	initiated := f.activate(t)
@@ -295,7 +310,7 @@ func TestRefresh_FailureTransitionsTheConnectionToExpiredAndReturnsNoErrorFromRe
 	access, err := f.facade.ResolveForExecution(context.Background(), testOrg, testUser, initiated.Connection.ID)
 
 	if err != nil {
-		t.Fatalf("unexpected platform-level error: %v — a refresh failure must surface as a status, not an error", err)
+		t.Fatalf("unexpected platform-level error: %v — a permanent refusal must surface as a status, not an error", err)
 	}
 	if access.Status != connections.StatusExpired {
 		t.Errorf("Status = %q, want %q", access.Status, connections.StatusExpired)
@@ -306,6 +321,40 @@ func TestRefresh_FailureTransitionsTheConnectionToExpiredAndReturnsNoErrorFromRe
 	got := f.get(t, initiated.Connection.ID)
 	if got.Status != connections.StatusExpired {
 		t.Errorf("persisted Status = %q, want %q", got.Status, connections.StatusExpired)
+	}
+}
+
+// TestRefresh_ATransientFailureLeavesTheConnectionActiveAndSurfacesTheErrorFromResolve
+// pins FD3's transient half — the behavior change this slice makes on top of
+// Phase 2: a plain error (network failure, provider 5xx — anything that is
+// not a typed connections.RefreshDenied) must NOT expire the connection; it
+// is returned to the caller so a request-path resolve surfaces a retriable
+// error instead of killing a connection whose token may still be refreshable
+// on the very next attempt (PD36's "transient failures just retry").
+func TestRefresh_ATransientFailureLeavesTheConnectionActiveAndSurfacesTheErrorFromResolve(t *testing.T) {
+	client := &refreshScriptedOAuthClient{
+		exchangeResult: connections.TokenExchangeResult{AccessToken: "raw-access-token", RefreshToken: "raw-refresh-token", ExpiresIn: 60},
+		accountResult:  connections.AccountInfo{Email: "ada@example.com", DisplayName: "Ada"},
+		refreshErr:     errTransientRefreshFailure,
+	}
+	f := newExecutionAccessFixture(t, client)
+	initiated := f.activate(t)
+	f.clock.now = f.clock.now.Add(2 * time.Minute)
+
+	_, err := f.facade.ResolveForExecution(context.Background(), testOrg, testUser, initiated.Connection.ID)
+
+	if err == nil {
+		t.Fatal("expected a transient refresh failure to surface as an error, got nil")
+	}
+	if !errors.Is(err, errTransientRefreshFailure) {
+		t.Errorf("err = %v, want it to wrap/equal the transient failure %v", err, errTransientRefreshFailure)
+	}
+	got := f.get(t, initiated.Connection.ID)
+	if got.Status != connections.StatusActive {
+		t.Errorf("persisted Status = %q, want %q — a transient failure must leave the connection untouched for the next scan to retry", got.Status, connections.StatusActive)
+	}
+	if client.refreshCallCount != 1 {
+		t.Errorf("refreshCallCount = %d, want exactly 1", client.refreshCallCount)
 	}
 }
 

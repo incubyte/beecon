@@ -235,6 +235,20 @@ func TestDelete_RemovesTheConnectionSoASubsequentGetIsNotFound(t *testing.T) {
 	assertDomainError(t, err, connections.CodeNotFound, 404)
 }
 
+// TestDelete_WithNoDependentsWiredDoesNotPanic pins Phase 3, Slice 2's
+// nil-safety contract (PD33): newLifecycleFacade never calls WithDependents,
+// mirroring every Phase 1/2 caller built before triggers existed — Delete's
+// notifyDependentsOfDeletion must treat that as a silent no-op rather than a
+// nil-pointer panic.
+func TestDelete_WithNoDependentsWiredDoesNotPanic(t *testing.T) {
+	f, _, _ := newLifecycleFacade(t)
+	initiated := mustInitiateAs(t, f, testOrg, testUser)
+
+	if err := f.Delete(context.Background(), testOrg, initiated.Connection.ID); err != nil {
+		t.Fatalf("Delete with no Dependents wired: unexpected error: %v", err)
+	}
+}
+
 func TestDelete_ReturnsNotFoundForAnUnknownID(t *testing.T) {
 	f, _, _ := newLifecycleFacade(t)
 

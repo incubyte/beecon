@@ -53,7 +53,12 @@ type logEntryDTO struct {
 	RequestBody  string `json:"requestBody"`
 	ResponseBody string `json:"responseBody"`
 	RateLimited  bool   `json:"rateLimited"`
-	CreatedAt    string `json:"createdAt"`
+	// EventID and Attempt (Phase 3 Slice 3) are set only for a
+	// webhook_delivery entry — see webhook_channel_journey_integration_test.go's
+	// AC11 coverage.
+	EventID   string `json:"eventId,omitempty"`
+	Attempt   int    `json:"attempt,omitempty"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type logsPageDTO struct {

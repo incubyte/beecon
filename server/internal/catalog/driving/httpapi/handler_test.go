@@ -438,3 +438,137 @@ func TestGetExpectedParams_Returns404ForAnUnknownIntegrationID(t *testing.T) {
 		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
 	}
 }
+
+// --- ListTriggerDefinitions / GetTriggerDefinition (Slice 1's catalog API) ---
+
+// fakeDefinitionsWithTriggers is fakeDefinitions' outlook provider plus one
+// trigger, so ListTriggerDefinitions/GetTriggerDefinition have something to
+// filter and fetch without depending on the real embedded outlook.yaml.
+func fakeDefinitionsWithTriggers() []catalog.ProviderDefinition {
+	defs := fakeDefinitions()
+	defs[0].Triggers = []catalog.TriggerDefinition{
+		{
+			Slug: "outlook-message-received", Name: "New message received",
+			Description:   "Triggered when a new message arrives.",
+			ConfigSchema:  minimalSchema(),
+			PayloadSchema: minimalSchema(),
+			Ingestion:     "poll", PollIntervalSeconds: 60,
+		},
+	}
+	return defs
+}
+
+func newTriggerDefinitionsTestRouter(t *testing.T) chi.Router {
+	t.Helper()
+	facade, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: fakeDefinitionsWithTriggers()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	errorRenderer := httpx.NewErrorRenderer(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(facade, errorRenderer)
+
+	r := chi.NewRouter()
+	r.Get("/trigger-definitions", h.ListTriggerDefinitions)
+	r.Get("/trigger-definitions/{slug}", h.GetTriggerDefinition)
+	return r
+}
+
+func TestListTriggerDefinitions_Returns200WithTheTriggerDefinitionsPageShapeFilteredByProviderSlug(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions?providerSlug=outlook", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page triggerDefinitionsPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(page.Items))
+	}
+	item := page.Items[0]
+	if item.Slug != "outlook-message-received" {
+		t.Errorf("slug = %q, want %q", item.Slug, "outlook-message-received")
+	}
+	if item.Ingestion != "poll" {
+		t.Errorf("ingestion = %q, want %q", item.Ingestion, "poll")
+	}
+	if item.Provider.Slug != "outlook" {
+		t.Errorf("provider.slug = %q, want %q", item.Provider.Slug, "outlook")
+	}
+	if len(item.ConfigSchema) == 0 || len(item.PayloadSchema) == 0 {
+		t.Errorf("configSchema/payloadSchema must not be empty: %+v / %+v", item.ConfigSchema, item.PayloadSchema)
+	}
+}
+
+func TestListTriggerDefinitions_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+// TestListTriggerDefinitions_Returns404ForAnUnknownProviderSlug is Slice 1's
+// AC6: listing trigger definitions for an unknown provider slug is not-found.
+func TestListTriggerDefinitions_Returns404ForAnUnknownProviderSlug(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions?providerSlug=does-not-exist", "org_1", "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
+	}
+}
+
+func TestGetTriggerDefinition_Returns200WithTheTriggerDefinitionDetail(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions/outlook-message-received", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var dto triggerDefinitionSummaryDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if dto.Slug != "outlook-message-received" {
+		t.Errorf("slug = %q, want %q", dto.Slug, "outlook-message-received")
+	}
+	if dto.Provider.Slug != "outlook" {
+		t.Errorf("provider.slug = %q, want %q", dto.Provider.Slug, "outlook")
+	}
+}
+
+func TestGetTriggerDefinition_Returns401WhenNoOrgContext(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions/outlook-message-received", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestGetTriggerDefinition_Returns404ForAnUnknownSlug(t *testing.T) {
+	r := newTriggerDefinitionsTestRouter(t)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/trigger-definitions/does-not-exist", "org_1", "")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "not_found")
+	}
+}

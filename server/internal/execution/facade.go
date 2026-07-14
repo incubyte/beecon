@@ -18,17 +18,18 @@ import (
 
 // Facade is the execution module's only public surface.
 type Facade struct {
-	tools        ToolReader
-	connections  ConnectionReader
-	provider     ProviderClient
-	recorder     Recorder
-	metrics      *metrics.Registry
-	now          func() time.Time
-	sleep        sleepFunc
-	files        Files
-	fileStore    FileStore
-	maxFileBytes int64
-	newFileID    func() string
+	tools              ToolReader
+	triggerDefinitions TriggerDefinitionReader
+	connections        ConnectionReader
+	provider           ProviderClient
+	recorder           Recorder
+	metrics            *metrics.Registry
+	now                func() time.Time
+	sleep              sleepFunc
+	files              Files
+	fileStore          FileStore
+	maxFileBytes       int64
+	newFileID          func() string
 }
 
 // NewFacade wires the facade with the narrow cross-module reader ports for
@@ -45,6 +46,17 @@ func NewFacade(tools ToolReader, connectionReader ConnectionReader, provider Pro
 // drive the retry loop deterministically, without a real sleep.
 func (f *Facade) WithSleep(sleep func(ctx context.Context, d time.Duration) error) *Facade {
 	f.sleep = sleep
+	return f
+}
+
+// WithTriggerDefinitions wires this facade's FetchTriggerRecords support
+// (Slice 4): the narrow TriggerDefinitionReader port (BOUNDARIES: execution
+// depends on catalog) FetchTriggerRecords needs to resolve a trigger's poll
+// mapping by slug. A facade built without this can still Execute tools —
+// only FetchTriggerRecords needs it, the same "optional add-on wired via its
+// own With*" convention as WithFiles.
+func (f *Facade) WithTriggerDefinitions(reader TriggerDefinitionReader) *Facade {
+	f.triggerDefinitions = reader
 	return f
 }
 

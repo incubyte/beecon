@@ -61,6 +61,14 @@ func serve(logger *slog.Logger) error {
 		}
 	}()
 
+	// Workers.Start only after the HTTP listener is up (section 3 of the
+	// architecture doc, PD29); Wire itself never starts them, so every
+	// existing test and journey composes the app without background
+	// nondeterminism.
+	workersCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
+	wired.Workers.Start(workersCtx)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -75,6 +83,10 @@ func serve(logger *slog.Logger) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
+	// Workers.Stop after the HTTP listener's own shutdown, so in-flight
+	// deliveries finish (or release their claims) within the same
+	// shutdown window (section 3 of the architecture doc).
+	wired.Workers.Stop(shutdownCtx)
 	return nil
 }
 

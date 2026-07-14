@@ -2,6 +2,7 @@ package connections
 
 import (
 	"context"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -10,6 +11,13 @@ import (
 	"beecon/internal/metrics"
 	"beecon/internal/organizations"
 	"beecon/internal/vault"
+)
+
+// defaultRefreshLead and defaultReconcileInterval are NewFacade's fallbacks
+// until WithScheduling overrides them (BEECON_REFRESH_LEAD/BEECON_RECONCILE_INTERVAL).
+const (
+	defaultRefreshLead       = 10 * time.Minute
+	defaultReconcileInterval = 6 * time.Hour
 )
 
 // Facade is the connections module's only public surface.
@@ -23,12 +31,23 @@ type Facade struct {
 	vault        *vault.Vault
 	oauthClient  OAuthClient
 	recorder     Recorder
+	dependents   Dependents
 	metrics      *metrics.Registry
 	newID        func() string
 	newToken     func() string
 	newState     func() string
 	baseURL      string
 	now          func() time.Time
+
+	refreshLocks      *refreshLocks
+	refreshQueue      RefreshQueue
+	events            EventSink
+	refreshLead       time.Duration
+	reconcileInterval time.Duration
+	jitter            func() float64
+	sleep             sleepFunc
+
+	statusCounter StatusCounter
 }
 
 // NewFacade wires the facade with the narrow cross-module reader ports, the
@@ -69,7 +88,43 @@ func NewFacade(
 		newState:     newState,
 		baseURL:      baseURL,
 		now:          now,
+
+		refreshLocks:      newRefreshLocks(),
+		refreshLead:       defaultRefreshLead,
+		reconcileInterval: defaultReconcileInterval,
+		jitter:            rand.Float64,
+		sleep:             realSleep,
 	}
+}
+
+// WithScheduling wires RefreshDueOnce/ReconcileOnce's RefreshQueue, the
+// EventSink every ACTIVE->EXPIRED transition emits through (including the
+// request-path refresh, since it funnels through the same expireConnection),
+// and BEECON_REFRESH_LEAD/BEECON_RECONCILE_INTERVAL.
+func (f *Facade) WithScheduling(refreshQueue RefreshQueue, events EventSink, refreshLead, reconcileInterval time.Duration) *Facade {
+	f.refreshQueue = refreshQueue
+	f.events = events
+	if refreshLead > 0 {
+		f.refreshLead = refreshLead
+	}
+	if reconcileInterval > 0 {
+		f.reconcileInterval = reconcileInterval
+	}
+	return f
+}
+
+// WithJitter overrides ReconcileOnce's inter-probe spacing with a
+// deterministic source for tests.
+func (f *Facade) WithJitter(jitter func() float64) *Facade {
+	f.jitter = jitter
+	return f
+}
+
+// WithSleep overrides ReconcileOnce's inter-probe sleep with a deterministic
+// source for tests.
+func (f *Facade) WithSleep(sleep sleepFunc) *Facade {
+	f.sleep = sleep
+	return f
 }
 
 // WithMetrics wires this facade's Prometheus recording (PD24): OAuth
@@ -78,6 +133,38 @@ func NewFacade(
 // no-op, exactly like a nil Recorder already does for logging.
 func (f *Facade) WithMetrics(registry *metrics.Registry) *Facade {
 	f.metrics = registry
+	return f
+}
+
+// WithStatusCounter wires the installation-level StatusCounter port
+// CountByStatus delegates to (PD38d). A Facade built without one (this
+// never called) makes CountByStatus return a nil map and no error — harmless
+// for every caller today (only the connections-by-status metrics gauge
+// calls it, and a nil map reads as all-zero counts).
+func (f *Facade) WithStatusCounter(counter StatusCounter) *Facade {
+	f.statusCounter = counter
+	return f
+}
+
+// CountByStatus returns the number of connections currently in each
+// lifecycle status across the installation (PD38d) — the connections-by-status
+// metrics gauge's data source, queried fresh at every scrape (a GaugeFunc)
+// rather than maintained as a running counter, so it is always exactly
+// correct.
+func (f *Facade) CountByStatus(ctx context.Context) (map[Status]int, error) {
+	if f.statusCounter == nil {
+		return nil, nil
+	}
+	return f.statusCounter.CountByStatus(ctx)
+}
+
+// WithDependents wires the consumer-defined Dependents port Delete notifies
+// after permanently removing a Connection (Phase 3, PD33). A Facade built
+// without one (this never called) makes that notification a silent no-op —
+// today's tests, and any Phase 1/2 caller built before triggers existed,
+// keep working unchanged.
+func (f *Facade) WithDependents(dependents Dependents) *Facade {
+	f.dependents = dependents
 	return f
 }
 
@@ -231,7 +318,20 @@ func (f *Facade) Delete(ctx context.Context, org organizations.OrgID, id Connect
 	if connection == nil {
 		return ErrNotFound()
 	}
-	return f.repo.Delete(ctx, org, id)
+	if err := f.repo.Delete(ctx, org, id); err != nil {
+		return err
+	}
+	return f.notifyDependentsOfDeletion(ctx, org, id)
+}
+
+// notifyDependentsOfDeletion calls the Dependents port after a Connection is
+// permanently removed (PD33's connection-delete cascade); a Facade with no
+// Dependents wired (WithDependents never called) is a silent no-op.
+func (f *Facade) notifyDependentsOfDeletion(ctx context.Context, org organizations.OrgID, id ConnectionID) error {
+	if f.dependents == nil {
+		return nil
+	}
+	return f.dependents.OnConnectionDeleted(ctx, org, id)
 }
 
 // Reconnect starts a fresh connect-page handshake against an existing

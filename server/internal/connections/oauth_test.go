@@ -71,6 +71,13 @@ func (f *fakeOAuthClient) RefreshGrant(_ context.Context, _ connections.RefreshG
 	return f.exchangeResult, f.exchangeErr
 }
 
+// FetchUserInfo is unused by this file's handshake-focused tests (Slice 5's
+// reconciliation tests live in their own file); it satisfies
+// connections.OAuthClient with a harmless default.
+func (f *fakeOAuthClient) FetchUserInfo(_ context.Context, _, _ string) error {
+	return nil
+}
+
 // mutableClock lets handshake tests advance time past ConnectLinkTTL /
 // OAuthStateTTL without sleeping.
 type mutableClock struct {

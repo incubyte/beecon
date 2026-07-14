@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +34,19 @@ type FakeGraphScript struct {
 	// rate-limited attempt; empty sends no header at all, exercising
 	// retry.go's jittered-backoff fallback instead.
 	RateLimitRetryAfter string
+}
+
+// FakeGraphMessage is one message FakeGraph's mailFolders/{folderId}/messages
+// route (the outlook-message-received poll mapping's own call, Phase 3 Slice
+// 4) serves for one folder. ReceivedDateTime is an RFC3339 string, matching
+// outlook.yaml's recordTimestampPath/{watermark} convention exactly.
+type FakeGraphMessage struct {
+	ID               string
+	Subject          string
+	From             string
+	ReceivedDateTime string
+	BodyPreview      string
+	FolderID         string
 }
 
 // FakeGraph is a running fake Microsoft Graph server plus the request
@@ -59,6 +73,44 @@ type FakeGraph struct {
 	// including rate-limited ones, so a retry journey can assert exactly how
 	// many attempts the platform-side retry loop made.
 	MessagesCallCount int
+
+	// mu guards the mail-folder polling state below (Phase 3 Slice 4): the
+	// crucial_path polling journey appends a new message mid-test, from the
+	// same goroutine that then calls PollOnce — a mutex keeps that safe
+	// without forcing every other (single-goroutine) FakeGraph field to pay
+	// for locking too.
+	mu                           sync.Mutex
+	messagesByFolder             map[string][]FakeGraphMessage
+	failMailFolderPollsRemaining int
+
+	// LastMailFolderID and MailFolderMessagesCallCount observe the poll
+	// mapping's own call — folder-scoped, per instance (Slice 4's AC8: two
+	// instances on different folders must be independently observable).
+	LastMailFolderID            string
+	MailFolderMessagesCallCount int
+}
+
+// AddMessage appends a new message to folderId's mailbox, observable by the
+// very next poll (Phase 3 Slice 4's crucial_path journey: "a new Outlook
+// message arrives" mid-test).
+func (fg *FakeGraph) AddMessage(folderID string, msg FakeGraphMessage) {
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	if fg.messagesByFolder == nil {
+		fg.messagesByFolder = map[string][]FakeGraphMessage{}
+	}
+	msg.FolderID = folderID
+	fg.messagesByFolder[folderID] = append(fg.messagesByFolder[folderID], msg)
+}
+
+// FailNextMailFolderPoll makes the next call (and only the next call) to the
+// mailFolders/{folderId}/messages route return 500, regardless of folder —
+// the crucial_path polling journey's "a failing poll... writes a log entry
+// and does not stop the schedule" proof (PD34).
+func (fg *FakeGraph) FailNextMailFolderPoll() {
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	fg.failMailFolderPollsRemaining++
 }
 
 // NewFakeGraph starts a FakeGraph server scripted per script, and registers
@@ -111,6 +163,7 @@ func NewFakeGraph(t *testing.T, script FakeGraphScript) *FakeGraph {
 			}
 		})
 	})
+	mux.HandleFunc("/v1.0/me/mailFolders/", fg.mailFolderMessagesHandler)
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -118,6 +171,48 @@ func NewFakeGraph(t *testing.T, script FakeGraphScript) *FakeGraph {
 	fg.BaseURL = server.URL + "/v1.0"
 	fg.MessagesURL = server.URL + "/v1.0/me/messages"
 	return fg
+}
+
+// mailFolderMessagesHandler serves GET /v1.0/me/mailFolders/{folderId}/messages
+// (the outlook-message-received poll mapping's own call, PD35): every
+// currently-held message in that folder, unfiltered — production's own
+// watermark decision (triggers.ApplyWatermark) is what actually selects
+// which of these are new, exactly as it does against the real Graph API's
+// own $filter, so this fake does not need to interpret $filter/$orderby
+// itself to be a faithful stand-in.
+func (fg *FakeGraph) mailFolderMessagesHandler(w http.ResponseWriter, r *http.Request) {
+	fg.mu.Lock()
+	folderID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1.0/me/mailFolders/"), "/messages")
+	fg.LastAuthorizationHeader = r.Header.Get("Authorization")
+	fg.LastQuery = r.URL.Query()
+	fg.LastMailFolderID = folderID
+	fg.MailFolderMessagesCallCount++
+	messages := append([]FakeGraphMessage(nil), fg.messagesByFolder[folderID]...)
+	shouldFail := fg.failMailFolderPollsRemaining > 0
+	if shouldFail {
+		fg.failMailFolderPollsRemaining--
+	}
+	fg.mu.Unlock()
+
+	if shouldFail {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	value := make([]map[string]any, 0, len(messages))
+	for _, m := range messages {
+		value = append(value, map[string]any{
+			"id":               m.ID,
+			"subject":          m.Subject,
+			"from":             map[string]any{"emailAddress": map[string]any{"address": m.From}},
+			"receivedDateTime": m.ReceivedDateTime,
+			"bodyPreview":      m.BodyPreview,
+			"parentFolderId":   m.FolderID,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"value": value})
 }
 
 // respondGraphRateLimited writes Graph's normalized rate-limit shape (PD21):

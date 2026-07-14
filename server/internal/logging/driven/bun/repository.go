@@ -17,18 +17,21 @@ import (
 type EventLogRow struct {
 	upstreambun.BaseModel `bun:"table:event_logs,alias:el"`
 
-	ID           string    `bun:"id,pk"`
-	OrgID        string    `bun:"org_id,notnull"`
-	UserID       string    `bun:"user_id,notnull"`
-	ConnectionID string    `bun:"connection_id,notnull"`
-	ToolSlug     string    `bun:"tool_slug,notnull"`
-	Kind         string    `bun:"kind,notnull"`
-	Status       int       `bun:"status,notnull"`
-	DurationMs   int64     `bun:"duration_ms,notnull"`
-	RequestBody  string    `bun:"request_body,notnull"`
-	ResponseBody string    `bun:"response_body,notnull"`
-	RateLimited  bool      `bun:"rate_limited,notnull"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	ID                string    `bun:"id,pk"`
+	OrgID             string    `bun:"org_id,notnull"`
+	UserID            string    `bun:"user_id,notnull"`
+	ConnectionID      string    `bun:"connection_id,notnull"`
+	ToolSlug          string    `bun:"tool_slug,notnull"`
+	Kind              string    `bun:"kind,notnull"`
+	Status            int       `bun:"status,notnull"`
+	DurationMs        int64     `bun:"duration_ms,notnull"`
+	RequestBody       string    `bun:"request_body,notnull"`
+	ResponseBody      string    `bun:"response_body,notnull"`
+	RateLimited       bool      `bun:"rate_limited,notnull"`
+	EventID           *string   `bun:"event_id"`
+	Attempt           int       `bun:"attempt,notnull"`
+	TriggerInstanceID *string   `bun:"trigger_instance_id"`
+	CreatedAt         time.Time `bun:"created_at,notnull"`
 }
 
 // Repository is the bun-backed logging.Repository.
@@ -92,34 +95,57 @@ func (r *Repository) Query(ctx context.Context, org organizations.OrgID, filter 
 
 func rowFromEventLog(entry logging.EventLog) EventLogRow {
 	return EventLogRow{
-		ID:           string(entry.ID),
-		OrgID:        string(entry.OrgID),
-		UserID:       entry.UserID,
-		ConnectionID: entry.ConnectionID,
-		ToolSlug:     entry.ToolSlug,
-		Kind:         string(entry.Kind),
-		Status:       entry.Status,
-		DurationMs:   entry.DurationMs,
-		RequestBody:  entry.RequestBody,
-		ResponseBody: entry.ResponseBody,
-		RateLimited:  entry.RateLimited,
-		CreatedAt:    entry.CreatedAt,
+		ID:                string(entry.ID),
+		OrgID:             string(entry.OrgID),
+		UserID:            entry.UserID,
+		ConnectionID:      entry.ConnectionID,
+		ToolSlug:          entry.ToolSlug,
+		Kind:              string(entry.Kind),
+		Status:            entry.Status,
+		DurationMs:        entry.DurationMs,
+		RequestBody:       entry.RequestBody,
+		ResponseBody:      entry.ResponseBody,
+		RateLimited:       entry.RateLimited,
+		EventID:           nullableString(entry.EventID),
+		Attempt:           entry.Attempt,
+		TriggerInstanceID: nullableString(entry.TriggerInstanceID),
+		CreatedAt:         entry.CreatedAt,
 	}
 }
 
 func eventLogFromRow(row *EventLogRow) logging.EventLog {
 	return logging.EventLog{
-		ID:           logging.LogID(row.ID),
-		OrgID:        organizations.OrgID(row.OrgID),
-		UserID:       row.UserID,
-		ConnectionID: row.ConnectionID,
-		ToolSlug:     row.ToolSlug,
-		Kind:         logging.Kind(row.Kind),
-		Status:       row.Status,
-		DurationMs:   row.DurationMs,
-		RequestBody:  row.RequestBody,
-		ResponseBody: row.ResponseBody,
-		RateLimited:  row.RateLimited,
-		CreatedAt:    row.CreatedAt,
+		ID:                logging.LogID(row.ID),
+		OrgID:             organizations.OrgID(row.OrgID),
+		UserID:            row.UserID,
+		ConnectionID:      row.ConnectionID,
+		ToolSlug:          row.ToolSlug,
+		Kind:              logging.Kind(row.Kind),
+		Status:            row.Status,
+		DurationMs:        row.DurationMs,
+		RequestBody:       row.RequestBody,
+		ResponseBody:      row.ResponseBody,
+		RateLimited:       row.RateLimited,
+		EventID:           stringFromNullable(row.EventID),
+		Attempt:           row.Attempt,
+		TriggerInstanceID: stringFromNullable(row.TriggerInstanceID),
+		CreatedAt:         row.CreatedAt,
 	}
+}
+
+// nullableString converts an EventLog's own "" (no event id — every kind
+// but KindWebhookDelivery) into the NULL event_id column PD5's schema
+// growth calls for, rather than storing an empty string.
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func stringFromNullable(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

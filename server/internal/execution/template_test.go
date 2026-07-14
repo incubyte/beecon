@@ -125,3 +125,64 @@ func TestRenderMappedValue_IsNotOKForAParamsTokenWhenParamsIsNil(t *testing.T) {
 		t.Fatalf("ok = true, want false when params is nil (rendered = %q)", rendered)
 	}
 }
+
+// --- RenderPollTemplate ({config.x}/{watermark}, Slice 4, PD28/PD34): a
+// poll mapping's own template engine, distinct from RenderPath/
+// RenderMappedValue above in that a {watermark}/{config.x} token may sit
+// embedded inside a larger literal (Outlook's OData filter), not just as a
+// whole-value token. execution/poll_test.go's FetchTriggerRecords tests
+// exercise this indirectly through a full poll mapping; these pin the
+// template engine itself in isolation. ---
+
+func TestRenderPollTemplate_SubstitutesAWatermarkTokenEmbeddedInsideALargerLiteral(t *testing.T) {
+	got, err := execution.RenderPollTemplate("receivedDateTime gt {watermark}", nil, "2026-01-01T00:00:00Z", false)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "receivedDateTime gt 2026-01-01T00:00:00Z" {
+		t.Errorf("rendered = %q, want the watermark substituted in place", got)
+	}
+}
+
+func TestRenderPollTemplate_SubstitutesAConfigTokenFromTheMergedConfigMap(t *testing.T) {
+	got, err := execution.RenderPollTemplate("/me/mailFolders/{config.folderId}/messages", map[string]any{"folderId": "Inbox"}, "2026-01-01T00:00:00Z", true)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/me/mailFolders/Inbox/messages" {
+		t.Errorf("rendered = %q, want the config value substituted", got)
+	}
+}
+
+func TestRenderPollTemplate_EscapesAConfigValueOnlyWhenEscapePathSegmentsIsTrue(t *testing.T) {
+	config := map[string]any{"folderId": "My Folder"}
+
+	escaped, err := execution.RenderPollTemplate("/me/mailFolders/{config.folderId}/messages", config, "", true)
+	if err != nil {
+		t.Fatalf("unexpected error (escaped): %v", err)
+	}
+	if escaped != "/me/mailFolders/My%20Folder/messages" {
+		t.Errorf("escaped rendered = %q, want the space URL-escaped", escaped)
+	}
+
+	unescaped, err := execution.RenderPollTemplate("value eq {config.folderId}", config, "", false)
+	if err != nil {
+		t.Fatalf("unexpected error (unescaped): %v", err)
+	}
+	if unescaped != "value eq My Folder" {
+		t.Errorf("unescaped rendered = %q, want the literal value, not escaped", unescaped)
+	}
+}
+
+func TestRenderPollTemplate_AConfigTokenNamingAKeyConfigDoesNotCarryIsAnError(t *testing.T) {
+	_, err := execution.RenderPollTemplate("/me/mailFolders/{config.folderId}/messages", map[string]any{}, "2026-01-01T00:00:00Z", true)
+
+	if err == nil {
+		t.Fatal("expected an error for a {config.x} token config does not carry, got nil")
+	}
+	if !strings.Contains(err.Error(), "config.folderId") {
+		t.Errorf("error = %q, want it to name the missing token", err.Error())
+	}
+}

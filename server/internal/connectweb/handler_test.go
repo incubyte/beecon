@@ -101,6 +101,13 @@ func (f *fakeOAuthClient) RefreshGrant(_ context.Context, _ connections.RefreshG
 	return f.exchangeResult, f.exchangeErr
 }
 
+// FetchUserInfo is unused by this file's connect-page/callback rendering
+// tests (Slice 5); it satisfies connections.OAuthClient with a harmless
+// default.
+func (f *fakeOAuthClient) FetchUserInfo(_ context.Context, _, _ string) error {
+	return nil
+}
+
 type failingExchangeError struct{}
 
 func (failingExchangeError) Error() string { return "provider rejected the exchange" }

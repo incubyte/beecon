@@ -3,12 +3,12 @@ package authmw_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"beecon/internal/access/driving/authmw"
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 )
 
@@ -21,15 +21,20 @@ const validUserID = organizations.UserID("user_ada")
 // depends on the VerifyUserToken func type, not the concrete access.Facade,
 // so a crafted fake exercises every rejection path without minting real
 // HS256 JWTs (usertoken_test.go in package access_test already covers the
-// real cryptographic tamper/wrong-secret/expired matrix).
+// real cryptographic tamper/wrong-secret/expired matrix). Every business
+// rejection returns a *httpx.DomainError (httpx.Unauthorized) — exactly what
+// the real access.Facade.VerifyUserToken returns for an expired or otherwise
+// invalid token (access/usertoken.go's own ErrUnauthorized() calls) — never a
+// plain error, which authmw's own PD38b logic (autherror.go) would instead
+// treat as an infrastructure failure and render as 500.
 func fakeVerifyUserToken(_ context.Context, token string) (organizations.OrgID, organizations.UserID, error) {
 	switch token {
 	case validUserToken:
 		return validUserOrg, validUserID, nil
 	case expiredUserToken:
-		return "", "", errors.New("expired user token")
+		return "", "", httpx.Unauthorized("expired user token")
 	default:
-		return "", "", errors.New("invalid user token")
+		return "", "", httpx.Unauthorized("invalid user token")
 	}
 }
 

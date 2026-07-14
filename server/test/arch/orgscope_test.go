@@ -15,9 +15,11 @@ import (
 	"beecon/internal/access"
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
+	"beecon/internal/delivery"
 	"beecon/internal/execution"
 	"beecon/internal/logging"
 	"beecon/internal/organizations"
+	"beecon/internal/triggers"
 )
 
 var orgIDType = reflect.TypeOf(organizations.OrgID(""))
@@ -185,6 +187,60 @@ func TestExecutionFilesRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestTriggersRepository_EveryMethodIsOrgScoped: Slice 2 (PD33; BOUNDARIES:
+// triggers depends on connections and catalog) — a TriggerInstance belongs
+// to exactly one organization, and cross-org access must be indistinguishable
+// from not-found (PD33's own AC), so every persistence-port method must take
+// that organization's id. Save takes the whole TriggerInstance (which itself
+// carries OrgID); FindByID/ListPage/Delete/DeleteByConnection all take
+// organizations.OrgID directly. The installation-level ClaimDuePolls claim
+// query is deliberately a separate port (triggers.PollQueue, Slice 4) so it
+// can be whitelisted honestly instead of polluting this org-scoped check —
+// see TestInstallationLevelPortsAreExplicitlyWhitelisted below.
+func TestTriggersRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*triggers.Repository)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("triggers.Repository has org-scope violations: %v", got)
+	}
+}
+
+// TestDeliveryRepository_EveryMethodIsOrgScoped: Slice 3 (PD27/PD31;
+// BOUNDARIES: delivery depends on access and organizations) — a
+// WebhookEndpoint and an outbox Event each belong to exactly one
+// organization (PD31's own AC5: fetching another organization's endpoint or
+// event must be indistinguishable from not-found), so every persistence-port
+// method on delivery.Repository must take that organization's id.
+// SaveEndpoint/SaveEvent take the whole entity (which itself carries OrgID);
+// FindEndpoint/FindEvent/ListEventsPage take organizations.OrgID directly.
+// The installation-level ClaimDue claim query is deliberately a separate
+// port (delivery.WorkQueue) so it can be whitelisted honestly instead of
+// polluting this org-scoped check — see
+// TestInstallationLevelPortsAreExplicitlyWhitelisted below.
+func TestDeliveryRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*delivery.Repository)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("delivery.Repository has org-scope violations: %v", got)
+	}
+}
+
+// TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped: Slice 3
+// (PD27/PD31) — a WebhookSigningSecret belongs directly to exactly one
+// organization (no intermediate "key" entity, unlike ApiKeySecret), so every
+// persistence-port operation on it must still be scoped by that
+// organization's id, mirroring access.ApiKeySecrets' own org-scoping rule
+// (rotation state is the only reason this isn't a plain Save-carries-OrgID
+// shape — Save's own WebhookSigningSecret argument does carry OrgID, but
+// ListByOrg/MarkExpiring both need it as an explicit parameter too).
+func TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*access.WebhookSecrets)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("access.WebhookSecrets has org-scope violations: %v", got)
+	}
+}
+
 // TestInstallationLevelPortsAreExplicitlyWhitelisted documents (and pins,
 // via NumMethod, so a rename/removal is noticed) the ports deliberately
 // exempted from org-scoping: access.PrefixLookup authenticates a secret
@@ -207,7 +263,33 @@ func TestExecutionFilesRepository_EveryMethodIsOrgScoped(t *testing.T) {
 // reaches it strictly after execution.Files' own org-scoped FindByID has
 // already confirmed the file belongs to the caller's organization (AC2,
 // AC5), the same "authorize before the pre-auth lookup" spirit as
-// PrefixLookup/SigningSecretLookup above.
+// PrefixLookup/SigningSecretLookup above; and delivery.WorkQueue (Slice 3,
+// PD29) is deliberately installation-level by design, not an oversight: the
+// outbox dispatcher is one shared background loop scanning for due work
+// across every organization at once (section 3 of the architecture doc),
+// not a per-org loop — but ClaimDue's own doc comment (port.go) is explicit
+// that every claimed Event still carries its own OrgID, so no row's
+// organization is ever ambiguous once claimed; this is the same
+// cross-org-by-design rationale as PrefixLookup's pre-auth lookup, just for
+// a different reason (a shared worker loop rather than "organization not yet
+// known"); and triggers.PollQueue (Phase 3 Slice 4, PD29/PD34) is the same
+// rationale again, one worker loop later: the poller claims due
+// TriggerInstances across every organization at once, but every claimed
+// instance still carries its own OrgID (ClaimDuePolls' own doc comment,
+// port.go); and connections.RefreshQueue (Phase 3 Slice 5, PD29/PD36/PD37) is
+// the same rationale a third time: RefreshDueOnce and ReconcileOnce each
+// claim due ACTIVE Connections across every organization in one shared
+// worker loop, but every claimed Connection still carries its own OrgID
+// (RefreshQueue's own doc comment, connections/port.go) — exactly the
+// delivery.WorkQueue/triggers.PollQueue split, one background job later; and
+// connections.StatusCounter/delivery.OutboxStats (Phase 3 Slice 7, PD38d) are
+// the same cross-org-by-design rationale once more, for a metrics scrape
+// rather than a worker claim: a Prometheus gauge has no per-org dimension
+// anywhere in this codebase, so the connections-by-status and outbox
+// depth/oldest-pending-age gauges are installation-wide, scrape-time queries
+// by design — there is no organization to filter by, not an oversight
+// (StatusCounter's and OutboxStats' own doc comments, connections/port.go and
+// delivery/port.go).
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
@@ -216,6 +298,11 @@ func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
 		reflect.TypeOf((*connections.OAuthRepository)(nil)).Elem(),
 		reflect.TypeOf((*execution.FileStore)(nil)).Elem(),
+		reflect.TypeOf((*delivery.WorkQueue)(nil)).Elem(),
+		reflect.TypeOf((*triggers.PollQueue)(nil)).Elem(),
+		reflect.TypeOf((*connections.RefreshQueue)(nil)).Elem(),
+		reflect.TypeOf((*connections.StatusCounter)(nil)).Elem(),
+		reflect.TypeOf((*delivery.OutboxStats)(nil)).Elem(),
 	}
 	for _, ifaceType := range whitelisted {
 		if ifaceType.NumMethod() == 0 {

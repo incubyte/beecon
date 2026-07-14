@@ -92,18 +92,35 @@ func (f *Facade) callWithRetry(
 	providerSlug string,
 	request ToolCallRequest,
 ) retryOutcome {
+	return f.retryLoop(ctx, func() (ToolCallResponse, error) {
+		return f.attemptCall(ctx, org, userID, connectionID, toolSlug, providerSlug, request)
+	}, func() { f.recordRateLimitRetryMetric(providerSlug) })
+}
+
+// retryLoop is PD21's retry policy itself, shared by every caller that needs
+// it: a tool execution (callWithRetry, which also logs and records metrics
+// per attempt via its own attempt func) and, since Slice 4, trigger polling
+// (execution/poll.go, which calls the provider directly with no
+// tool-execution logging attached — a poll failure is logged by the
+// triggers module instead, PD34). attempt makes one call; onRetry, when
+// non-nil, is invoked once per attempt that will actually be retried (used
+// for the rate-limit-retry metric — polling passes nil, since Slice 7 owns
+// its own poll metrics).
+func (f *Facade) retryLoop(ctx context.Context, attempt func() (ToolCallResponse, error), onRetry func()) retryOutcome {
 	var waited time.Duration
-	for attempt := 1; ; attempt++ {
-		response, callErr := f.attemptCall(ctx, org, userID, connectionID, toolSlug, providerSlug, request)
+	for i := 1; ; i++ {
+		response, callErr := attempt()
 		if callErr != nil || !IsRateLimited(response) {
 			return retryOutcome{response: response, callErr: callErr}
 		}
 
 		delay := retryDelay(response, f.now())
-		if attempt >= maxAttempts || waited+delay > retryBudget {
+		if i >= maxAttempts || waited+delay > retryBudget {
 			return retryOutcome{response: response, exhausted: true, retryAfter: delay}
 		}
-		f.recordRateLimitRetryMetric(providerSlug)
+		if onRetry != nil {
+			onRetry()
+		}
 		if sleepErr := f.sleep(ctx, delay); sleepErr != nil {
 			return retryOutcome{response: response, callErr: sleepErr}
 		}

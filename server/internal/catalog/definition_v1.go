@@ -3,27 +3,73 @@ package catalog
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 
 	"gopkg.in/yaml.v3"
+)
+
+// defaultTriggerPollIntervalSeconds is PD28's default poll cadence when a
+// trigger declares no pollIntervalSeconds (matching the Membrane sample).
+// platformMinPollIntervalSeconds is PD28's floor: a declared interval below
+// this is clamped up, with a boot log line, rather than rejected — a typo'd
+// low value should not fail boot, but it also should not hammer the
+// provider.
+const (
+	defaultTriggerPollIntervalSeconds = 60
+	platformMinPollIntervalSeconds    = 30
+
+	triggerIngestionPoll = "poll"
+	triggerIngestionPush = "push"
 )
 
 // definitionFileV1 is the on-disk YAML shape of one provider definition file
 // under the finalized format (PD13, formatVersion: 1): provider identity,
 // OAuth endpoints/scopes, the provider-level mapping (today just baseUrl),
-// and the tool list. Triggers is a reserved key (Phase 3) accepted and left
-// unvalidated so a Phase 3 definition can land in files before the code that
-// interprets it does.
+// the tool list, and (Phase 3) the trigger list.
 type definitionFileV1 struct {
-	FormatVersion  int                   `yaml:"formatVersion"`
-	Slug           string                `yaml:"slug"`
-	Name           string                `yaml:"name"`
-	Logo           string                `yaml:"logo"`
-	AuthScheme     string                `yaml:"authScheme"`
-	OAuth          oauthConfigFileV1     `yaml:"oauth"`
-	Mapping        providerMappingFileV1 `yaml:"mapping"`
-	ExpectedParams []expectedParamFileV1 `yaml:"expectedParams"`
-	Tools          []providerToolFileV1  `yaml:"tools"`
-	Triggers       any                   `yaml:"triggers"`
+	FormatVersion  int                       `yaml:"formatVersion"`
+	Slug           string                    `yaml:"slug"`
+	Name           string                    `yaml:"name"`
+	Logo           string                    `yaml:"logo"`
+	AuthScheme     string                    `yaml:"authScheme"`
+	OAuth          oauthConfigFileV1         `yaml:"oauth"`
+	Mapping        providerMappingFileV1     `yaml:"mapping"`
+	ExpectedParams []expectedParamFileV1     `yaml:"expectedParams"`
+	Tools          []providerToolFileV1      `yaml:"tools"`
+	Triggers       []triggerDefinitionFileV1 `yaml:"triggers"`
+}
+
+// triggerDefinitionFileV1 is PD28/PD13's triggers entry shape (Slice 1):
+// configSchema and payloadSchema are required (validated below); ingestion
+// must be "poll" — "push" fails boot with a clear not-supported-yet message
+// (AC5), and any other value fails boot naming the field.
+// pollIntervalSeconds defaults to 60 and is clamped to the platform minimum.
+type triggerDefinitionFileV1 struct {
+	Slug                string                   `yaml:"slug"`
+	Name                string                   `yaml:"name"`
+	Description         string                   `yaml:"description"`
+	ConfigSchema        map[string]any           `yaml:"configSchema"`
+	PayloadSchema       map[string]any           `yaml:"payloadSchema"`
+	Ingestion           string                   `yaml:"ingestion"`
+	PollIntervalSeconds int                      `yaml:"pollIntervalSeconds"`
+	Poll                triggerPollMappingFileV1 `yaml:"poll"`
+}
+
+// triggerPollMappingFileV1 is a trigger's poll-ingestion mapping (PD28): the
+// request Path/Query/Body are {config.x}/{watermark} templated (evaluated
+// first in Slice 4); RecordsPath/RecordIDPath/RecordTimestampPath name where
+// the poller reads the list of records and each record's id/timestamp from
+// the response, and Payload maps the fired event's payload fields to paths
+// inside each record.
+type triggerPollMappingFileV1 struct {
+	Method              string            `yaml:"method"`
+	Path                string            `yaml:"path"`
+	Query               map[string]string `yaml:"query"`
+	Body                map[string]string `yaml:"body"`
+	RecordsPath         string            `yaml:"recordsPath"`
+	RecordIDPath        string            `yaml:"recordIdPath"`
+	RecordTimestampPath string            `yaml:"recordTimestampPath"`
+	Payload             map[string]string `yaml:"payload"`
 }
 
 // expectedParamFileV1 is PD13's expectedParams shape (Slice 3): one pre-auth
@@ -103,7 +149,7 @@ func loadProviderDefinitionFileV1(name string, raw []byte) (ProviderDefinition, 
 	if err := validateDefinitionFileV1(name, file); err != nil {
 		return ProviderDefinition{}, err
 	}
-	return definitionFromFileV1(file), nil
+	return definitionFromFileV1(name, file), nil
 }
 
 // validateDefinitionFileV1 checks every field the finalized format requires
@@ -141,6 +187,76 @@ func validateDefinitionFileV1(name string, file definitionFileV1) error {
 		if err := validateExpectedParamFileV1(name, i, param); err != nil {
 			return err
 		}
+	}
+	for i, trigger := range file.Triggers {
+		if err := validateTriggerDefinitionFileV1(name, i, trigger); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTriggerDefinitionFileV1 checks one triggers entry (Slice 1, AC4):
+// configSchema and payloadSchema are required — a trigger consumers cannot
+// validate config against, or whose fired events carry no declared shape, is
+// not a usable trigger. ingestion and the poll mapping are checked
+// separately below.
+func validateTriggerDefinitionFileV1(fileName string, index int, trigger triggerDefinitionFileV1) error {
+	prefix := fmt.Sprintf("triggers[%d]", index)
+	if trigger.Slug == "" {
+		return definitionError(fileName, prefix+".slug", "must not be empty")
+	}
+	if trigger.Name == "" {
+		return definitionError(fileName, prefix+".name", "must not be empty")
+	}
+	if len(trigger.ConfigSchema) == 0 {
+		return definitionError(fileName, prefix+".configSchema", "must not be empty")
+	}
+	if len(trigger.PayloadSchema) == 0 {
+		return definitionError(fileName, prefix+".payloadSchema", "must not be empty")
+	}
+	if err := validateTriggerIngestion(fileName, prefix, trigger.Ingestion); err != nil {
+		return err
+	}
+	return validateTriggerPollMappingFileV1(fileName, prefix, trigger.Poll)
+}
+
+// validateTriggerIngestion enforces PD28: "poll" is the only ingestion mode
+// this build executes; "push" fails boot with a clear not-supported-yet
+// message (AC5) rather than being silently inert; anything else (including
+// omitted) fails boot naming the field.
+func validateTriggerIngestion(fileName, prefix, ingestion string) error {
+	switch ingestion {
+	case triggerIngestionPoll:
+		return nil
+	case triggerIngestionPush:
+		return definitionError(fileName, prefix+".ingestion", `"push" ingestion is not supported yet`)
+	default:
+		return definitionError(fileName, prefix+".ingestion", `must be "poll"`)
+	}
+}
+
+// validateTriggerPollMappingFileV1 checks the fields execution/poll.go
+// (Slice 4) needs to actually poll and interpret a provider's response:
+// without these, a "poll" trigger would parse but could never run.
+func validateTriggerPollMappingFileV1(fileName, prefix string, poll triggerPollMappingFileV1) error {
+	required := []struct {
+		field string
+		value string
+	}{
+		{"poll.method", poll.Method},
+		{"poll.path", poll.Path},
+		{"poll.recordsPath", poll.RecordsPath},
+		{"poll.recordIdPath", poll.RecordIDPath},
+		{"poll.recordTimestampPath", poll.RecordTimestampPath},
+	}
+	for _, r := range required {
+		if r.value == "" {
+			return definitionError(fileName, prefix+"."+r.field, "must not be empty")
+		}
+	}
+	if len(poll.Payload) == 0 {
+		return definitionError(fileName, prefix+".poll.payload", "must not be empty")
 	}
 	return nil
 }
@@ -192,7 +308,7 @@ func validateProviderToolFileV1(fileName string, index int, tool providerToolFil
 	return nil
 }
 
-func definitionFromFileV1(file definitionFileV1) ProviderDefinition {
+func definitionFromFileV1(name string, file definitionFileV1) ProviderDefinition {
 	authScheme := file.AuthScheme
 	if authScheme == "" {
 		authScheme = "oauth2"
@@ -218,6 +334,7 @@ func definitionFromFileV1(file definitionFileV1) ProviderDefinition {
 		},
 		ExpectedParams: expectedParamsFromFileV1(file.ExpectedParams),
 		Tools:          toolsFromFileV1(file.Tools),
+		Triggers:       triggersFromFileV1(name, file.Triggers),
 	}
 }
 
@@ -251,6 +368,56 @@ func toolsFromFileV1(files []providerToolFileV1) []ProviderTool {
 		})
 	}
 	return tools
+}
+
+func triggersFromFileV1(fileName string, files []triggerDefinitionFileV1) []TriggerDefinition {
+	triggers := make([]TriggerDefinition, 0, len(files))
+	for _, f := range files {
+		triggers = append(triggers, TriggerDefinition{
+			Slug:                f.Slug,
+			Name:                f.Name,
+			Description:         f.Description,
+			ConfigSchema:        f.ConfigSchema,
+			PayloadSchema:       f.PayloadSchema,
+			Ingestion:           f.Ingestion,
+			PollIntervalSeconds: resolveTriggerPollIntervalSeconds(fileName, f.Slug, f.PollIntervalSeconds),
+			Poll:                triggerPollMappingFromFileV1(f.Poll),
+		})
+	}
+	return triggers
+}
+
+// resolveTriggerPollIntervalSeconds applies PD28's default (60s, when
+// unset) and platform-minimum clamp (30s): a declared interval below the
+// minimum is raised to it, with a boot log line naming the file, trigger,
+// and both values, rather than failing boot over a typo'd low number.
+func resolveTriggerPollIntervalSeconds(fileName, triggerSlug string, declared int) int {
+	if declared == 0 {
+		return defaultTriggerPollIntervalSeconds
+	}
+	if declared < platformMinPollIntervalSeconds {
+		slog.Default().Warn("trigger pollIntervalSeconds below platform minimum, clamped",
+			"file", fileName,
+			"trigger", triggerSlug,
+			"declaredSeconds", declared,
+			"clampedToSeconds", platformMinPollIntervalSeconds,
+		)
+		return platformMinPollIntervalSeconds
+	}
+	return declared
+}
+
+func triggerPollMappingFromFileV1(p triggerPollMappingFileV1) TriggerPollMapping {
+	return TriggerPollMapping{
+		Method:              p.Method,
+		Path:                p.Path,
+		Query:               p.Query,
+		Body:                p.Body,
+		RecordsPath:         p.RecordsPath,
+		RecordIDPath:        p.RecordIDPath,
+		RecordTimestampPath: p.RecordTimestampPath,
+		Payload:             p.Payload,
+	}
 }
 
 func mappingFromFileV1(m toolMappingFileV1) Mapping {

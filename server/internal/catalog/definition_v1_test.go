@@ -214,20 +214,273 @@ func TestLoadProviderDefinitions_RejectsAnUnknownKeyNestedInsideATool(t *testing
 	}
 }
 
-// TestLoadProviderDefinitions_AcceptsAndIgnoresTheReservedTriggersKey is
-// PD13/section-3: a Phase 3 definition may already carry a triggers block —
-// its contents are deliberately unvalidated, so even a nonsensical shape
-// must not fail boot.
-func TestLoadProviderDefinitions_AcceptsAndIgnoresTheReservedTriggersKey(t *testing.T) {
-	withTriggers := validDefinitionYAML + "\ntriggers:\n  anything: goes-here\n  nested:\n    - 1\n    - 2\n"
+// validTriggersYAML is the reserved triggers key made real (Phase 3, Slice
+// 1, PD28): one poll-ingestion trigger with both required schemas and a
+// complete poll mapping.
+const validTriggersYAML = `
+triggers:
+  - slug: outlook-message-received
+    name: New message received
+    description: Triggered when a new message arrives in the configured folder.
+    ingestion: poll
+    pollIntervalSeconds: 60
+    configSchema:
+      type: object
+      properties:
+        folderId:
+          type: string
+          default: Inbox
+    payloadSchema:
+      type: object
+      properties:
+        id:
+          type: string
+    poll:
+      method: GET
+      path: /me/mailFolders/{config.folderId}/messages
+      query:
+        $filter: "receivedDateTime gt {watermark}"
+      recordsPath: value
+      recordIdPath: id
+      recordTimestampPath: receivedDateTime
+      payload:
+        id: id
+`
 
-	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", withTriggers))
+// TestLoadProviderDefinitions_ParsesTriggersSlugNameSchemasIngestionAndPollMapping
+// is Slice 1, AC1/AC2: the reserved triggers key (PD13) becomes a real,
+// parsed trigger definition carrying config/payload schemas, ingestion mode,
+// and the poll mapping (parsed and validated here; first executed in Slice
+// 4).
+func TestLoadProviderDefinitions_ParsesTriggersSlugNameSchemasIngestionAndPollMapping(t *testing.T) {
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", validDefinitionYAML+validTriggersYAML))
 
 	if err != nil {
-		t.Fatalf("unexpected error with a reserved triggers block present: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(defs) != 1 {
-		t.Fatalf("len(defs) = %d, want 1", len(defs))
+	if len(defs[0].Triggers) != 1 {
+		t.Fatalf("len(Triggers) = %d, want 1", len(defs[0].Triggers))
+	}
+	trigger := defs[0].Triggers[0]
+	if trigger.Slug != "outlook-message-received" {
+		t.Errorf("Slug = %q, want %q", trigger.Slug, "outlook-message-received")
+	}
+	if trigger.Name != "New message received" {
+		t.Errorf("Name = %q, want %q", trigger.Name, "New message received")
+	}
+	if trigger.Ingestion != "poll" {
+		t.Errorf("Ingestion = %q, want %q", trigger.Ingestion, "poll")
+	}
+	if trigger.PollIntervalSeconds != 60 {
+		t.Errorf("PollIntervalSeconds = %d, want 60", trigger.PollIntervalSeconds)
+	}
+	if len(trigger.ConfigSchema) == 0 {
+		t.Error("ConfigSchema is empty, want the parsed folderId schema")
+	}
+	if len(trigger.PayloadSchema) == 0 {
+		t.Error("PayloadSchema is empty, want the parsed id schema")
+	}
+	if trigger.Poll.Method != "GET" || trigger.Poll.Path != "/me/mailFolders/{config.folderId}/messages" {
+		t.Errorf("Poll method/path = %q %q, want GET /me/mailFolders/{config.folderId}/messages", trigger.Poll.Method, trigger.Poll.Path)
+	}
+	if trigger.Poll.RecordsPath != "value" || trigger.Poll.RecordIDPath != "id" || trigger.Poll.RecordTimestampPath != "receivedDateTime" {
+		t.Errorf("Poll records/id/timestamp paths = %+v, want value/id/receivedDateTime", trigger.Poll)
+	}
+	if trigger.Poll.Payload["id"] != "id" {
+		t.Errorf(`Poll.Payload["id"] = %q, want "id"`, trigger.Poll.Payload["id"])
+	}
+}
+
+// TestLoadProviderDefinitions_DefaultsPollIntervalSecondsTo60WhenOmitted is
+// PD28: the Membrane sample's own default cadence.
+func TestLoadProviderDefinitions_DefaultsPollIntervalSecondsTo60WhenOmitted(t *testing.T) {
+	withoutInterval := yamlWithoutLineContaining(validDefinitionYAML+validTriggersYAML, "pollIntervalSeconds:")
+
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", withoutInterval))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].Triggers[0].PollIntervalSeconds != 60 {
+		t.Errorf("PollIntervalSeconds = %d, want default 60", defs[0].Triggers[0].PollIntervalSeconds)
+	}
+}
+
+// TestLoadProviderDefinitions_ClampsPollIntervalSecondsBelowThePlatformMinimum
+// is PD28's floor: a declared interval under the platform minimum is raised
+// to it rather than failing boot.
+func TestLoadProviderDefinitions_ClampsPollIntervalSecondsBelowThePlatformMinimum(t *testing.T) {
+	tooLow := strings.Replace(validDefinitionYAML+validTriggersYAML, "pollIntervalSeconds: 60", "pollIntervalSeconds: 5", 1)
+
+	defs, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", tooLow))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if defs[0].Triggers[0].PollIntervalSeconds != 30 {
+		t.Errorf("PollIntervalSeconds = %d, want clamped to the platform minimum 30", defs[0].Triggers[0].PollIntervalSeconds)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsConfigSchema
+// is AC4.
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsConfigSchema(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML,
+		"    configSchema:\n      type: object\n      properties:\n        folderId:\n          type: string\n          default: Inbox\n",
+		"", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].configSchema" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsPayloadSchema
+// is AC4.
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsPayloadSchema(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML,
+		"    payloadSchema:\n      type: object\n      properties:\n        id:\n          type: string\n",
+		"", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].payloadSchema" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsWithANotSupportedYetMessageWhenATriggerDeclaresPushIngestion
+// is AC5.
+func TestLoadProviderDefinitions_FailsWithANotSupportedYetMessageWhenATriggerDeclaresPushIngestion(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML, "ingestion: poll", "ingestion: push", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].ingestion" "push" ingestion is not supported yet`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsNamingTheFieldWhenATriggerDeclaresAnUnknownIngestionValue
+// is AC4: any ingestion value other than "poll"/"push" fails boot naming the
+// field.
+func TestLoadProviderDefinitions_FailsNamingTheFieldWhenATriggerDeclaresAnUnknownIngestionValue(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML, "ingestion: poll", "ingestion: sometimes", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].ingestion" must be "poll"`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// --- poll mapping (Slice 1, AC4): execution/poll.go (Slice 4) needs every
+// one of these fields to actually poll and interpret a provider's response,
+// so each is required field-precisely rather than left to fail at runtime. ---
+
+// TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsMethod
+// removes only the trigger's poll.method line (not the tool's own
+// mapping.method, which shares the literal text "method: GET") by matching
+// the two-line poll.method/poll.path sequence together.
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsMethod(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML,
+		"      method: GET\n      path: /me/mailFolders/{config.folderId}/messages\n",
+		"      path: /me/mailFolders/{config.folderId}/messages\n", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.method" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsPath(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML,
+		"      path: /me/mailFolders/{config.folderId}/messages\n      query:\n",
+		"      query:\n", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.path" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsRecordsPath(t *testing.T) {
+	invalid := yamlWithoutLineContaining(validDefinitionYAML+validTriggersYAML, "recordsPath:")
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.recordsPath" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsRecordIDPath(t *testing.T) {
+	invalid := yamlWithoutLineContaining(validDefinitionYAML+validTriggersYAML, "recordIdPath:")
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.recordIdPath" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsRecordTimestampPath(t *testing.T) {
+	invalid := yamlWithoutLineContaining(validDefinitionYAML+validTriggersYAML, "recordTimestampPath:")
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.recordTimestampPath" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggersPollMappingIsMissingItsPayload(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML,
+		"      payload:\n        id: id\n", "", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].poll.payload" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+// TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsSlug
+// and ...ItsName round out AC4's "invalid triggers section" matrix: these are
+// checked before configSchema/payloadSchema/ingestion/poll, so they must fail
+// independently rather than only ever being masked by a later check.
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsSlug(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML, "slug: outlook-message-received", "slug: ''", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].slug" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
+	}
+}
+
+func TestLoadProviderDefinitions_FailsNamingTheFileAndFieldWhenATriggerIsMissingItsName(t *testing.T) {
+	invalid := strings.Replace(validDefinitionYAML+validTriggersYAML, "name: New message received", "name: ''", 1)
+
+	_, err := catalog.LoadProviderDefinitions(mapFSWithFile("outlook.yaml", invalid))
+
+	wantMessage := `invalid provider definition outlook.yaml: field "triggers[0].name" must not be empty`
+	if err == nil || err.Error() != wantMessage {
+		t.Errorf("error = %v, want %q", err, wantMessage)
 	}
 }
 

@@ -88,3 +88,30 @@ type SigningSecret struct {
 	EncryptedSecret string
 	CreatedAt       time.Time
 }
+
+// WebhookSecretID is minted only by IssueWebhookSecret and
+// RotateWebhookSecret (PD27, Phase 3 Slice 3: whs_-prefixed).
+type WebhookSecretID string
+
+// WebhookSigningSecret is the persisted record of one org's webhook
+// endpoint signing secret (PD27/PD31): never the raw whsec_ value, only its
+// vault ciphertext (EncryptedSecret — HMAC signing needs the raw value at
+// signing time, the same reasoning as PD20's SigningSecret) and a display
+// prefix for admin recognition. RotateWebhookSecret keeps up to two live at
+// once (the fresh one and the outgoing one, during the overlap window),
+// mirroring ApiKeySecret's own PD23 rotation shape verbatim.
+type WebhookSigningSecret struct {
+	ID              WebhookSecretID
+	OrgID           organizations.OrgID
+	DisplayPrefix   string
+	EncryptedSecret string
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
+}
+
+// IsExpired reports whether the secret's overlap window has passed as of
+// now. A secret with no ExpiresAt (the currently active one) never expires
+// — mirrors ApiKeySecret.IsExpired.
+func (s WebhookSigningSecret) IsExpired(now time.Time) bool {
+	return s.ExpiresAt != nil && !now.Before(*s.ExpiresAt)
+}

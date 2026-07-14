@@ -120,6 +120,51 @@ func (h *Handler) GetExpectedParams(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, toExpectedParamsDTO(view))
 }
 
+// ListTriggerDefinitions handles GET /api/v1/trigger-definitions (org **or**
+// user token, per the API Shape): filters by integrationId or providerSlug,
+// cursor-paginated.
+func (h *Handler) ListTriggerDefinitions(w http.ResponseWriter, r *http.Request) {
+	org, ok := organizations.OrgIDFromContext(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+
+	query := r.URL.Query()
+	filter := catalog.TriggerDefinitionFilter{
+		IntegrationID: catalog.IntegrationID(query.Get("integrationId")),
+		ProviderSlug:  query.Get("providerSlug"),
+	}
+	limit, err := parseIntQueryParam(query.Get("limit"))
+	if err != nil {
+		h.errors.WriteError(w, r, catalog.ErrValidation("limit", "must be a positive integer"))
+		return
+	}
+
+	page, err := h.facade.ListTriggerDefinitions(r.Context(), org, filter, query.Get("cursor"), limit)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toTriggerDefinitionsPageDTO(page))
+}
+
+// GetTriggerDefinition handles GET /api/v1/trigger-definitions/{slug}
+// (org-scoped route): the same detail ListTriggerDefinitions carries for one
+// trigger, addressed by slug (PD14).
+func (h *Handler) GetTriggerDefinition(w http.ResponseWriter, r *http.Request) {
+	if _, ok := organizations.OrgIDFromContext(r.Context()); !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+	trigger, err := h.facade.TriggerDefinitionDetail(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toTriggerDefinitionSummaryDTO(trigger))
+}
+
 func parseBoolQueryParam(raw string) bool {
 	parsed, _ := strconv.ParseBool(raw)
 	return parsed

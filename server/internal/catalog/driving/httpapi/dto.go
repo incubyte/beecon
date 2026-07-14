@@ -124,3 +124,57 @@ func toToolsPageDTO(page catalog.ToolPage) toolsPageDTO {
 	}
 	return toolsPageDTO{Items: items, NextCursor: page.NextCursor}
 }
+
+// triggerDefinitionProviderDTO is the provider identity nested inside a
+// triggerDefinitionSummaryDTO (API Shape) — mirrors toolProviderDTO: a
+// consumer addressing trigger definitions by slug alone (PD14) still needs
+// to know which provider a trigger belongs to.
+type triggerDefinitionProviderDTO struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	Logo string `json:"logo"`
+}
+
+// triggerDefinitionSummaryDTO is one trigger definition as GET
+// /api/v1/trigger-definitions and GET /api/v1/trigger-definitions/{slug}
+// return it (API Shape).
+type triggerDefinitionSummaryDTO struct {
+	Slug          string                       `json:"slug"`
+	Name          string                       `json:"name"`
+	Description   string                       `json:"description"`
+	ConfigSchema  map[string]any               `json:"configSchema"`
+	PayloadSchema map[string]any               `json:"payloadSchema"`
+	Ingestion     string                       `json:"ingestion"`
+	Provider      triggerDefinitionProviderDTO `json:"provider"`
+}
+
+// triggerDefinitionsPageDTO is one cursor-paginated page of trigger
+// definitions (PD15): nextCursor is empty when this was the last page.
+type triggerDefinitionsPageDTO struct {
+	Items      []triggerDefinitionSummaryDTO `json:"items"`
+	NextCursor string                        `json:"nextCursor,omitempty"`
+}
+
+func toTriggerDefinitionSummaryDTO(trigger catalog.TriggerDefinitionSummary) triggerDefinitionSummaryDTO {
+	return triggerDefinitionSummaryDTO{
+		Slug:          trigger.Slug,
+		Name:          trigger.Name,
+		Description:   trigger.Description,
+		ConfigSchema:  trigger.ConfigSchema,
+		PayloadSchema: trigger.PayloadSchema,
+		Ingestion:     trigger.Ingestion,
+		Provider: triggerDefinitionProviderDTO{
+			Slug: trigger.ProviderSlug,
+			Name: trigger.ProviderName,
+			Logo: trigger.ProviderLogo,
+		},
+	}
+}
+
+func toTriggerDefinitionsPageDTO(page catalog.TriggerDefinitionPage) triggerDefinitionsPageDTO {
+	items := make([]triggerDefinitionSummaryDTO, 0, len(page.Items))
+	for _, trigger := range page.Items {
+		items = append(items, toTriggerDefinitionSummaryDTO(trigger))
+	}
+	return triggerDefinitionsPageDTO{Items: items, NextCursor: page.NextCursor}
+}

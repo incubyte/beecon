@@ -24,10 +24,12 @@ type Overrides struct {
 	ApiKeySecrets       access.ApiKeySecrets
 	SigningSecrets      access.SigningSecrets
 	SigningSecretLookup access.SigningSecretLookup
+	WebhookSecrets      access.WebhookSecrets
 	Vault               *vault.Vault
 	NewID               func() string
 	NewSecretID         func() string
 	NewSigningSecretID  func() string
+	NewWebhookSecretID  func() string
 	Now                 func() time.Time
 }
 
@@ -61,6 +63,10 @@ func NewFacadeWithOverrides(o Overrides) *access.Facade {
 			signingSecretLookup = shared
 		}
 	}
+	webhookSecrets := o.WebhookSecrets
+	if webhookSecrets == nil {
+		webhookSecrets = NewWebhookSecretRepository()
+	}
 	secretVault := o.Vault
 	if secretVault == nil {
 		secretVault, _ = vault.NewVault(defaultTestVaultKey)
@@ -77,11 +83,15 @@ func NewFacadeWithOverrides(o Overrides) *access.Facade {
 	if newSigningSecretID == nil {
 		newSigningSecretID = sequentialIDs("usk_")
 	}
+	newWebhookSecretID := o.NewWebhookSecretID
+	if newWebhookSecretID == nil {
+		newWebhookSecretID = sequentialIDs("whs_")
+	}
 	now := o.Now
 	if now == nil {
 		now = func() time.Time { return fixedTestTime }
 	}
-	return access.NewFacade(repository, prefixLookup, apiKeySecrets, signingSecrets, signingSecretLookup, secretVault, newID, newSecretID, newSigningSecretID, now)
+	return access.NewFacade(repository, prefixLookup, apiKeySecrets, signingSecrets, signingSecretLookup, webhookSecrets, secretVault, newID, newSecretID, newSigningSecretID, newWebhookSecretID, now)
 }
 
 func sequentialIDs(prefix string) func() string {

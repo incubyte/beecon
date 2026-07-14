@@ -1,15 +1,15 @@
-// refresh.go implements PD18's on-demand token refresh: connections stores
-// each ACTIVE connection's access-token expiry, and refreshes it exactly
-// once per Resolve/RefreshForExecution call when needed, via the provider's
-// refresh_token grant. A rotated refresh token replaces the stored one; a
-// refresh grant the provider rejects (e.g. a revoked refresh token)
-// transitions the connection to EXPIRED instead of leaving it ACTIVE with a
-// token that will never work again (AC9).
+// refresh.go implements PD18's on-demand token refresh via the provider's
+// refresh_token grant. FD3 splits a failed grant into two outcomes: a
+// permanent provider refusal (RefreshDenied) expires the connection through
+// expireConnection's exactly-once funnel; anything else is transient and
+// leaves the connection untouched, returning the error so the caller retries
+// later — correcting Phase 2's original expire-on-any-error behavior.
 package connections
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -38,13 +38,22 @@ func (c Connection) needsRefresh(now time.Time) bool {
 	return c.TokenExpiresAt == nil || now.After(*c.TokenExpiresAt)
 }
 
+// needsProactiveRefresh reports whether c's stored access token is due for
+// the refresh scheduler's own claim predicate (PD36): no expiry recorded at
+// all, or an expiry within lead of now — earlier than needsRefresh's strict
+// "already gone stale" check, which is the scheduler's whole point (refresh
+// before expiry, not after).
+func (c Connection) needsProactiveRefresh(now time.Time, lead time.Duration) bool {
+	return c.TokenExpiresAt == nil || !c.TokenExpiresAt.After(now.Add(lead))
+}
+
 // refreshConnection performs one refresh_token grant for connection
-// (assumed ACTIVE): it replaces the stored access token, replaces the stored
-// refresh token only when the provider rotated it (AC8), and updates the
-// access token's expiry. A grant the provider rejects transitions the
-// connection to EXPIRED instead (AC9). Either outcome is persisted before it
-// is returned to the caller.
-func (f *Facade) refreshConnection(ctx context.Context, connection Connection) (Connection, error) {
+// (assumed ACTIVE); deniedReason names the connection.expired reason a
+// permanent refusal records (callers vary this — reconciliation's own
+// revocation check records a different reason than a scheduled/request-path
+// refusal). Callers reach this only through refreshOnce (refreshlock.go),
+// which serializes concurrent callers per connection.
+func (f *Facade) refreshConnection(ctx context.Context, connection Connection, deniedReason string) (Connection, error) {
 	integration, err := f.integrations.GetIntegration(ctx, connection.IntegrationID)
 	if err != nil {
 		return Connection{}, err
@@ -71,7 +80,7 @@ func (f *Facade) refreshConnection(ctx context.Context, connection Connection) (
 	f.recordExchange(ctx, connection, started, refreshGrantRequestLogBody(request), result, refreshErr, true)
 
 	if refreshErr != nil {
-		return f.persistConnection(ctx, connection.MarkExpired())
+		return f.handleRefreshFailure(ctx, connection, refreshErr, deniedReason)
 	}
 
 	encryptedAccessToken, err := f.vault.Encrypt(result.AccessToken)
@@ -91,9 +100,20 @@ func (f *Facade) refreshConnection(ctx context.Context, connection Connection) (
 	return f.persistConnection(ctx, refreshed)
 }
 
+// handleRefreshFailure applies FD3's permanent-vs-transient split: only a
+// RefreshDenied expires the connection (through expireConnection, recording
+// deniedReason); any other error is transient and returned as-is.
+func (f *Facade) handleRefreshFailure(ctx context.Context, connection Connection, refreshErr error, deniedReason string) (Connection, error) {
+	var denied RefreshDenied
+	if !errors.As(refreshErr, &denied) {
+		return Connection{}, refreshErr
+	}
+	return f.expireConnection(ctx, connection, deniedReason)
+}
+
 // persistConnection saves connection via the repository and returns it
-// unchanged, so refreshConnection's two outcomes (refreshed or expired) can
-// share one persist-then-return line.
+// unchanged, so refreshConnection's success outcome can share one
+// persist-then-return line.
 func (f *Facade) persistConnection(ctx context.Context, connection Connection) (Connection, error) {
 	if err := f.repo.Update(ctx, connection); err != nil {
 		return Connection{}, err

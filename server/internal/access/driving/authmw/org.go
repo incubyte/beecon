@@ -22,7 +22,9 @@ type Verify func(ctx context.Context, secret string) (organizations.OrgID, error
 // organizations.WithOrgID; handlers must read it only through
 // organizations.OrgIDFromContext — never from path, body, or query. A
 // missing, malformed, unknown, or revoked key is rejected with the PD5
-// unauthorized envelope.
+// unauthorized envelope; an infrastructure failure while verifying (e.g. a
+// database error) surfaces as 500, never 401 (PD38b, Phase 2 review
+// carry-forward) — see writeAuthError.
 func OrgAuth(verify Verify) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +35,7 @@ func OrgAuth(verify Verify) func(http.Handler) http.Handler {
 			}
 			org, err := verify(r.Context(), secret)
 			if err != nil {
-				httpx.WriteDomainError(w, httpx.Unauthorized("invalid or revoked api key"))
+				writeAuthError(w, err)
 				return
 			}
 			ctx := organizations.WithOrgID(r.Context(), org)

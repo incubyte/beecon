@@ -213,6 +213,31 @@ func BootAppWithProviderDefinitionsAndFileLimits(t *testing.T, definitions []cat
 	return wired
 }
 
+// BootAppWithDeliveryTimeoutAndClock boots the full app with a configured
+// BEECON_DELIVERY_TIMEOUT (Slice 3, PD29/PD30) plus an injected clock
+// override: the webhook-channel journey needs both a short delivery timeout
+// (so a scripted "hang" response from a fake receiver produces a real
+// timeout quickly) and a movable clock (to travel across the PD30 retry
+// schedule and a secret-rotation overlap window without a real sleep).
+func BootAppWithDeliveryTimeoutAndClock(t *testing.T, deliveryTimeout time.Duration, now func() time.Time) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg := testConfig(t, NewTestDSN(t))
+	cfg.DeliveryTimeout = deliveryTimeout
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config: cfg,
+		Logger: testLogger(),
+		Now:    now,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
 // testConfig is the PD12 config a test-booted app runs with: SQLite, the
 // shared AdminAPIKey, a placeholder public base URL, and a files directory
 // scoped to the calling test's own t.TempDir() (PD22, Slice 7) — so journeys

@@ -110,7 +110,7 @@ func TestVerify_PicksTheCorrectOrgByHashWhenTwoKeysShareALookupPrefix(t *testing
 	if repo.secrets[0].LookupPrefix != repo.secrets[1].LookupPrefix {
 		t.Fatalf("test fixture bug: secrets do not actually share a lookup prefix (%q vs %q)", repo.secrets[0].LookupPrefix, repo.secrets[1].LookupPrefix)
 	}
-	facade := NewFacade(repo, repo, repo, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
+	facade := NewFacade(repo, repo, repo, nil, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
 
 	gotOrgForA, err := facade.Verify(context.Background(), secretA)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestVerify_RejectsAThirdSecretSharingTheLookupPrefixOfTwoOtherKeys(t *testi
 		keys:    []ServerApiKey{keyA, keyB},
 		secrets: []ApiKeySecret{secretRowA, secretRowB},
 	}
-	facade := NewFacade(repo, repo, repo, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
+	facade := NewFacade(repo, repo, repo, nil, nil, nil, nil, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() time.Time { return time.Time{} })
 
 	_, err := facade.Verify(context.Background(), secretC)
 

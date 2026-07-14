@@ -32,7 +32,7 @@ var featureDependencies = map[string][]string{
 	"connections":   {"organizations", "access", "catalog"},
 	"connectweb":    {"connections"},
 	"execution":     {"connections", "catalog", "organizations"},
-	"triggers":      {"connections", "catalog"},
+	"triggers":      {"connections", "catalog", "organizations"},
 	"delivery":      {"access", "organizations"},
 	"logging":       {"organizations"},
 }

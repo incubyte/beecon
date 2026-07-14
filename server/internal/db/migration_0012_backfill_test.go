@@ -169,8 +169,8 @@ func TestMigration0012Backfill_PreExistingKeysSecretStillAuthenticatesThroughThe
 	applyMigration0012(t, sqldb)
 
 	repo := accessbun.NewRepository(sqldb)
-	facade := access.NewFacade(repo, repo, repo, nil, nil, nil,
-		func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" },
+	facade := access.NewFacade(repo, repo, repo, nil, nil, nil, nil,
+		func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" },
 		func() time.Time { return time.Now() })
 
 	gotOrg, err := facade.Verify(ctx, legacySecret)

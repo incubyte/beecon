@@ -45,6 +45,8 @@ const (
 // — never plaintext, never held anywhere else; empty when the provider
 // declares no expectedParams, before the connect page's form has been
 // submitted, or after Reconnect has reset it for re-collection.
+// ReconciledAt is the last time ReconcileOnce re-verified this connection
+// against its provider (PD37); nil means never reconciled (due immediately).
 type Connection struct {
 	ID                    ConnectionID
 	OrgID                 organizations.OrgID
@@ -62,6 +64,7 @@ type Connection struct {
 	AccountEmail          string
 	AccountDisplayName    string
 	EncryptedParams       string
+	ReconciledAt          *time.Time
 	CreatedAt             time.Time
 }
 
@@ -155,6 +158,14 @@ func (c Connection) RefreshTokens(encryptedAccessToken, encryptedRefreshToken st
 	refreshed.EncryptedRefreshToken = encryptedRefreshToken
 	refreshed.TokenExpiresAt = &tokenExpiresAt
 	return refreshed
+}
+
+// MarkReconciled returns a copy of c with ReconciledAt advanced to now
+// (PD37).
+func (c Connection) MarkReconciled(now time.Time) Connection {
+	reconciled := c
+	reconciled.ReconciledAt = &now
+	return reconciled
 }
 
 // CanReconnect reports whether Reconnect may start a fresh handshake

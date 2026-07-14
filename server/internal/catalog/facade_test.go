@@ -5,10 +5,12 @@
 package catalog_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -376,6 +378,63 @@ func TestEncryptPlaintextClientSecrets_IsIdempotentAndLeavesAnAlreadyEncryptedRo
 	}
 }
 
+// withCapturedDefaultLog temporarily replaces slog.Default() with a handler
+// writing to an in-memory buffer, restoring the original on cleanup — the
+// only seam available to assert on EncryptPlaintextClientSecrets' own
+// slog.Default().Info(...) call (PD38c, Slice 7) without a testability
+// refactor to the production code (facade.go has no injected logger for this
+// one-time boot backfill).
+func withCapturedDefaultLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+	return &buf
+}
+
+// TestEncryptPlaintextClientSecrets_LogsASuccessLineWithTheRowCountEncrypted
+// is PD38c (Slice 7, Phase 2 review carry-forward): the backfill logs a
+// success line naming exactly how many rows it encrypted this run, so an
+// operator can confirm the one-time migration ran from the boot log alone.
+func TestEncryptPlaintextClientSecrets_LogsASuccessLineWithTheRowCountEncrypted(t *testing.T) {
+	f, repo := newCatalogFacadeWithRepo(t)
+	for i, id := range []string{"intg_legacy_1", "intg_legacy_2"} {
+		if err := repo.Save(context.Background(), catalog.Integration{
+			ID: catalog.IntegrationID(id), ProviderSlug: "outlook", ClientID: fmt.Sprintf("client-%d", i),
+			ClientSecret: "plaintext-secret", ClientSecretEncrypted: false, CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed legacy plaintext row %s: %v", id, err)
+		}
+	}
+	log := withCapturedDefaultLog(t)
+
+	if err := f.EncryptPlaintextClientSecrets(context.Background()); err != nil {
+		t.Fatalf("EncryptPlaintextClientSecrets: %v", err)
+	}
+
+	if !strings.Contains(log.String(), "encrypted 2 plaintext client secrets") {
+		t.Errorf("log output = %q, want it to contain %q", log.String(), "encrypted 2 plaintext client secrets")
+	}
+}
+
+// TestEncryptPlaintextClientSecrets_LogsZeroWhenNothingWasLeftToEncrypt is
+// PD38c's own "including zero" clause: a run that finds nothing left to
+// backfill still logs a success line naming zero, so silence never has to be
+// interpreted as "did this even run?".
+func TestEncryptPlaintextClientSecrets_LogsZeroWhenNothingWasLeftToEncrypt(t *testing.T) {
+	f, _ := newCatalogFacadeWithRepo(t)
+	log := withCapturedDefaultLog(t)
+
+	if err := f.EncryptPlaintextClientSecrets(context.Background()); err != nil {
+		t.Fatalf("EncryptPlaintextClientSecrets: %v", err)
+	}
+
+	if !strings.Contains(log.String(), "encrypted 0 plaintext client secrets") {
+		t.Errorf("log output = %q, want it to contain %q", log.String(), "encrypted 0 plaintext client secrets")
+	}
+}
+
 // --- ListTools / ToolDetail (Slice 1's catalog API) ---
 
 const testOrgID = organizations.OrgID("org_1")
@@ -635,4 +694,198 @@ func TestToolDetail_ADeprecatedToolIsStillRetrievableBySlug(t *testing.T) {
 	if !tool.Deprecated {
 		t.Error("Deprecated = false, want true")
 	}
+}
+
+// --- ListTriggerDefinitions / TriggerDefinitionDetail (Slice 1's catalog API) ---
+
+// triggerCatalogDefinitions is two providers' worth of trigger definitions —
+// enough to prove ListTriggerDefinitions' providerSlug filter actually
+// narrows (not just "return everything") and that cross-provider cursor
+// pagination walks in slug order.
+func triggerCatalogDefinitions() []catalog.ProviderDefinition {
+	return []catalog.ProviderDefinition{
+		{
+			Slug: "outlook", Name: "Outlook", Logo: "https://static.beecon.dev/providers/outlook.png", AuthScheme: "oauth2",
+			AuthorizeURL: "https://example.com/authorize", TokenURL: "https://example.com/token", Scopes: []string{"Mail.Read"},
+			Triggers: []catalog.TriggerDefinition{
+				{
+					Slug: "outlook-message-received", Name: "New message received",
+					Description: "Triggered when a new message arrives.",
+					ConfigSchema: map[string]any{"type": "object", "properties": map[string]any{
+						"folderId": map[string]any{"type": "string", "default": "Inbox"},
+					}},
+					PayloadSchema: map[string]any{"type": "object", "properties": map[string]any{
+						"id": map[string]any{"type": "string"},
+					}},
+					Ingestion: "poll", PollIntervalSeconds: 60,
+				},
+			},
+		},
+		{
+			Slug: "hubspot", Name: "Hubspot", Logo: "https://static.beecon.dev/providers/hubspot.png", AuthScheme: "oauth2",
+			AuthorizeURL: "https://hubspot.example.com/authorize", TokenURL: "https://hubspot.example.com/token", Scopes: []string{"crm.objects.contacts.read"},
+			Triggers: []catalog.TriggerDefinition{
+				{
+					Slug: "hubspot-contact-created", Name: "New contact created",
+					Description:   "Triggered when a new CRM contact is created.",
+					ConfigSchema:  minimalSchema(),
+					PayloadSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}}},
+					Ingestion:     "poll", PollIntervalSeconds: 60,
+				},
+			},
+		},
+	}
+}
+
+func newTriggerCatalogFacade(t *testing.T) *catalog.Facade {
+	t.Helper()
+	f, err := memory.NewFacadeWithOverrides(memory.Overrides{Definitions: triggerCatalogDefinitions()})
+	if err != nil {
+		t.Fatalf("NewFacadeWithOverrides: %v", err)
+	}
+	return f
+}
+
+// TestListTriggerDefinitions_FiltersByProviderSlugAndCarriesTheFullShapeAndProviderIdentity
+// is AC1: slug, name, description, config schema, payload schema, ingestion
+// mode, and the owning provider's identity, narrowed by providerSlug.
+func TestListTriggerDefinitions_FiltersByProviderSlugAndCarriesTheFullShapeAndProviderIdentity(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+
+	page, err := f.ListTriggerDefinitions(context.Background(), testOrgID, catalog.TriggerDefinitionFilter{ProviderSlug: "outlook"}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(Items) = %d, want 1 (only outlook's trigger)", len(page.Items))
+	}
+	item := page.Items[0]
+	if item.Slug != "outlook-message-received" {
+		t.Errorf("Slug = %q, want %q", item.Slug, "outlook-message-received")
+	}
+	if item.Name != "New message received" {
+		t.Errorf("Name = %q, want %q", item.Name, "New message received")
+	}
+	if item.Description == "" {
+		t.Error("Description is empty, want the trigger's description")
+	}
+	if len(item.ConfigSchema) == 0 {
+		t.Error("ConfigSchema is empty, want the parsed folderId schema")
+	}
+	if len(item.PayloadSchema) == 0 {
+		t.Error("PayloadSchema is empty, want the parsed id schema")
+	}
+	if item.Ingestion != "poll" {
+		t.Errorf("Ingestion = %q, want %q", item.Ingestion, "poll")
+	}
+	if item.ProviderSlug != "outlook" || item.ProviderName != "Outlook" || item.ProviderLogo == "" {
+		t.Errorf("provider identity = {%q %q %q}, want outlook/Outlook/<logo>", item.ProviderSlug, item.ProviderName, item.ProviderLogo)
+	}
+}
+
+func TestListTriggerDefinitions_FiltersByIntegrationIDResolvedToItsProvider(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+	summary, err := f.CreateIntegration(context.Background(), "hubspot", "client-id", "client-secret")
+	if err != nil {
+		t.Fatalf("unexpected error creating the integration: %v", err)
+	}
+
+	page, err := f.ListTriggerDefinitions(context.Background(), testOrgID, catalog.TriggerDefinitionFilter{IntegrationID: summary.ID}, "", 0)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(Items) = %d, want 1", len(page.Items))
+	}
+	if page.Items[0].Slug != "hubspot-contact-created" {
+		t.Errorf("Slug = %q, want %q", page.Items[0].Slug, "hubspot-contact-created")
+	}
+}
+
+// TestListTriggerDefinitions_UnknownIntegrationIDReturnsNotFound is Slice 1's
+// AC6 read through resolveProviderSlugFilter: an integrationId naming no
+// integration at all is not-found (integrations are installation-level, no
+// cross-org semantics to invent — mirrors ListTools' own documented decision).
+func TestListTriggerDefinitions_UnknownIntegrationIDReturnsNotFound(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+
+	_, err := f.ListTriggerDefinitions(context.Background(), testOrgID, catalog.TriggerDefinitionFilter{IntegrationID: catalog.IntegrationID("intg_does_not_exist")}, "", 0)
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+// TestListTriggerDefinitions_UnknownProviderSlugReturnsNotFound is AC6's
+// other half.
+func TestListTriggerDefinitions_UnknownProviderSlugReturnsNotFound(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+
+	_, err := f.ListTriggerDefinitions(context.Background(), testOrgID, catalog.TriggerDefinitionFilter{ProviderSlug: "does-not-exist"}, "", 0)
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
+}
+
+// TestListTriggerDefinitions_CursorPaginationWalksEveryTriggerSortedBySlugWithoutDuplicatesOrGaps
+// is AC1's "cursor-paginated" half, proven across both providers' triggers.
+func TestListTriggerDefinitions_CursorPaginationWalksEveryTriggerSortedBySlugWithoutDuplicatesOrGaps(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+	ctx := context.Background()
+
+	var order []string
+	seen := map[string]bool{}
+	cursor := ""
+	for i := 0; i < 10; i++ {
+		page, err := f.ListTriggerDefinitions(ctx, testOrgID, catalog.TriggerDefinitionFilter{}, cursor, 1)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, item := range page.Items {
+			if seen[item.Slug] {
+				t.Fatalf("slug %q seen more than once while paginating", item.Slug)
+			}
+			seen[item.Slug] = true
+			order = append(order, item.Slug)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	want := []string{"hubspot-contact-created", "outlook-message-received"}
+	if len(order) != len(want) {
+		t.Fatalf("walked %d triggers across all pages, want exactly %d (no duplicates or gaps): %v", len(order), len(want), order)
+	}
+	for i, slug := range want {
+		if order[i] != slug {
+			t.Errorf("order[%d] = %q, want %q (sorted by slug)", i, order[i], slug)
+		}
+	}
+}
+
+func TestTriggerDefinitionDetail_ReturnsTheTriggerBySlugWithItsProviderIdentityAndSchemas(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+
+	trigger, err := f.TriggerDefinitionDetail(context.Background(), "hubspot-contact-created")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if trigger.Name != "New contact created" {
+		t.Errorf("Name = %q, want %q", trigger.Name, "New contact created")
+	}
+	if trigger.ProviderSlug != "hubspot" || trigger.ProviderName != "Hubspot" {
+		t.Errorf("provider identity = {%q %q}, want hubspot/Hubspot", trigger.ProviderSlug, trigger.ProviderName)
+	}
+	if len(trigger.PayloadSchema) == 0 {
+		t.Error("PayloadSchema is empty, want the parsed id schema")
+	}
+}
+
+func TestTriggerDefinitionDetail_UnknownSlugReturnsNotFound(t *testing.T) {
+	f := newTriggerCatalogFacade(t)
+
+	_, err := f.TriggerDefinitionDetail(context.Background(), "does-not-exist")
+
+	assertDomainError(t, err, catalog.CodeNotFound, 404)
 }

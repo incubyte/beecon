@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -10,12 +12,12 @@ import (
 	"beecon/internal/vault"
 )
 
-// defaultToolPageLimit and maxToolPageLimit bound ListTools' page size
-// (PD15) when a caller supplies none, or supplies one larger than Beecon
-// allows.
+// defaultPageLimit and maxPageLimit bound every in-memory list operation's
+// page size (PD15) — tools and, since Slice 1, trigger definitions — when a
+// caller supplies none, or supplies one larger than Beecon allows.
 const (
-	defaultToolPageLimit = 50
-	maxToolPageLimit     = 200
+	defaultPageLimit = 50
+	maxPageLimit     = 200
 )
 
 // Facade is the catalog module's only public surface.
@@ -83,11 +85,16 @@ func (f *Facade) GetIntegration(ctx context.Context, id IntegrationID) (Integrat
 // idempotent — a row already marked ClientSecretEncrypted is left untouched
 // — so it is safe to call once at every boot (app/wiring.go, after
 // db.Migrate) regardless of how many times the installation has restarted.
+// On success it logs how many rows it actually encrypted this run (PD38c,
+// Phase 2 review carry-forward), including zero — so an operator can confirm
+// the one-time migration ran (and, once it has fully caught up, confirm
+// there was nothing left to do) rather than inferring it from silence.
 func (f *Facade) EncryptPlaintextClientSecrets(ctx context.Context) error {
 	integrations, err := f.repo.ListAll(ctx)
 	if err != nil {
 		return err
 	}
+	encryptedCount := 0
 	for _, integration := range integrations {
 		if integration.ClientSecretEncrypted {
 			continue
@@ -99,7 +106,9 @@ func (f *Facade) EncryptPlaintextClientSecrets(ctx context.Context) error {
 		if err := f.repo.UpdateEncryptedClientSecret(ctx, integration.ID, encrypted); err != nil {
 			return err
 		}
+		encryptedCount++
 	}
+	slog.Default().Info(fmt.Sprintf("encrypted %d plaintext client secrets", encryptedCount), "count", encryptedCount)
 	return nil
 }
 
@@ -209,7 +218,7 @@ func (f *Facade) ListTools(ctx context.Context, _ organizations.OrgID, filter To
 		return ToolPage{}, err
 	}
 
-	after, err := decodeToolCursor(cursor)
+	after, err := decodeSlugCursor(cursor)
 	if err != nil {
 		return ToolPage{}, err
 	}
@@ -218,7 +227,7 @@ func (f *Facade) ListTools(ctx context.Context, _ organizations.OrgID, filter To
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Slug < tools[j].Slug })
 	tools = toolsAfterCursor(tools, after)
 
-	return paginateTools(tools, normalizeToolLimit(limit)), nil
+	return paginateTools(tools, normalizePageLimit(limit)), nil
 }
 
 // ToolDetail returns one tool by slug, across every loaded
@@ -236,18 +245,29 @@ func (f *Facade) ToolDetail(ctx context.Context, slug string) (ToolSummary, erro
 // ListTools should restrict to, or "" for no provider restriction.
 // IntegrationID takes precedence when both are set.
 func (f *Facade) resolveToolFilterProviderSlug(ctx context.Context, filter ToolFilter) (string, error) {
-	if filter.IntegrationID != "" {
-		integration, err := f.GetIntegration(ctx, filter.IntegrationID)
+	return f.resolveProviderSlugFilter(ctx, filter.IntegrationID, filter.ProviderSlug)
+}
+
+// resolveProviderSlugFilter turns an {integrationID, providerSlug} filter
+// pair into the provider slug the caller should restrict its list to, or ""
+// for no restriction — the shared resolution both ListTools and (Slice 1)
+// ListTriggerDefinitions use. integrationID takes precedence when both are
+// set; an unknown integration id or provider slug is not-found (integrations
+// are installation-level, PD7 — there is no cross-org semantics to invent
+// here, mirroring ListTools' own documented decision).
+func (f *Facade) resolveProviderSlugFilter(ctx context.Context, integrationID IntegrationID, providerSlug string) (string, error) {
+	if integrationID != "" {
+		integration, err := f.GetIntegration(ctx, integrationID)
 		if err != nil {
 			return "", err
 		}
 		return integration.ProviderSlug, nil
 	}
-	if filter.ProviderSlug != "" {
-		if _, ok := f.definitions[filter.ProviderSlug]; !ok {
+	if providerSlug != "" {
+		if _, ok := f.definitions[providerSlug]; !ok {
 			return "", ErrProviderNotFound()
 		}
-		return filter.ProviderSlug, nil
+		return providerSlug, nil
 	}
 	return "", nil
 }
@@ -299,26 +319,26 @@ func paginateTools(tools []ToolSummary, limit int) ToolPage {
 	}
 	page := ToolPage{Items: tools}
 	if hasMore {
-		page.NextCursor = encodeToolCursor(tools[len(tools)-1].Slug)
+		page.NextCursor = encodeSlugCursor(tools[len(tools)-1].Slug)
 	}
 	return page
 }
 
-func normalizeToolLimit(requested int) int {
+func normalizePageLimit(requested int) int {
 	if requested <= 0 {
-		return defaultToolPageLimit
+		return defaultPageLimit
 	}
-	if requested > maxToolPageLimit {
-		return maxToolPageLimit
+	if requested > maxPageLimit {
+		return maxPageLimit
 	}
 	return requested
 }
 
-func encodeToolCursor(slug string) string {
+func encodeSlugCursor(slug string) string {
 	return httpx.EncodeCursor(slug)
 }
 
-func decodeToolCursor(raw string) (string, error) {
+func decodeSlugCursor(raw string) (string, error) {
 	fields, err := httpx.DecodeCursor(raw, 1)
 	if err != nil {
 		return "", ErrInvalidCursor()
@@ -327,6 +347,123 @@ func decodeToolCursor(raw string) (string, error) {
 		return "", nil
 	}
 	return fields[0], nil
+}
+
+// TriggerDefinitionFilter narrows ListTriggerDefinitions' result set (Slice
+// 1's catalog API): supply at most one of IntegrationID or ProviderSlug,
+// resolved the same way ToolFilter is (resolveProviderSlugFilter).
+type TriggerDefinitionFilter struct {
+	IntegrationID IntegrationID
+	ProviderSlug  string
+}
+
+// ListTriggerDefinitions returns every trigger across every loaded
+// ProviderDefinition (filtered by integration/provider), sorted by slug and
+// cursor-paginated over that sort order — trigger definitions are not
+// database rows, so pagination happens in memory the same way ListTools'
+// does (ADR-0006). org is accepted for interface consistency with every
+// other org-scoped list operation; trigger definitions, like tools, are not
+// currently narrowed by it.
+func (f *Facade) ListTriggerDefinitions(ctx context.Context, _ organizations.OrgID, filter TriggerDefinitionFilter, cursor string, limit int) (TriggerDefinitionPage, error) {
+	providerSlug, err := f.resolveProviderSlugFilter(ctx, filter.IntegrationID, filter.ProviderSlug)
+	if err != nil {
+		return TriggerDefinitionPage{}, err
+	}
+
+	after, err := decodeSlugCursor(cursor)
+	if err != nil {
+		return TriggerDefinitionPage{}, err
+	}
+
+	triggers := f.matchingTriggerDefinitionSummaries(providerSlug)
+	sort.Slice(triggers, func(i, j int) bool { return triggers[i].Slug < triggers[j].Slug })
+	triggers = triggerDefinitionsAfterCursor(triggers, after)
+
+	return paginateTriggerDefinitions(triggers, normalizePageLimit(limit)), nil
+}
+
+// TriggerDefinitionDetail returns one trigger definition by slug, across
+// every loaded ProviderDefinition (mirrors ToolDetail/PD8's tools-by-slug
+// convention, applied to triggers per PD14). An unknown slug is
+// ErrTriggerDefinitionNotFound.
+func (f *Facade) TriggerDefinitionDetail(_ context.Context, slug string) (TriggerDefinitionSummary, error) {
+	for _, definition := range f.definitions {
+		for _, trigger := range definition.Triggers {
+			if trigger.Slug == slug {
+				return triggerDefinitionSummaryFrom(definition, trigger), nil
+			}
+		}
+	}
+	return TriggerDefinitionSummary{}, ErrTriggerDefinitionNotFound()
+}
+
+// FindTriggerBySlug returns the ProviderDefinition and full internal
+// TriggerDefinition (poll mapping included) for a trigger addressed by slug,
+// across every loaded provider (PD14, mirrors FindToolBySlug): the poll
+// engine (execution/poll.go, Slice 4) needs the trigger's complete poll
+// mapping and its owning provider's BaseURL, not just the public API's
+// summarized shape (TriggerDefinitionDetail/TriggerDefinitionSummary).
+// Translates an unknown slug into ErrTriggerDefinitionNotFound.
+func (f *Facade) FindTriggerBySlug(_ context.Context, slug string) (ProviderDefinition, TriggerDefinition, error) {
+	for _, definition := range f.definitions {
+		for _, trigger := range definition.Triggers {
+			if trigger.Slug == slug {
+				return definition, trigger, nil
+			}
+		}
+	}
+	return ProviderDefinition{}, TriggerDefinition{}, ErrTriggerDefinitionNotFound()
+}
+
+func (f *Facade) matchingTriggerDefinitionSummaries(providerSlugFilter string) []TriggerDefinitionSummary {
+	var summaries []TriggerDefinitionSummary
+	for _, definition := range f.definitions {
+		if providerSlugFilter != "" && definition.Slug != providerSlugFilter {
+			continue
+		}
+		for _, trigger := range definition.Triggers {
+			summaries = append(summaries, triggerDefinitionSummaryFrom(definition, trigger))
+		}
+	}
+	return summaries
+}
+
+func triggerDefinitionSummaryFrom(definition ProviderDefinition, trigger TriggerDefinition) TriggerDefinitionSummary {
+	return TriggerDefinitionSummary{
+		Slug:                trigger.Slug,
+		Name:                trigger.Name,
+		Description:         trigger.Description,
+		ConfigSchema:        trigger.ConfigSchema,
+		PayloadSchema:       trigger.PayloadSchema,
+		Ingestion:           trigger.Ingestion,
+		PollIntervalSeconds: trigger.PollIntervalSeconds,
+		ProviderSlug:        definition.Slug,
+		ProviderName:        definition.Name,
+		ProviderLogo:        definition.Logo,
+	}
+}
+
+// triggerDefinitionsAfterCursor returns the trigger definitions sorted
+// strictly after the cursor's slug (ascending sort, so "after" means
+// "greater than") — mirrors toolsAfterCursor.
+func triggerDefinitionsAfterCursor(triggers []TriggerDefinitionSummary, after string) []TriggerDefinitionSummary {
+	if after == "" {
+		return triggers
+	}
+	idx := sort.Search(len(triggers), func(i int) bool { return triggers[i].Slug > after })
+	return triggers[idx:]
+}
+
+func paginateTriggerDefinitions(triggers []TriggerDefinitionSummary, limit int) TriggerDefinitionPage {
+	hasMore := len(triggers) > limit
+	if hasMore {
+		triggers = triggers[:limit]
+	}
+	page := TriggerDefinitionPage{Items: triggers}
+	if hasMore {
+		page.NextCursor = encodeSlugCursor(triggers[len(triggers)-1].Slug)
+	}
+	return page
 }
 
 func (f *Facade) summarize(integration Integration) IntegrationSummary {

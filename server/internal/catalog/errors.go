@@ -31,6 +31,13 @@ func ErrUnknownProvider(providerSlug string) *httpx.DomainError {
 	return ErrValidation("providerSlug", "unknown provider "+providerSlug)
 }
 
+// ErrTriggerDefinitionNotFound is returned when TriggerDefinitionDetail is
+// asked for a trigger slug no loaded ProviderDefinition declares (mirrors
+// ErrToolNotFound's PD14 slug-addressing convention for triggers).
+func ErrTriggerDefinitionNotFound() *httpx.DomainError {
+	return httpx.New(http.StatusNotFound, CodeNotFound, "trigger definition not found")
+}
+
 // ErrProviderNotFound is returned when ListTools is asked to filter by a
 // providerSlug that names no loaded ProviderDefinition — a not-found list
 // target, not a request-validation error (unlike ErrUnknownProvider, which

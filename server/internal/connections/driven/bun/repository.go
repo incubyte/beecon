@@ -10,13 +10,16 @@ import (
 	"time"
 
 	upstreambun "github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect"
 
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
 	"beecon/internal/organizations"
 )
 
-// ConnectionRow is the connections table schema.
+// ConnectionRow is the connections table schema. RefreshLeaseUntil/
+// ReconcileLeaseUntil are never set by Update — only the raw
+// ClaimDueRefresh/ClaimDueReconcile queries write a real lease.
 type ConnectionRow struct {
 	upstreambun.BaseModel `bun:"table:connections,alias:c"`
 
@@ -36,8 +39,70 @@ type ConnectionRow struct {
 	AccountEmail          string     `bun:"account_email,notnull"`
 	AccountDisplayName    string     `bun:"account_display_name,notnull"`
 	EncryptedParams       string     `bun:"encrypted_params,notnull"`
+	ReconciledAt          *time.Time `bun:"reconciled_at"`
+	RefreshLeaseUntil     *time.Time `bun:"refresh_lease_until"`
+	ReconcileLeaseUntil   *time.Time `bun:"reconcile_lease_until"`
 	CreatedAt             time.Time  `bun:"created_at,notnull"`
 }
+
+// claimDueRefreshPostgres/claimDueRefreshSQLite are the dual-dialect claim
+// primitive for PD36's refresh scheduler: a nil token_expires_at (a
+// Phase-1-migrated row) is also due.
+const claimDueRefreshPostgres = `
+UPDATE connections
+SET refresh_lease_until = ?
+WHERE id IN (
+	SELECT id FROM connections
+	WHERE status = ? AND (token_expires_at IS NULL OR token_expires_at <= ?)
+		AND (refresh_lease_until IS NULL OR refresh_lease_until < ?)
+	ORDER BY created_at
+	LIMIT ?
+	FOR UPDATE SKIP LOCKED
+)
+RETURNING *
+`
+
+const claimDueRefreshSQLite = `
+UPDATE connections
+SET refresh_lease_until = ?
+WHERE id IN (
+	SELECT id FROM connections
+	WHERE status = ? AND (token_expires_at IS NULL OR token_expires_at <= ?)
+		AND (refresh_lease_until IS NULL OR refresh_lease_until < ?)
+	ORDER BY created_at
+	LIMIT ?
+)
+RETURNING *
+`
+
+// claimDueReconcilePostgres/claimDueReconcileSQLite: PD37's reconciliation
+// job — a nil reconciled_at (never yet reconciled) is also due immediately.
+const claimDueReconcilePostgres = `
+UPDATE connections
+SET reconcile_lease_until = ?
+WHERE id IN (
+	SELECT id FROM connections
+	WHERE status = ? AND (reconciled_at IS NULL OR reconciled_at <= ?)
+		AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?)
+	ORDER BY created_at
+	LIMIT ?
+	FOR UPDATE SKIP LOCKED
+)
+RETURNING *
+`
+
+const claimDueReconcileSQLite = `
+UPDATE connections
+SET reconcile_lease_until = ?
+WHERE id IN (
+	SELECT id FROM connections
+	WHERE status = ? AND (reconciled_at IS NULL OR reconciled_at <= ?)
+		AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?)
+	ORDER BY created_at
+	LIMIT ?
+)
+RETURNING *
+`
 
 // OAuthStateRow is the oauth_states table schema.
 type OAuthStateRow struct {
@@ -49,14 +114,16 @@ type OAuthStateRow struct {
 	ConsumedAt   *time.Time `bun:"consumed_at"`
 }
 
-// Repository is the bun-backed connections.Repository and
-// connections.OAuthRepository.
+// Repository is the bun-backed connections.Repository,
+// connections.OAuthRepository, and connections.RefreshQueue.
 type Repository struct {
 	db *upstreambun.DB
 }
 
 var _ connections.Repository = (*Repository)(nil)
 var _ connections.OAuthRepository = (*Repository)(nil)
+var _ connections.RefreshQueue = (*Repository)(nil)
+var _ connections.StatusCounter = (*Repository)(nil)
 
 func NewRepository(db *upstreambun.DB) *Repository {
 	return &Repository{db: db}
@@ -86,12 +153,10 @@ func (r *Repository) FindByID(ctx context.Context, org organizations.OrgID, id c
 	return &connection, nil
 }
 
-// Update persists a Connection's mutable fields: status, redirect uri and
-// connect-token state (Slice 4's Reconnect mints a fresh one against the
-// same row), encrypted tokens and their expiry, account metadata, and the
-// connect page's collected pre-auth param values (encrypted_params, Slice
-// 3) — every lifecycle operation (activation, disable, refresh, reconnect)
-// goes through this one call.
+// Update persists a Connection's mutable fields, including reconciled_at
+// (PD37); refresh_lease_until/reconcile_lease_until are always overwritten to
+// NULL, releasing whatever claim lease a prior ClaimDueRefresh/ClaimDueReconcile
+// set.
 func (r *Repository) Update(ctx context.Context, connection connections.Connection) error {
 	row := rowFromConnection(connection)
 	_, err := r.db.NewUpdate().
@@ -108,10 +173,102 @@ func (r *Repository) Update(ctx context.Context, connection connections.Connecti
 			"account_email",
 			"account_display_name",
 			"encrypted_params",
+			"reconciled_at",
+			"refresh_lease_until",
+			"reconcile_lease_until",
 		).
 		Where("id = ?", row.ID).
 		Exec(ctx)
 	return err
+}
+
+// TransitionStatus conditionally flips id's status from -> to, reporting
+// whether this call performed the flip (FD1).
+func (r *Repository) TransitionStatus(ctx context.Context, org organizations.OrgID, id connections.ConnectionID, from, to connections.Status) (bool, error) {
+	result, err := r.db.NewUpdate().
+		Model((*ConnectionRow)(nil)).
+		Set("status = ?", string(to)).
+		Where("id = ?", string(id)).
+		Where("org_id = ?", string(org)).
+		Where("status = ?", string(from)).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// ClaimDueRefresh leases up to limit due connections, oldest-created first.
+func (r *Repository) ClaimDueRefresh(ctx context.Context, now time.Time, lead, leaseTTL time.Duration, limit int) ([]connections.Connection, error) {
+	query := claimDueRefreshSQLite
+	if r.db.Dialect().Name() == dialect.PG {
+		query = claimDueRefreshPostgres
+	}
+	leaseUntil := now.Add(leaseTTL)
+	dueBy := now.Add(lead)
+
+	var rows []ConnectionRow
+	if err := r.db.NewRaw(query, leaseUntil, string(connections.StatusActive), dueBy, now, limit).Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	return connectionsFromRows(rows), nil
+}
+
+// ClaimDueReconcile leases up to limit due connections, oldest-created first.
+func (r *Repository) ClaimDueReconcile(ctx context.Context, now time.Time, interval, leaseTTL time.Duration, limit int) ([]connections.Connection, error) {
+	query := claimDueReconcileSQLite
+	if r.db.Dialect().Name() == dialect.PG {
+		query = claimDueReconcilePostgres
+	}
+	leaseUntil := now.Add(leaseTTL)
+	dueBefore := now.Add(-interval)
+
+	var rows []ConnectionRow
+	if err := r.db.NewRaw(query, leaseUntil, string(connections.StatusActive), dueBefore, now, limit).Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	return connectionsFromRows(rows), nil
+}
+
+// statusCountRow is the scan target for the connections-by-status metrics
+// gauge's GROUP BY query (PD38d).
+type statusCountRow struct {
+	Status string `bun:"status"`
+	Count  int    `bun:"count"`
+}
+
+// CountByStatus returns the number of connections currently in each
+// lifecycle status across every organization in the installation (PD38d) —
+// deliberately not org-scoped (connections.StatusCounter's own doc comment):
+// a metrics gauge is an installation-wide signal.
+func (r *Repository) CountByStatus(ctx context.Context) (map[connections.Status]int, error) {
+	var rows []statusCountRow
+	err := r.db.NewSelect().
+		Model((*ConnectionRow)(nil)).
+		ColumnExpr("status AS status").
+		ColumnExpr("COUNT(*) AS count").
+		Group("status").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[connections.Status]int, len(rows))
+	for _, row := range rows {
+		counts[connections.Status(row.Status)] = row.Count
+	}
+	return counts, nil
+}
+
+func connectionsFromRows(rows []ConnectionRow) []connections.Connection {
+	results := make([]connections.Connection, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, connectionFromRow(&row))
+	}
+	return results
 }
 
 // List returns Connections scoped to org (Slice 4, AC1), optionally
@@ -257,6 +414,8 @@ func (r *Repository) MarkStateConsumed(ctx context.Context, state string, consum
 	return nil
 }
 
+// rowFromConnection always leaves RefreshLeaseUntil/ReconcileLeaseUntil nil —
+// only the raw claim queries ever write a real lease.
 func rowFromConnection(connection connections.Connection) ConnectionRow {
 	return ConnectionRow{
 		ID:                    string(connection.ID),
@@ -275,6 +434,9 @@ func rowFromConnection(connection connections.Connection) ConnectionRow {
 		AccountEmail:          connection.AccountEmail,
 		AccountDisplayName:    connection.AccountDisplayName,
 		EncryptedParams:       connection.EncryptedParams,
+		ReconciledAt:          connection.ReconciledAt,
+		RefreshLeaseUntil:     nil,
+		ReconcileLeaseUntil:   nil,
 		CreatedAt:             connection.CreatedAt,
 	}
 }
@@ -297,6 +459,7 @@ func connectionFromRow(row *ConnectionRow) connections.Connection {
 		AccountEmail:          row.AccountEmail,
 		AccountDisplayName:    row.AccountDisplayName,
 		EncryptedParams:       row.EncryptedParams,
+		ReconciledAt:          row.ReconciledAt,
 		CreatedAt:             row.CreatedAt,
 	}
 }

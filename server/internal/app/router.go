@@ -13,9 +13,11 @@ import (
 	"beecon/internal/config"
 	connectionshttp "beecon/internal/connections/driving/httpapi"
 	"beecon/internal/connectweb"
+	deliveryhttp "beecon/internal/delivery/driving/httpapi"
 	executionhttp "beecon/internal/execution/driving/httpapi"
 	logginghttp "beecon/internal/logging/driving/httpapi"
 	orgshttp "beecon/internal/organizations/driving/httpapi"
+	triggershttp "beecon/internal/triggers/driving/httpapi"
 )
 
 func buildRouter(
@@ -29,6 +31,8 @@ func buildRouter(
 	executionHandler *executionhttp.Handler,
 	filesHandler *executionhttp.FilesHandler,
 	loggingHandler *logginghttp.Handler,
+	triggersHandler *triggershttp.Handler,
+	deliveryHandler *deliveryhttp.Handler,
 	metricsHandler http.Handler,
 	verifyOrgKey authmw.Verify,
 	verifyUserToken authmw.VerifyUserToken,
@@ -105,6 +109,26 @@ func buildRouter(
 				r.With(authmw.OrgAuth(verifyOrgKey)).Post("/{slug}/execute", executionHandler.Execute)
 			})
 
+			// /trigger-definitions is Slice 1's catalog API (PD28/PD35): list
+			// accepts either an org API key or a user-scoped browser token (API
+			// Shape), get-by-slug is org-key-only, mirroring /tools' own split.
+			r.Route("/trigger-definitions", func(r chi.Router) {
+				r.With(orgOrUser).Get("/", catalogHandler.ListTriggerDefinitions)
+				r.With(authmw.OrgAuth(verifyOrgKey)).Get("/{slug}", catalogHandler.GetTriggerDefinition)
+			})
+
+			// /trigger-instances is Slice 2's lifecycle API (PD33): every route
+			// is org-key-only (no browser-facing subset today).
+			r.Route("/trigger-instances", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Post("/", triggersHandler.Create)
+				r.Get("/", triggersHandler.List)
+				r.Get("/{trgId}", triggersHandler.Get)
+				r.Post("/{trgId}/disable", triggersHandler.Disable)
+				r.Post("/{trgId}/enable", triggersHandler.Enable)
+				r.Delete("/{trgId}", triggersHandler.Delete)
+			})
+
 			// /files is org-key-only (PD22, Slice 7): never mounted under
 			// orgOrUser — a user token must be rejected (closes Slice 5's
 			// deferred AC9).
@@ -117,6 +141,23 @@ func buildRouter(
 			r.Route("/logs", func(r chi.Router) {
 				r.Use(authmw.OrgAuth(verifyOrgKey))
 				r.Get("/", loggingHandler.List)
+			})
+
+			// /webhook-endpoint and /events are Slice 3's signed channel
+			// (PD27/PD30/PD31): every route is org-key-only (no
+			// browser-facing subset).
+			r.Route("/webhook-endpoint", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Put("/", deliveryHandler.SetEndpoint)
+				r.Get("/", deliveryHandler.GetEndpoint)
+				r.Post("/rotate-secret", deliveryHandler.RotateSecret)
+				r.Post("/test", deliveryHandler.SendTest)
+			})
+
+			r.Route("/events", func(r chi.Router) {
+				r.Use(authmw.OrgAuth(verifyOrgKey))
+				r.Get("/", deliveryHandler.ListEvents)
+				r.Post("/{evtId}/redeliver", deliveryHandler.Redeliver)
 			})
 		})
 	})

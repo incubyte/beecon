@@ -44,7 +44,7 @@ func (f *Facade) ResolveForExecution(ctx context.Context, org organizations.OrgI
 		return ExecutionAccess{}, err
 	}
 	if connection.Status == StatusActive && connection.needsRefresh(f.now()) {
-		refreshed, err := f.refreshConnection(ctx, connection)
+		refreshed, err := f.refreshOnce(ctx, org, id, refreshParams{deniedReason: ExpiredReasonRefreshDenied})
 		if err != nil {
 			return ExecutionAccess{}, err
 		}
@@ -71,7 +71,7 @@ func (f *Facade) RefreshForExecution(ctx context.Context, org organizations.OrgI
 	if connection.Status != StatusActive {
 		return f.toExecutionAccess(connection)
 	}
-	refreshed, err := f.refreshConnection(ctx, connection)
+	refreshed, err := f.refreshOnce(ctx, org, id, refreshParams{force: true, deniedReason: ExpiredReasonRefreshDenied})
 	if err != nil {
 		return ExecutionAccess{}, err
 	}

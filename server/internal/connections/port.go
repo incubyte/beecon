@@ -2,6 +2,8 @@ package connections
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"beecon/internal/catalog"
@@ -45,6 +47,11 @@ type Repository interface {
 	Update(ctx context.Context, connection Connection) error
 	List(ctx context.Context, org organizations.OrgID, filter ListFilter) ([]Connection, error)
 	Delete(ctx context.Context, org organizations.OrgID, id ConnectionID) error
+
+	// TransitionStatus conditionally flips id from -> to, reporting whether
+	// this call performed the flip (FD1's exactly-once guard for
+	// expireConnection).
+	TransitionStatus(ctx context.Context, org organizations.OrgID, id ConnectionID, from, to Status) (bool, error)
 }
 
 // OAuthRepository is deliberately installation-level, not org-scoped: the
@@ -160,15 +167,33 @@ type AccountFetchRequest struct {
 }
 
 // OAuthClient is a narrow driven port for exchanging an authorization code
-// for tokens, fetching the authenticated account's profile, and refreshing
-// an access token via a stored refresh token (PD18), so tests can substitute
-// a fake provider (a fake Microsoft + Graph, or Hubspot, httptest server)
-// instead of calling the real internet.
+// for tokens, fetching the authenticated account's profile, refreshing an
+// access token via a stored refresh token (PD18), and probing a provider to
+// verify a connection is still honored (PD37), so tests can substitute a
+// fake provider instead of calling the real internet.
 type OAuthClient interface {
 	ExchangeCode(ctx context.Context, req TokenExchangeRequest) (TokenExchangeResult, error)
 	FetchAccount(ctx context.Context, req AccountFetchRequest) (AccountInfo, error)
 	RefreshGrant(ctx context.Context, req RefreshGrantRequest) (TokenExchangeResult, error)
+	FetchUserInfo(ctx context.Context, url, accessToken string) error
 }
+
+// RefreshDenied is RefreshGrant's typed signal that the provider explicitly
+// refused to renew this connection's credentials (PD36: invalid_grant and
+// kin) — the only refresh outcome treated as permanent (FD3); every other
+// error is transient.
+type RefreshDenied struct {
+	OAuthErrorCode string
+}
+
+func (e RefreshDenied) Error() string {
+	return fmt.Sprintf("connections: provider denied the refresh grant (%s)", e.OAuthErrorCode)
+}
+
+// ErrProbeUnauthorized is FetchUserInfo's typed signal that the
+// reconciliation probe was rejected as unauthorized — FD9's only evidence a
+// connection has been revoked.
+var ErrProbeUnauthorized = errors.New("connections: reconciliation probe unauthorized")
 
 // LogEntry is what the OAuth token exchange hands to a Recorder after
 // completing (or failing) an authorization_code exchange with the provider
@@ -189,4 +214,48 @@ type LogEntry struct {
 // depend on logging — the composition root wires a logging-backed adapter).
 type Recorder interface {
 	Record(ctx context.Context, entry LogEntry) error
+}
+
+// RefreshQueue is deliberately installation-level, not org-scoped (mirrors
+// delivery.WorkQueue/triggers.PollQueue): RefreshDueOnce and ReconcileOnce
+// each claim due ACTIVE Connections across every organization, but every
+// claimed Connection still carries its own OrgID.
+type RefreshQueue interface {
+	ClaimDueRefresh(ctx context.Context, now time.Time, lead, leaseTTL time.Duration, limit int) ([]Connection, error)
+	ClaimDueReconcile(ctx context.Context, now time.Time, interval, leaseTTL time.Duration, limit int) ([]Connection, error)
+}
+
+// EventSink is a narrow, consumer-defined port for emitting
+// connection.expired through the outbox (PD32): wired to
+// delivery.Facade.Enqueue in app/wiring.go — connections itself never
+// imports delivery.
+type EventSink interface {
+	ConnectionExpired(ctx context.Context, org organizations.OrgID, data ExpiredEventData) error
+}
+
+// StatusCounter is the connections module's driven port for the
+// connections-by-status metrics gauge (PD38d, Phase 2 review carry-forward):
+// an installation-wide, scrape-time query across every organization — a
+// metrics gauge has no per-org dimension anywhere in this codebase (PD24's
+// existing counters carry only a provider label) — so this is deliberately
+// not part of Repository, keeping the org-scope architecture test's
+// reflection over Repository's own methods honest about exactly which
+// operations are org-scoped, the same reasoning that keeps RefreshQueue a
+// separate interface.
+type StatusCounter interface {
+	// CountByStatus returns the number of connections currently in each
+	// lifecycle status across the whole installation.
+	CountByStatus(ctx context.Context) (map[Status]int, error)
+}
+
+// Dependents is a narrow, consumer-defined port for modules that must react
+// when a Connection is permanently deleted (Phase 3, PD33: deleting a
+// connection deletes its trigger instances). Wired in app/wiring.go to
+// triggers.Facade.DeleteByConnection — connections itself never imports
+// triggers (BOUNDARIES: the dependency points the other way, triggers
+// depends on connections). A Facade built without one (WithDependents never
+// called) makes Delete's notification a silent no-op, the same nil-safe
+// shape Recorder and metrics.Registry already use.
+type Dependents interface {
+	OnConnectionDeleted(ctx context.Context, org organizations.OrgID, connID ConnectionID) error
 }

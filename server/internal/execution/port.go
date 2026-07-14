@@ -17,6 +17,16 @@ type ToolReader interface {
 	FindToolBySlug(ctx context.Context, slug string) (catalog.ProviderDefinition, catalog.ProviderTool, error)
 }
 
+// TriggerDefinitionReader is a narrow, consumer-defined port satisfied by
+// *catalog.Facade (BOUNDARIES: execution depends on catalog): FetchTriggerRecords
+// (Slice 4) needs a trigger's full poll mapping and its owning provider's
+// BaseURL by slug alone — the same "addressed by slug, across every loaded
+// provider" convention ToolReader already applies to tools (PD8), applied
+// here to triggers (PD14). An unknown slug is catalog's own not-found error.
+type TriggerDefinitionReader interface {
+	FindTriggerBySlug(ctx context.Context, slug string) (catalog.ProviderDefinition, catalog.TriggerDefinition, error)
+}
+
 // ConnectionReader is a narrow, consumer-defined port satisfied by
 // *connections.Facade (BOUNDARIES: execution depends on connections):
 // Execute must confirm connectionID belongs to userID within org — unknown,

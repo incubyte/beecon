@@ -18,11 +18,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"beecon/internal/access"
 	memory "beecon/internal/access/driven/memory"
+	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 )
 
@@ -87,6 +89,41 @@ func TestVerifyUserToken_AcceptsAValidTokenAndReturnsTheOrgAndUserItNames(t *tes
 	if gotUser != testUserID {
 		t.Errorf("user = %q, want %q", gotUser, testUserID)
 	}
+}
+
+// TestVerifyUserToken_AcceptsATokenWhoseLifetimeIsExactlyTheTwentyFourHourCap
+// and TestVerifyUserToken_RejectsATokenWhoseLifetimeExceedsTheTwentyFourHourCapByOneSecond
+// are PD38a's own boundary (Slice 7, Phase 2 review carry-forward): exp-iat
+// spans exactly 24h is still honored, but one second more is rejected as
+// unauthorized — the same way an already-expired token is, so the caller
+// never learns which rule a token failed — even though this token's own exp
+// has not passed yet at the facade's fixed clock.
+func TestVerifyUserToken_AcceptsATokenWhoseLifetimeIsExactlyTheTwentyFourHourCap(t *testing.T) {
+	f := newFacadeWithFixedClock(userTokenTestNow)
+	secret := issueSigningSecretForUserToken(t, f, orgA)
+	token := mintUserToken(t, secret.Secret, secret.ID, "HS256", testUserID, userTokenTestNow.Unix(), userTokenTestNow.Add(24*time.Hour).Unix())
+
+	gotOrg, gotUser, err := f.VerifyUserToken(context.Background(), token)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotOrg != orgA {
+		t.Errorf("org = %q, want %q", gotOrg, orgA)
+	}
+	if gotUser != testUserID {
+		t.Errorf("user = %q, want %q", gotUser, testUserID)
+	}
+}
+
+func TestVerifyUserToken_RejectsATokenWhoseLifetimeExceedsTheTwentyFourHourCapByOneSecond(t *testing.T) {
+	f := newFacadeWithFixedClock(userTokenTestNow)
+	secret := issueSigningSecretForUserToken(t, f, orgA)
+	token := mintUserToken(t, secret.Secret, secret.ID, "HS256", testUserID, userTokenTestNow.Unix(), userTokenTestNow.Add(24*time.Hour+time.Second).Unix())
+
+	_, _, err := f.VerifyUserToken(context.Background(), token)
+
+	assertDomainError(t, err, "unauthorized", 401)
 }
 
 func TestVerifyUserToken_RejectsAnExpiredToken(t *testing.T) {
@@ -168,6 +205,45 @@ func TestVerifyUserToken_RejectsATokenNamingAnUnknownSigningSecretID(t *testing.
 	_, _, err := f.VerifyUserToken(context.Background(), token)
 
 	assertDomainError(t, err, "unauthorized", 401)
+}
+
+// TestVerifyUserToken_ReturnsARawInfrastructureErrorNotAnUnauthorizedDomainErrorWhenTheStoredSecretFailsToDecrypt
+// pins PD38b's fix (Slice 7): a signing-secret record whose stored
+// ciphertext fails to decrypt (corrupted, or sealed under a different vault
+// key) is Beecon's own crypto layer failing, not a verdict on the presented
+// token — VerifyUserToken must return the raw decrypt error as-is, mirroring
+// ActiveWebhookSecrets (webhook_secret.go), so authmw's writeAuthError
+// renders it as 500, never as the 401 an actually-invalid token gets. The
+// decrypt happens before the signature is ever checked, so the token here
+// carries a signature that would not verify anyway — that must not matter:
+// the decrypt failure is reached, and reported, first.
+func TestVerifyUserToken_ReturnsARawInfrastructureErrorNotAnUnauthorizedDomainErrorWhenTheStoredSecretFailsToDecrypt(t *testing.T) {
+	repo := memory.NewSigningSecretRepository()
+	const corruptedKid = access.SigningSecretID("usk_corrupted")
+	if err := repo.Save(context.Background(), access.SigningSecret{
+		ID:              corruptedKid,
+		OrgID:           orgA,
+		EncryptedSecret: "not-valid-base64-ciphertext!!!",
+		CreatedAt:       userTokenTestNow,
+	}); err != nil {
+		t.Fatalf("seed corrupted signing secret record: %v", err)
+	}
+	f := memory.NewFacadeWithOverrides(memory.Overrides{
+		SigningSecretLookup: repo,
+		Now:                 func() time.Time { return userTokenTestNow },
+	})
+	token := mintUserToken(t, "irrelevant-because-decrypt-fails-first", corruptedKid, "HS256", testUserID,
+		userTokenTestNow.Unix(), userTokenTestNow.Add(2*time.Hour).Unix())
+
+	_, _, err := f.VerifyUserToken(context.Background(), token)
+
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var domainErr *httpx.DomainError
+	if errors.As(err, &domainErr) {
+		t.Fatalf("err = %v (a *httpx.DomainError, code %q) — want a raw infrastructure error instead: a vault decrypt failure must never be reported as a business rejection (401)", err, domainErr.Code)
+	}
 }
 
 func TestVerifyUserToken_RejectsAMalformedTokenThatIsNotThreeSegments(t *testing.T) {
