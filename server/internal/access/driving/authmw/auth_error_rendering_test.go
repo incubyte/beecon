@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"beecon/internal/access"
 	"beecon/internal/access/driving/authmw"
 	"beecon/internal/httpx"
 	"beecon/internal/organizations"
@@ -24,12 +25,12 @@ import (
 // database is down" or any other verification-time infrastructure problem.
 var infraFailure = errors.New("database is down")
 
-func fakeVerifyAlwaysInfraFailure(context.Context, string) (organizations.OrgID, error) {
-	return "", infraFailure
+func fakeVerifyAlwaysInfraFailure(context.Context, string) (access.VerifiedKey, error) {
+	return access.VerifiedKey{}, infraFailure
 }
 
-func fakeVerifyAlwaysUnauthorized(context.Context, string) (organizations.OrgID, error) {
-	return "", httpx.Unauthorized("invalid or revoked api key")
+func fakeVerifyAlwaysUnauthorized(context.Context, string) (access.VerifiedKey, error) {
+	return access.VerifiedKey{}, httpx.Unauthorized("invalid or revoked api key")
 }
 
 func fakeVerifyUserTokenAlwaysInfraFailure(context.Context, string) (organizations.OrgID, organizations.UserID, error) {

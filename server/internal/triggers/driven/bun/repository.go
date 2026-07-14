@@ -11,9 +11,9 @@ import (
 	"time"
 
 	upstreambun "github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect"
 
 	"beecon/internal/connections"
+	"beecon/internal/db"
 	"beecon/internal/organizations"
 	"beecon/internal/triggers"
 )
@@ -45,38 +45,6 @@ type TriggerInstanceRow struct {
 	PollLeaseUntil *time.Time `bun:"poll_lease_until"`
 	CreatedAt      time.Time  `bun:"created_at,notnull"`
 }
-
-// claimDuePollsPostgres and claimDuePollsSQLite are section 3 of the
-// architecture doc's dual-dialect claim primitive, applied to
-// trigger_instances (mirrors delivery's claimDuePostgres/claimDueSQLite):
-// an atomic "find due ACTIVE rows, lease them, return them" UPDATE...
-// RETURNING. Postgres adds FOR UPDATE SKIP LOCKED; SQLite needs neither.
-const claimDuePollsPostgres = `
-UPDATE trigger_instances
-SET poll_lease_until = ?
-WHERE id IN (
-	SELECT id FROM trigger_instances
-	WHERE status = ? AND next_poll_at IS NOT NULL AND next_poll_at <= ?
-		AND (poll_lease_until IS NULL OR poll_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-	FOR UPDATE SKIP LOCKED
-)
-RETURNING *
-`
-
-const claimDuePollsSQLite = `
-UPDATE trigger_instances
-SET poll_lease_until = ?
-WHERE id IN (
-	SELECT id FROM trigger_instances
-	WHERE status = ? AND next_poll_at IS NOT NULL AND next_poll_at <= ?
-		AND (poll_lease_until IS NULL OR poll_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-)
-RETURNING *
-`
 
 // Repository is the bun-backed triggers.Repository and triggers.PollQueue.
 type Repository struct {
@@ -113,17 +81,14 @@ func (r *Repository) Save(ctx context.Context, instance triggers.TriggerInstance
 }
 
 // ClaimDuePolls leases up to limit due ACTIVE TriggerInstances, oldest-
-// created first, using the dialect-appropriate claim query (dual-dialect
-// per section 3 of the architecture doc, mirrors delivery.Repository.ClaimDue).
+// created first, via the shared internal/db.ClaimDue lease-claim primitive
+// (FD7, dual-dialect per section 3 of the architecture doc, mirrors
+// delivery.Repository.ClaimDue).
 func (r *Repository) ClaimDuePolls(ctx context.Context, now time.Time, leaseTTL time.Duration, limit int) ([]triggers.TriggerInstance, error) {
-	query := claimDuePollsSQLite
-	if r.db.Dialect().Name() == dialect.PG {
-		query = claimDuePollsPostgres
-	}
-	leaseUntil := now.Add(leaseTTL)
-
 	var rows []TriggerInstanceRow
-	err := r.db.NewRaw(query, leaseUntil, string(triggers.StatusActive), now, now, limit).Scan(ctx, &rows)
+	err := db.ClaimDue(ctx, r.db, &rows, "trigger_instances", "poll_lease_until",
+		"status = ? AND next_poll_at IS NOT NULL AND next_poll_at <= ?", []any{string(triggers.StatusActive), now},
+		now, leaseTTL, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -17,6 +17,7 @@ import (
 	"beecon/internal/access"
 	accessbun "beecon/internal/access/driven/bun"
 	accesshttp "beecon/internal/access/driving/httpapi"
+	"beecon/internal/adminui"
 	"beecon/internal/catalog"
 	catalogbun "beecon/internal/catalog/driven/bun"
 	cataloghttp "beecon/internal/catalog/driving/httpapi"
@@ -129,16 +130,26 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	errorRenderer := httpx.NewErrorRenderer(deps.Logger)
 	metricsRegistry := metrics.New()
 	organizationsFacade := buildOrganizationsFacade(database, now)
-	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer)
+	retentionDays := retentionDaysOrDefault(deps.Config.RetentionDays)
+	organizationsHandler := orgshttp.NewHandler(organizationsFacade, errorRenderer).
+		WithInstallationDefaultRetentionDays(retentionDays)
 	accessFacade := buildAccessFacade(database, tokenVault, now)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
-	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now)
+	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now, organizationsFacade)
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("encrypt plaintext client secrets: %w", err)
 	}
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
-	loggingFacade := buildLoggingFacade(database, now)
+
+	// retention is the Slice 7/PD44 adapter both loggingFacade and
+	// deliveryFacade's own purge workers read their per-org effective window
+	// through — one concrete type satisfying both narrow
+	// logging.RetentionReader/delivery.RetentionReader ports structurally
+	// (app/retention.go).
+	retention := retentionReader{organizations: organizationsFacade, installationDefaultDays: retentionDays}
+
+	loggingFacade := buildLoggingFacade(database, now).WithRetention(retention)
 	loggingHandler := logginghttp.NewHandler(loggingFacade, errorRenderer)
 
 	// deliveryFacade is built ahead of connectionsFacade (rather than where
@@ -148,7 +159,27 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	// imports delivery itself (BOUNDARIES); this is the same
 	// consumer-defined-port-plus-app-adapter seam triggersEventSink already
 	// uses.
-	deliveryFacade := buildDeliveryFacade(database, accessFacade, deliveryLogRecorder(loggingFacade), deliveryTimeoutOrDefault(deps.Config.DeliveryTimeout), now, metricsRegistry)
+	deliveryFacade := buildDeliveryFacade(
+		database,
+		accessFacade,
+		deliveryLogRecorder(loggingFacade),
+		deliveryTimeoutOrDefault(deps.Config.DeliveryTimeout),
+		webhookEndpointCapOrDefault(deps.Config.WebhookEndpointCap),
+		endpointAutoDisableFailuresOrDefault(deps.Config.EndpointAutoDisableFailures),
+		now,
+		metricsRegistry,
+	).WithRetention(retention)
+
+	// Slice 9 (PD46): organizationsFacade's config export/import reaches
+	// delivery's webhook endpoints and catalog's installed integrations only
+	// through these two consumer-defined-port adapters — organizations
+	// itself imports neither module (BOUNDARIES). Wired here, after both
+	// catalogFacade and deliveryFacade exist; organizationsHandler already
+	// holds the same *organizations.Facade pointer these calls mutate in
+	// place, so construction order relative to this wiring doesn't matter.
+	organizationsFacade.
+		WithEndpointPorter(endpointPorterAdapter{delivery: deliveryFacade}).
+		WithIntegrationChecker(catalogIntegrationChecker{catalog: catalogFacade})
 
 	connectionsFacade := buildConnectionsFacade(
 		database,
@@ -168,6 +199,11 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	if err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("parse connect-page templates: %w", err)
+	}
+	adminUIHandler, err := adminui.Handler()
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("build admin ui handler: %w", err)
 	}
 	executionFacade := buildExecutionFacade(catalogFacade, connectionsFacade, providerhttp.NewClient(nil), executionLogRecorder(loggingFacade), now).WithMetrics(metricsRegistry)
 	if deps.Sleep != nil {
@@ -203,7 +239,16 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	metricsRegistry.RegisterConnectionsByStatusGauge(countConnectionsByStatus(connectionsFacade))
 	metricsRegistry.RegisterOutboxGauges(deliveryFacade.OutboxPendingDepth, deliveryFacade.OutboxOldestPendingAge)
 
-	workers := buildWorkers(deps.Logger, deliveryFacade, triggersFacade, connectionsFacade, refreshScanIntervalOrDefault(deps.Config.RefreshScanInterval), reconcileIntervalOrDefault(deps.Config.ReconcileInterval))
+	workers := buildWorkers(
+		deps.Logger,
+		deliveryFacade,
+		triggersFacade,
+		connectionsFacade,
+		loggingFacade,
+		refreshScanIntervalOrDefault(deps.Config.RefreshScanInterval),
+		reconcileIntervalOrDefault(deps.Config.ReconcileInterval),
+		purgeIntervalOrDefault(deps.Config.PurgeInterval),
+	)
 	deliveryFacade.WithNudge(func() { workers.Nudge(dispatcherLoopName) })
 	deliveryHandler := deliveryhttp.NewHandler(deliveryFacade, errorRenderer)
 
@@ -215,12 +260,14 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		catalogHandler,
 		connectionsHandler,
 		connectWebHandler,
+		adminUIHandler,
 		executionHandler,
 		filesHandler,
 		loggingHandler,
 		triggersHandler,
 		deliveryHandler,
 		metricsRegistry.Handler(),
+		metricsRegistry.SummaryHandler(),
 		accessFacade.Verify,
 		accessFacade.VerifyUserToken,
 	)
@@ -257,7 +304,7 @@ func countConnectionsByStatus(connectionsFacade *connections.Facade) func(ctx co
 
 func buildOrganizationsFacade(database *upstreambun.DB, now func() time.Time) *organizations.Facade {
 	repo := orgsbun.NewRepository(database)
-	return organizations.NewFacade(repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), now)
+	return organizations.NewFacade(repo, repo, repo, idgen.Prefixed("org_"), idgen.Prefixed("user_"), now)
 }
 
 func buildAccessFacade(database *upstreambun.DB, secretVault *vault.Vault, now func() time.Time) *access.Facade {
@@ -267,9 +314,13 @@ func buildAccessFacade(database *upstreambun.DB, secretVault *vault.Vault, now f
 	return access.NewFacade(repo, repo, repo, signingSecrets, signingSecrets, webhookSecrets, secretVault, idgen.Prefixed("key_"), idgen.Prefixed("sks_"), idgen.Prefixed("usk_"), idgen.Prefixed("whs_"), now)
 }
 
-func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault, now func() time.Time) *catalog.Facade {
+// buildCatalogFacade wires the catalog facade with its bun repository and
+// organizationsFacade as the GovernanceReader (Slice 5, PD42): catalog
+// already depends on organizations, so the concrete facade is passed
+// directly — no consumer-defined-port-plus-app-adapter indirection needed.
+func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault, now func() time.Time, organizationsFacade *organizations.Facade) *catalog.Facade {
 	repo := catalogbun.NewRepository(database)
-	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), now, tokenVault)
+	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), now, tokenVault, organizationsFacade)
 }
 
 // buildConnectionsFacade wires the connections facade with its bun
@@ -343,6 +394,26 @@ func reconcileIntervalOrDefault(configured time.Duration) time.Duration {
 	return configured
 }
 
+// retentionDaysOrDefault falls back to config.DefaultRetentionDays when
+// configured is unset (zero or negative) — config.Load already applies this
+// default, but Deps.Config may also be built directly (tests) without going
+// through Load.
+func retentionDaysOrDefault(configured int) int {
+	if configured <= 0 {
+		return config.DefaultRetentionDays
+	}
+	return configured
+}
+
+// purgeIntervalOrDefault falls back to config.DefaultPurgeIntervalSeconds
+// when configured is unset (zero).
+func purgeIntervalOrDefault(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return config.DefaultPurgeIntervalSeconds * time.Second
+	}
+	return configured
+}
+
 // buildTriggersFacade wires the triggers facade with its bun repository and
 // the narrow cross-module reader ports it depends on (BOUNDARIES: triggers
 // depends on connections and catalog): catalogFacade satisfies
@@ -387,18 +458,26 @@ func pollMinIntervalOrDefault(configured time.Duration) time.Duration {
 // buildDeliveryFacade wires the delivery facade with its bun repository
 // (also its installation-level WorkQueue — the same Repository implements
 // both), accessFacade as the narrow SecretIssuer port (BOUNDARIES: delivery
-// depends on access), the real webhookhttp.EndpointCaller, and the
-// delivery-attempt log recorder.
+// depends on access), the real webhookhttp.EndpointCaller, the
+// delivery-attempt log recorder, and Slice 8/PD45's two new config values
+// (the per-org endpoint cap and the auto-disable failure threshold).
 func buildDeliveryFacade(
 	database *upstreambun.DB,
 	accessFacade *access.Facade,
 	recorder delivery.Recorder,
 	deliveryTimeout time.Duration,
+	webhookEndpointCap int,
+	endpointAutoDisableFailures int,
 	now func() time.Time,
 	metricsRegistry *metrics.Registry,
 ) *delivery.Facade {
 	repo := deliverybun.NewRepository(database)
-	facade := delivery.NewFacade(repo, repo, accessFacade, webhookhttp.NewClient(nil), recorder, idgen.Prefixed("wep_"), idgen.Prefixed("evt_"), deliveryTimeout, now)
+	facade := delivery.NewFacade(
+		repo, repo, accessFacade, webhookhttp.NewClient(nil), recorder,
+		idgen.Prefixed("wep_"), idgen.Prefixed("evt_"),
+		deliveryTimeout, webhookEndpointCap, endpointAutoDisableFailures,
+		now,
+	)
 	return facade.WithOutboxStats(repo).WithMetrics(metricsRegistry)
 }
 
@@ -409,6 +488,28 @@ func buildDeliveryFacade(
 func deliveryTimeoutOrDefault(configured time.Duration) time.Duration {
 	if configured <= 0 {
 		return config.DefaultDeliveryTimeoutSeconds * time.Second
+	}
+	return configured
+}
+
+// webhookEndpointCapOrDefault falls back to config.DefaultWebhookEndpointCap
+// when configured is unset (zero or negative) — config.Load already applies
+// this default, but Deps.Config may also be built directly (tests) without
+// going through Load.
+func webhookEndpointCapOrDefault(configured int) int {
+	if configured <= 0 {
+		return config.DefaultWebhookEndpointCap
+	}
+	return configured
+}
+
+// endpointAutoDisableFailuresOrDefault falls back to
+// config.DefaultEndpointAutoDisableFailures when configured is unset (zero
+// or negative) — config.Load already applies this default, but Deps.Config
+// may also be built directly (tests) without going through Load.
+func endpointAutoDisableFailuresOrDefault(configured int) int {
+	if configured <= 0 {
+		return config.DefaultEndpointAutoDisableFailures
 	}
 	return configured
 }

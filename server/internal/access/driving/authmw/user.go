@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"beecon/internal/access"
 	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 )
@@ -50,15 +51,20 @@ func UserAuth(verify VerifyUserToken) func(http.Handler) http.Handler {
 // accept both. It tries verifyOrg first — a user-token JWT is cheaply
 // rejected there, since it never carries access.SecretPrefix — then falls
 // back to verifyUser; a request that satisfies neither is rejected with the
-// PD5 unauthorized envelope. Handlers distinguish the two paths via
-// organizations.UserIDFromContext: present only when a user token
-// authenticated the request. An infrastructure failure while verifying
-// either credential form (e.g. a database error) surfaces as 500, never
-// 401 (PD38b, Phase 2 review carry-forward): OrgOrUser tries both paths
-// before giving up, so it only reports 401 once both have failed as
-// genuine business rejections — if either failed for an infrastructure
-// reason instead, that is reported as 500 rather than being silently
-// swallowed by falling through to the other path's own rejection.
+// PD5 unauthorized envelope. On the org-key path, the key's scope (PD41) is
+// also injected via access.WithScope, so authmw.RequireWrite can still
+// reject a read-only key on a route mounted behind OrgOrUser (e.g.
+// reconnect); the user-token path injects no scope — RequireWrite treats a
+// user token as having nothing to restrict (scope is an org-key concept
+// only). Handlers distinguish the two paths via organizations.UserIDFromContext:
+// present only when a user token authenticated the request. An
+// infrastructure failure while verifying either credential form (e.g. a
+// database error) surfaces as 500, never 401 (PD38b, Phase 2 review
+// carry-forward): OrgOrUser tries both paths before giving up, so it only
+// reports 401 once both have failed as genuine business rejections — if
+// either failed for an infrastructure reason instead, that is reported as
+// 500 rather than being silently swallowed by falling through to the other
+// path's own rejection.
 func OrgOrUser(verifyOrg Verify, verifyUser VerifyUserToken) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,9 +73,10 @@ func OrgOrUser(verifyOrg Verify, verifyUser VerifyUserToken) func(http.Handler) 
 				httpx.WriteDomainError(w, httpx.Unauthorized("missing or malformed authorization header"))
 				return
 			}
-			org, orgErr := verifyOrg(r.Context(), token)
+			verified, orgErr := verifyOrg(r.Context(), token)
 			if orgErr == nil {
-				next.ServeHTTP(w, r.WithContext(organizations.WithOrgID(r.Context(), org)))
+				ctx := access.WithScope(organizations.WithOrgID(r.Context(), verified.OrgID), verified.Scope)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 			userOrg, userID, userErr := verifyUser(r.Context(), token)

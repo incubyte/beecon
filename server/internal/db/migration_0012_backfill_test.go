@@ -83,6 +83,22 @@ func applyMigration0012(t *testing.T, sqldb *bun.DB) {
 	}
 }
 
+// applyMigration0017 mirrors applyMigration0012's own "read the real .sql
+// file rather than a restated copy" reasoning: the real driven/bun
+// Repository this file's second test exercises now selects a "scope" column
+// on server_api_keys (PD41, Slice 4), so a pre-existing row must have gone
+// through 0017 too, not just 0012, before that repository can read it back.
+func applyMigration0017(t *testing.T, sqldb *bun.DB) {
+	t.Helper()
+	migrationSQL, err := os.ReadFile("migrations/0017_api_key_scope.up.sql")
+	if err != nil {
+		t.Fatalf("read migration 0017: %v", err)
+	}
+	if _, err := sqldb.ExecContext(context.Background(), string(migrationSQL)); err != nil {
+		t.Fatalf("apply migration 0017: %v", err)
+	}
+}
+
 func TestMigration0012Backfill_MovesEachExistingKeysLookupPrefixAndHashIntoOneSecretRow(t *testing.T) {
 	sqldb := freshSQLiteDB(t)
 	ctx := context.Background()
@@ -167,18 +183,22 @@ func TestMigration0012Backfill_PreExistingKeysSecretStillAuthenticatesThroughThe
 	seedLegacyServerApiKeyRow(t, sqldb, "key_active_legacy", "org_legacy_a", legacySecret, nil)
 
 	applyMigration0012(t, sqldb)
+	applyMigration0017(t, sqldb)
 
 	repo := accessbun.NewRepository(sqldb)
 	facade := access.NewFacade(repo, repo, repo, nil, nil, nil, nil,
 		func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" }, func() string { return "unused" },
 		func() time.Time { return time.Now() })
 
-	gotOrg, err := facade.Verify(ctx, legacySecret)
+	gotKey, err := facade.Verify(ctx, legacySecret)
 
 	if err != nil {
-		t.Fatalf("a pre-existing key's secret failed to verify after the 0012 migration: %v", err)
+		t.Fatalf("a pre-existing key's secret failed to verify after the 0012/0017 migrations: %v", err)
 	}
-	if gotOrg != organizations.OrgID("org_legacy_a") {
-		t.Errorf("Verify() org = %q, want %q", gotOrg, "org_legacy_a")
+	if gotKey.OrgID != organizations.OrgID("org_legacy_a") {
+		t.Errorf("Verify() org = %q, want %q", gotKey.OrgID, "org_legacy_a")
+	}
+	if gotKey.Scope != access.ScopeReadWrite {
+		t.Errorf("Verify() scope = %q, want %q (0017's column default for a pre-existing key)", gotKey.Scope, access.ScopeReadWrite)
 	}
 }

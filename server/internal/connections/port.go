@@ -83,11 +83,18 @@ type UserReader interface {
 }
 
 // IntegrationReader is a narrow, consumer-defined port satisfied by
-// *catalog.Facade: Initiate must reject an unknown integrationId, and needs
-// the integration's provider slug to record on the Connection. Integrations
-// are installation-level (PD7), so this reader takes no organization id.
+// *catalog.Facade: GetIntegration rejects an unknown integrationId and gives
+// the integration's provider slug to record on the Connection — used by the
+// OAuth handshake/refresh (oauth.go, refresh.go) against an already-
+// established Connection's own integration, where governance visibility is
+// irrelevant. GetVisibleIntegration (Slice 5, PD42) is the governance-aware
+// variant Initiate calls instead: it additionally rejects an integration org
+// cannot currently see (hidden, or omitted from a present allow-list) as
+// not-found — the core-risk guard that keeps an org from ever initiating a
+// connection to an integration it cannot see (AC5).
 type IntegrationReader interface {
 	GetIntegration(ctx context.Context, id catalog.IntegrationID) (catalog.Integration, error)
+	GetVisibleIntegration(ctx context.Context, org organizations.OrgID, id catalog.IntegrationID) (catalog.Integration, error)
 }
 
 // ProviderDefinitionReader is a narrow, consumer-defined port satisfied by

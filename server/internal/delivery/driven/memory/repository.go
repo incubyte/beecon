@@ -24,10 +24,12 @@ type eventRecord struct {
 }
 
 // Repository is an in-memory delivery.Repository and delivery.WorkQueue for
-// tests.
+// tests. endpoints is keyed by EndpointID, not OrgID (Slice 8: many
+// endpoints per org now — the persisted row's own primary key), mirroring
+// the bun Repository's own table schema.
 type Repository struct {
 	mu        sync.RWMutex
-	endpoints map[organizations.OrgID]delivery.Endpoint
+	endpoints map[delivery.EndpointID]delivery.Endpoint
 	events    map[delivery.EventID]*eventRecord
 }
 
@@ -37,7 +39,7 @@ var _ delivery.OutboxStats = (*Repository)(nil)
 
 func NewRepository() *Repository {
 	return &Repository{
-		endpoints: map[organizations.OrgID]delivery.Endpoint{},
+		endpoints: map[delivery.EndpointID]delivery.Endpoint{},
 		events:    map[delivery.EventID]*eventRecord{},
 	}
 }
@@ -45,19 +47,70 @@ func NewRepository() *Repository {
 func (r *Repository) SaveEndpoint(_ context.Context, endpoint delivery.Endpoint) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.endpoints[endpoint.OrgID] = endpoint
+	r.endpoints[endpoint.ID] = endpoint
 	return nil
 }
 
+// FindEndpoint returns org's first/oldest endpoint — mirrors the bun
+// Repository's own "order by created_at, id, take the first" alias target
+// (Slice 8).
 func (r *Repository) FindEndpoint(_ context.Context, org organizations.OrgID) (*delivery.Endpoint, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	endpoint, ok := r.endpoints[org]
-	if !ok {
+	endpoints := endpointsForOrg(r.endpoints, org)
+	if len(endpoints) == 0 {
+		return nil, nil
+	}
+	sortEndpointsOldestFirst(endpoints)
+	first := endpoints[0]
+	return &first, nil
+}
+
+func (r *Repository) FindEndpointByID(_ context.Context, org organizations.OrgID, id delivery.EndpointID) (*delivery.Endpoint, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	endpoint, ok := r.endpoints[id]
+	if !ok || endpoint.OrgID != org {
 		return nil, nil
 	}
 	copied := endpoint
 	return &copied, nil
+}
+
+func (r *Repository) ListEndpoints(_ context.Context, org organizations.OrgID) ([]delivery.Endpoint, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	endpoints := endpointsForOrg(r.endpoints, org)
+	sortEndpointsOldestFirst(endpoints)
+	return endpoints, nil
+}
+
+func (r *Repository) DeleteEndpoint(_ context.Context, org organizations.OrgID, id delivery.EndpointID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if endpoint, ok := r.endpoints[id]; ok && endpoint.OrgID == org {
+		delete(r.endpoints, id)
+	}
+	return nil
+}
+
+func endpointsForOrg(all map[delivery.EndpointID]delivery.Endpoint, org organizations.OrgID) []delivery.Endpoint {
+	matches := make([]delivery.Endpoint, 0, len(all))
+	for _, endpoint := range all {
+		if endpoint.OrgID == org {
+			matches = append(matches, endpoint)
+		}
+	}
+	return matches
+}
+
+func sortEndpointsOldestFirst(endpoints []delivery.Endpoint) {
+	sort.Slice(endpoints, func(i, j int) bool {
+		if !endpoints[i].CreatedAt.Equal(endpoints[j].CreatedAt) {
+			return endpoints[i].CreatedAt.Before(endpoints[j].CreatedAt)
+		}
+		return endpoints[i].ID < endpoints[j].ID
+	})
 }
 
 func (r *Repository) SaveEvent(_ context.Context, event delivery.Event) error {
@@ -190,6 +243,32 @@ func (r *Repository) PendingDepthAndOldestAge(_ context.Context, now time.Time) 
 		return 0, 0, nil
 	}
 	return depth, now.Sub(oldest), nil
+}
+
+// PurgeTerminalOlderThan hard-deletes org's own events whose Status is one
+// of delivery.TerminalStatuses AND whose CreatedAt is strictly before
+// cutoff (Slice 7, PD44) — mirroring the bun Repository's own predicate: a
+// PENDING event's status never matches delivery.IsTerminal, so it is never
+// removed here, at any age.
+func (r *Repository) PurgeTerminalOlderThan(_ context.Context, org organizations.OrgID, cutoff time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	purged := 0
+	for id, record := range r.events {
+		if record.event.OrgID != org {
+			continue
+		}
+		if !delivery.IsTerminal(record.event.Status) {
+			continue
+		}
+		if !record.event.CreatedAt.Before(cutoff) {
+			continue
+		}
+		delete(r.events, id)
+		purged++
+	}
+	return purged, nil
 }
 
 func sortEventsNewestFirst(events []delivery.Event) {

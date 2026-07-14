@@ -27,18 +27,22 @@ type Facade struct {
 	newID       func() string
 	now         func() time.Time
 	vault       *vault.Vault
+	governance  organizations.GovernanceReader
 }
 
 // NewFacade wires the facade with the installation's loaded provider
 // definitions (AC1), an injected id minter, a clock so tests can supply
-// deterministic ids and a fixed time, and the shared vault (PD17) every
-// Integration client secret is encrypted under.
-func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() string, now func() time.Time, tokenVault *vault.Vault) *Facade {
+// deterministic ids and a fixed time, the shared vault (PD17) every
+// Integration client secret is encrypted under, and the governance reader
+// (Slice 5, PD42/PD43) every integration/tool/trigger-definition listing
+// filters through — catalog already depends on organizations, so this is
+// referenced directly, no consumer-defined-port-plus-app-adapter needed.
+func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() string, now func() time.Time, tokenVault *vault.Vault, governance organizations.GovernanceReader) *Facade {
 	byslug := make(map[string]ProviderDefinition, len(definitions))
 	for _, d := range definitions {
 		byslug[d.Slug] = d
 	}
-	return &Facade{repo: repo, definitions: byslug, newID: newID, now: now, vault: tokenVault}
+	return &Facade{repo: repo, definitions: byslug, newID: newID, now: now, vault: tokenVault, governance: governance}
 }
 
 // CreateIntegration validates providerSlug against a loaded
@@ -77,6 +81,28 @@ func (f *Facade) GetIntegration(ctx context.Context, id IntegrationID) (Integrat
 		return Integration{}, ErrIntegrationNotFound()
 	}
 	return f.withDecryptedClientSecret(*integration)
+}
+
+// GetVisibleIntegration returns id's Integration exactly as GetIntegration
+// does, but additionally enforces org's governance (Slice 5's core-risk
+// seam, PD42): an integration org cannot see — hidden, or omitted from a
+// present allow-list — surfaces as ErrIntegrationNotFound, indistinguishable
+// from the integration not existing at all. connections.Facade.Initiate
+// calls this instead of GetIntegration so an org can never initiate a
+// connection to an integration it cannot see (AC5).
+func (f *Facade) GetVisibleIntegration(ctx context.Context, org organizations.OrgID, id IntegrationID) (Integration, error) {
+	integration, err := f.GetIntegration(ctx, id)
+	if err != nil {
+		return Integration{}, err
+	}
+	governance, err := f.governance.GetGovernance(ctx, org)
+	if err != nil {
+		return Integration{}, err
+	}
+	if !governance.IsVisible(string(integration.ID)) {
+		return Integration{}, ErrIntegrationNotFound()
+	}
+	return integration, nil
 }
 
 // EncryptPlaintextClientSecrets encrypts every Integration client secret
@@ -150,19 +176,115 @@ func (f *Facade) GetExpectedParams(ctx context.Context, id IntegrationID) (Expec
 	return ExpectedParamsView{ProviderName: definition.Name, Fields: definition.ExpectedParams}, nil
 }
 
-// ListIntegrations returns every integration in the installation (PD7: every
-// organization sees the same list in Phase 1), summarized with the provider
-// name, logo, and auth scheme a consumer needs to start a connection.
-func (f *Facade) ListIntegrations(ctx context.Context) ([]IntegrationSummary, error) {
+// ListIntegrations returns org's visible integrations (Slice 5, PD42):
+// filtered by org's governance — allow-list (nil inherits the full
+// installation catalog, exactly PD7's Phase 1 behavior) minus anything
+// hidden — summarized with the provider name, logo, and auth scheme a
+// consumer needs to start a connection.
+func (f *Facade) ListIntegrations(ctx context.Context, org organizations.OrgID) ([]IntegrationSummary, error) {
 	integrations, err := f.repo.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	governance, err := f.governance.GetGovernance(ctx, org)
 	if err != nil {
 		return nil, err
 	}
 	summaries := make([]IntegrationSummary, 0, len(integrations))
 	for _, integration := range integrations {
+		if !governance.IsVisible(string(integration.ID)) {
+			continue
+		}
 		summaries = append(summaries, f.summarize(integration))
 	}
 	return summaries, nil
+}
+
+// ListIntegrationsWithVisibility returns every installation integration,
+// unfiltered, each annotated with its effective visibility for org (Slice 5,
+// AC1) — the operator's governance view over the whole catalog, distinct
+// from ListIntegrations' already-filtered, org-facing result.
+func (f *Facade) ListIntegrationsWithVisibility(ctx context.Context, org organizations.OrgID) ([]IntegrationVisibility, error) {
+	integrations, err := f.repo.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	governance, err := f.governance.GetGovernance(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]IntegrationVisibility, 0, len(integrations))
+	for _, integration := range integrations {
+		items = append(items, IntegrationVisibility{
+			Integration: f.summarize(integration),
+			Visibility:  effectiveVisibility(governance, string(integration.ID)),
+		})
+	}
+	return items, nil
+}
+
+func effectiveVisibility(governance organizations.Governance, integrationID string) string {
+	if governance.IsHidden(integrationID) {
+		return VisibilityHidden
+	}
+	if governance.AllowList != nil && !containsAny(*governance.AllowList, integrationID) {
+		return VisibilityNotAllowed
+	}
+	return VisibilityVisible
+}
+
+func containsAny(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+// ListFeaturedIntegrations returns org's onboarding "featured" integration
+// subset (Slice 5, PD43), in the operator-configured order; when no featured
+// list is configured, it falls back to the first FeaturedCap visible
+// integrations (ListIntegrations' own order) so ?featured=true never
+// surfaces an empty onboarding screen for an unconfigured org.
+func (f *Facade) ListFeaturedIntegrations(ctx context.Context, org organizations.OrgID) ([]IntegrationSummary, error) {
+	visible, err := f.ListIntegrations(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	governance, err := f.governance.GetGovernance(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	if len(governance.Featured) == 0 {
+		return firstNIntegrations(visible, governance.FeaturedCap), nil
+	}
+	return orderByFeaturedList(visible, governance.Featured), nil
+}
+
+func firstNIntegrations(items []IntegrationSummary, n int) []IntegrationSummary {
+	if n <= 0 || n >= len(items) {
+		return items
+	}
+	return items[:n]
+}
+
+// orderByFeaturedList returns the subset of visible present in featured, in
+// featured's own order — a featured id no longer visible (hidden, removed
+// from the allow-list, or deleted) is silently skipped rather than
+// resurfaced.
+func orderByFeaturedList(visible []IntegrationSummary, featured []string) []IntegrationSummary {
+	byID := make(map[IntegrationID]IntegrationSummary, len(visible))
+	for _, summary := range visible {
+		byID[summary.ID] = summary
+	}
+	ordered := make([]IntegrationSummary, 0, len(featured))
+	for _, id := range featured {
+		if summary, ok := byID[IntegrationID(id)]; ok {
+			ordered = append(ordered, summary)
+		}
+	}
+	return ordered
 }
 
 // GetProviderDefinition returns the loaded ProviderDefinition for
@@ -205,15 +327,33 @@ type ToolFilter struct {
 	IncludeDeprecated bool
 }
 
-// ListTools returns every tool across every loaded ProviderDefinition
-// (filtered by integration/provider and deprecation), sorted by slug and
-// cursor-paginated over that sort order (ADR-0006: tools are not database
-// rows, so pagination happens in memory rather than through a repository
-// query). org is accepted for interface consistency with every other
-// org-scoped list operation; Integrations remain installation-level (PD7),
-// so it does not currently narrow the result.
-func (f *Facade) ListTools(ctx context.Context, _ organizations.OrgID, filter ToolFilter, cursor string, limit int) (ToolPage, error) {
+// ListTools returns every tool across every loaded ProviderDefinition that
+// org may see (filtered by integration/provider, deprecation, and — Slice 5
+// — org's governance), sorted by slug and cursor-paginated over that sort
+// order (ADR-0006: tools are not database rows, so pagination happens in
+// memory rather than through a repository query). The previously-ignored org
+// param is now a real visibility query (PD42): a filter.IntegrationID this
+// org cannot see returns an empty page rather than an error — the filter was
+// valid, it just matched nothing this org may see — and, with no explicit
+// filter, a provider whose every integration is hidden/non-allowed for org
+// is dropped from the unfiltered list entirely.
+func (f *Facade) ListTools(ctx context.Context, org organizations.OrgID, filter ToolFilter, cursor string, limit int) (ToolPage, error) {
+	if filter.IntegrationID != "" {
+		visible, err := f.integrationVisibleToOrg(ctx, org, filter.IntegrationID)
+		if err != nil {
+			return ToolPage{}, err
+		}
+		if !visible {
+			return ToolPage{}, nil
+		}
+	}
+
 	providerSlug, err := f.resolveToolFilterProviderSlug(ctx, filter)
+	if err != nil {
+		return ToolPage{}, err
+	}
+
+	visibleProviders, err := f.visibleProviderSlugs(ctx, org)
 	if err != nil {
 		return ToolPage{}, err
 	}
@@ -223,11 +363,72 @@ func (f *Facade) ListTools(ctx context.Context, _ organizations.OrgID, filter To
 		return ToolPage{}, err
 	}
 
-	tools := f.matchingToolSummaries(providerSlug, filter.IncludeDeprecated)
+	tools := f.matchingToolSummaries(providerSlug, filter.IncludeDeprecated, visibleProviders)
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Slug < tools[j].Slug })
 	tools = toolsAfterCursor(tools, after)
 
 	return paginateTools(tools, normalizePageLimit(limit)), nil
+}
+
+// integrationVisibleToOrg confirms id names a real integration (surfacing
+// ErrIntegrationNotFound if not — the existing "unknown id" behavior is
+// unchanged) and reports whether org's governance lets it see that
+// integration.
+func (f *Facade) integrationVisibleToOrg(ctx context.Context, org organizations.OrgID, id IntegrationID) (bool, error) {
+	integration, err := f.GetIntegration(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	governance, err := f.governance.GetGovernance(ctx, org)
+	if err != nil {
+		return false, err
+	}
+	return governance.IsVisible(string(integration.ID)), nil
+}
+
+// visibleProviderSlugs returns the set of provider slugs org may see (Slice
+// 5, PD42): with no governance restriction (the continuity-preserving
+// default — nil allow-list, nothing hidden) every loaded provider is
+// visible, exactly Phase 1's behavior. Otherwise a provider slug stays
+// visible when it has no integration at all (nothing concrete to hide,
+// preserving ListTools' pre-governance "providerSlug filter works even with
+// zero created integrations" behavior) or when at least one of its
+// integrations remains visible to org; a provider whose every integration is
+// hidden/non-allowed is dropped.
+func (f *Facade) visibleProviderSlugs(ctx context.Context, org organizations.OrgID) (map[string]bool, error) {
+	all := make(map[string]bool, len(f.definitions))
+	for slug := range f.definitions {
+		all[slug] = true
+	}
+
+	governance, err := f.governance.GetGovernance(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	if governance.AllowList == nil && len(governance.Hidden) == 0 {
+		return all, nil
+	}
+
+	integrations, err := f.repo.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hasIntegration := make(map[string]bool)
+	hasVisibleIntegration := make(map[string]bool)
+	for _, integration := range integrations {
+		hasIntegration[integration.ProviderSlug] = true
+		if governance.IsVisible(string(integration.ID)) {
+			hasVisibleIntegration[integration.ProviderSlug] = true
+		}
+	}
+
+	visible := make(map[string]bool, len(all))
+	for slug := range all {
+		if !hasIntegration[slug] || hasVisibleIntegration[slug] {
+			visible[slug] = true
+		}
+	}
+	return visible, nil
 }
 
 // ToolDetail returns one tool by slug, across every loaded
@@ -272,10 +473,13 @@ func (f *Facade) resolveProviderSlugFilter(ctx context.Context, integrationID In
 	return "", nil
 }
 
-func (f *Facade) matchingToolSummaries(providerSlugFilter string, includeDeprecated bool) []ToolSummary {
+func (f *Facade) matchingToolSummaries(providerSlugFilter string, includeDeprecated bool, visibleProviders map[string]bool) []ToolSummary {
 	var summaries []ToolSummary
 	for _, definition := range f.definitions {
 		if providerSlugFilter != "" && definition.Slug != providerSlugFilter {
+			continue
+		}
+		if !visibleProviders[definition.Slug] {
 			continue
 		}
 		for _, tool := range definition.Tools {
@@ -358,14 +562,29 @@ type TriggerDefinitionFilter struct {
 }
 
 // ListTriggerDefinitions returns every trigger across every loaded
-// ProviderDefinition (filtered by integration/provider), sorted by slug and
-// cursor-paginated over that sort order — trigger definitions are not
-// database rows, so pagination happens in memory the same way ListTools'
-// does (ADR-0006). org is accepted for interface consistency with every
-// other org-scoped list operation; trigger definitions, like tools, are not
-// currently narrowed by it.
-func (f *Facade) ListTriggerDefinitions(ctx context.Context, _ organizations.OrgID, filter TriggerDefinitionFilter, cursor string, limit int) (TriggerDefinitionPage, error) {
+// ProviderDefinition that org may see (filtered by integration/provider and
+// — Slice 5 — org's governance), sorted by slug and cursor-paginated over
+// that sort order — trigger definitions are not database rows, so pagination
+// happens in memory the same way ListTools' does (ADR-0006). The
+// previously-ignored org param is now a real visibility query, mirroring
+// ListTools' own PD42 documented decision exactly.
+func (f *Facade) ListTriggerDefinitions(ctx context.Context, org organizations.OrgID, filter TriggerDefinitionFilter, cursor string, limit int) (TriggerDefinitionPage, error) {
+	if filter.IntegrationID != "" {
+		visible, err := f.integrationVisibleToOrg(ctx, org, filter.IntegrationID)
+		if err != nil {
+			return TriggerDefinitionPage{}, err
+		}
+		if !visible {
+			return TriggerDefinitionPage{}, nil
+		}
+	}
+
 	providerSlug, err := f.resolveProviderSlugFilter(ctx, filter.IntegrationID, filter.ProviderSlug)
+	if err != nil {
+		return TriggerDefinitionPage{}, err
+	}
+
+	visibleProviders, err := f.visibleProviderSlugs(ctx, org)
 	if err != nil {
 		return TriggerDefinitionPage{}, err
 	}
@@ -375,7 +594,7 @@ func (f *Facade) ListTriggerDefinitions(ctx context.Context, _ organizations.Org
 		return TriggerDefinitionPage{}, err
 	}
 
-	triggers := f.matchingTriggerDefinitionSummaries(providerSlug)
+	triggers := f.matchingTriggerDefinitionSummaries(providerSlug, visibleProviders)
 	sort.Slice(triggers, func(i, j int) bool { return triggers[i].Slug < triggers[j].Slug })
 	triggers = triggerDefinitionsAfterCursor(triggers, after)
 
@@ -415,10 +634,13 @@ func (f *Facade) FindTriggerBySlug(_ context.Context, slug string) (ProviderDefi
 	return ProviderDefinition{}, TriggerDefinition{}, ErrTriggerDefinitionNotFound()
 }
 
-func (f *Facade) matchingTriggerDefinitionSummaries(providerSlugFilter string) []TriggerDefinitionSummary {
+func (f *Facade) matchingTriggerDefinitionSummaries(providerSlugFilter string, visibleProviders map[string]bool) []TriggerDefinitionSummary {
 	var summaries []TriggerDefinitionSummary
 	for _, definition := range f.definitions {
 		if providerSlugFilter != "" && definition.Slug != providerSlugFilter {
+			continue
+		}
+		if !visibleProviders[definition.Slug] {
 			continue
 		}
 		for _, trigger := range definition.Triggers {

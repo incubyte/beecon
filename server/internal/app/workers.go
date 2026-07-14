@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
 	"beecon/internal/connections"
 	"beecon/internal/delivery"
+	"beecon/internal/logging"
 	"beecon/internal/triggers"
 	"beecon/internal/worker"
 )
@@ -24,6 +26,10 @@ const (
 	refresherLoopName  = "refresher"
 	reconcilerLoopName = "reconciler"
 )
+
+// purgerLoopName is the retention purge worker's Loop name (Phase 4 Slice
+// 7, PD44) — worker.Group.RunOnce keys off this.
+const purgerLoopName = "purger"
 
 // dispatcherScanInterval and dispatcherJitter are FD5's "unexported
 // constants, not config": the dispatcher loop scans for due outbox events
@@ -62,8 +68,10 @@ func buildWorkers(
 	deliveryFacade *delivery.Facade,
 	triggersFacade *triggers.Facade,
 	connectionsFacade *connections.Facade,
+	loggingFacade *logging.Facade,
 	refreshScanInterval time.Duration,
 	reconcileInterval time.Duration,
+	purgeInterval time.Duration,
 ) *worker.Group {
 	return worker.NewGroup(logger,
 		worker.Loop{
@@ -90,5 +98,25 @@ func buildWorkers(
 			Jitter: reconcileInterval / 10,
 			Run:    connectionsFacade.ReconcileOnce,
 		},
+		worker.Loop{
+			Name:   purgerLoopName,
+			Every:  purgeInterval,
+			Jitter: purgeInterval / 10,
+			Run:    purgeOnce(loggingFacade, deliveryFacade),
+		},
 	)
+}
+
+// purgeOnce is the purger Loop's Run func (Slice 7, PD44/§7 of the
+// architecture doc): logging.PurgeOnce then delivery.PurgeOnce, in that
+// order — each is independently org-scoped and independently a no-op for
+// any org whose effective window is unlimited, so running logging's purge
+// first never affects delivery's own outcome.
+func purgeOnce(loggingFacade *logging.Facade, deliveryFacade *delivery.Facade) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		if err := loggingFacade.PurgeOnce(ctx); err != nil {
+			return err
+		}
+		return deliveryFacade.PurgeOnce(ctx)
+	}
 }

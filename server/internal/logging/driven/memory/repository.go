@@ -6,6 +6,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"beecon/internal/logging"
 	"beecon/internal/organizations"
@@ -83,6 +84,26 @@ func isAfterCursorInNewestFirstOrder(entry logging.EventLog, cursor logging.Curs
 		return entry.ID < cursor.ID
 	}
 	return false
+}
+
+// PurgeOlderThan hard-deletes org's own entries whose CreatedAt is strictly
+// before cutoff (Slice 7, PD44), mirroring the bun Repository's own
+// unconditional-by-age semantics.
+func (r *Repository) PurgeOlderThan(_ context.Context, org organizations.OrgID, cutoff time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	kept := make([]logging.EventLog, 0, len(r.entries))
+	purged := 0
+	for _, entry := range r.entries {
+		if entry.OrgID == org && entry.CreatedAt.Before(cutoff) {
+			purged++
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	r.entries = kept
+	return purged, nil
 }
 
 func sortNewestFirst(entries []logging.EventLog) {

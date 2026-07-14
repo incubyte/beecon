@@ -82,19 +82,19 @@ type fakeSecretIssuer struct {
 	active []string
 }
 
-func (f fakeSecretIssuer) IssueWebhookSecret(context.Context, organizations.OrgID) (access.IssuedWebhookSecret, error) {
+func (f fakeSecretIssuer) IssueWebhookSecret(context.Context, organizations.OrgID, string) (access.IssuedWebhookSecret, error) {
 	return access.IssuedWebhookSecret{Secret: "whsec_unused"}, nil
 }
 
-func (f fakeSecretIssuer) RotateWebhookSecret(context.Context, organizations.OrgID, *int) (access.RotateWebhookSecretResult, error) {
+func (f fakeSecretIssuer) RotateWebhookSecret(context.Context, organizations.OrgID, string, *int) (access.RotateWebhookSecretResult, error) {
 	return access.RotateWebhookSecretResult{}, nil
 }
 
-func (f fakeSecretIssuer) ActiveWebhookSecrets(context.Context, organizations.OrgID) ([]string, error) {
+func (f fakeSecretIssuer) ActiveWebhookSecrets(context.Context, organizations.OrgID, string) ([]string, error) {
 	return f.active, nil
 }
 
-func (f fakeSecretIssuer) WebhookSecretPrefix(context.Context, organizations.OrgID) (string, error) {
+func (f fakeSecretIssuer) WebhookSecretPrefix(context.Context, organizations.OrgID, string) (string, error) {
 	return "", nil
 }
 
@@ -246,11 +246,15 @@ func TestEnqueue_WithNoConfiguredEndpointPersistsTheEventAsNoEndpointWithZeroAtt
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	f := deliverymemory.NewFacadeWithOverrides(deliverymemory.Overrides{Now: now})
 
-	event, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{"hello": "world"})
+	events, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{"hello": "world"})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1 — no matching endpoint means a single NO_ENDPOINT placeholder", len(events))
+	}
+	event := events[0]
 	if event.Status != delivery.StatusNoEndpoint {
 		t.Errorf("Status = %q, want %q", event.Status, delivery.StatusNoEndpoint)
 	}
@@ -268,10 +272,14 @@ func TestEnqueue_ANoEndpointEventIsNeverClaimedByDispatchOnce(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	caller := &spyCaller{}
 	f := deliverymemory.NewFacadeWithOverrides(deliverymemory.Overrides{Caller: caller, Now: now})
-	event, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
+	events, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	event := events[0]
 
 	if err := f.DispatchOnce(context.Background()); err != nil {
 		t.Fatalf("DispatchOnce: %v", err)
@@ -488,7 +496,7 @@ func TestDispatchOnce_SignsEveryAttemptWithEveryCurrentlyActiveSecret(t *testing
 	if err != nil {
 		t.Fatalf("SetEndpoint: %v", err)
 	}
-	rotated, err := accessFacade.RotateWebhookSecret(context.Background(), orgA, nil)
+	rotated, err := accessFacade.RotateWebhookSecret(context.Background(), orgA, string(created.ID), nil)
 	if err != nil {
 		t.Fatalf("RotateWebhookSecret: %v", err)
 	}
@@ -612,10 +620,14 @@ func TestDispatchOnce_ASigningFailureCountsAsAFailedAttemptAndStillLogs(t *testi
 func TestRedeliver_RequeuesWithTheSameIDAndBodyRegardlessOfCurrentStatus(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	f := deliverymemory.NewFacadeWithOverrides(deliverymemory.Overrides{Now: now})
-	original, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{"a": 1})
+	enqueued, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{"a": 1})
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
+	if len(enqueued) != 1 {
+		t.Fatalf("len(enqueued) = %d, want 1", len(enqueued))
+	}
+	original := enqueued[0]
 	if original.Status != delivery.StatusNoEndpoint {
 		t.Fatalf("test fixture bug: expected NO_ENDPOINT, got %q", original.Status)
 	}
@@ -647,12 +659,15 @@ func TestRedeliver_ReturnsNotFoundForAnUnknownID(t *testing.T) {
 func TestRedeliver_ReturnsNotFoundForAnEventBelongingToAnotherOrg(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 	f := deliverymemory.NewFacadeWithOverrides(deliverymemory.Overrides{Now: now})
-	event, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
+	events, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
 
-	_, err = f.Redeliver(context.Background(), orgB, event.ID)
+	_, err = f.Redeliver(context.Background(), orgB, events[0].ID)
 
 	assertDomainError(t, err, delivery.CodeNotFound, 404)
 }
@@ -666,11 +681,14 @@ func TestListEvents_CursorPaginationWalksEveryEventExactlyOnceNewestFirst(t *tes
 	f := deliverymemory.NewFacadeWithOverrides(deliverymemory.Overrides{Now: now})
 	want := map[string]bool{}
 	for i := 0; i < 5; i++ {
-		event, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
+		events, err := f.Enqueue(context.Background(), orgA, "trigger.event", map[string]any{})
 		if err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		want[string(event.ID)] = true
+		if len(events) != 1 {
+			t.Fatalf("len(events) = %d, want 1", len(events))
+		}
+		want[string(events[0].ID)] = true
 		tick = tick.Add(time.Second)
 	}
 

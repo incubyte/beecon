@@ -419,6 +419,125 @@ func TestLoad_WhitespaceOnlyPollMinIntervalIsTreatedAsUnsetAndFallsBackToTheDefa
 	}
 }
 
+// --- BEECON_RETENTION_DAYS / BEECON_PURGE_INTERVAL (PD44, Phase 4 Slice 7) ---
+
+func TestLoad_UnsetRetentionDaysFallsBackToTheDefaultThirtyDays(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_RETENTION_DAYS", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RetentionDays != config.DefaultRetentionDays {
+		t.Errorf("RetentionDays = %d, want the default %d", cfg.RetentionDays, config.DefaultRetentionDays)
+	}
+	if config.DefaultRetentionDays != 30 {
+		t.Fatalf("DefaultRetentionDays = %d, want exactly 30", config.DefaultRetentionDays)
+	}
+}
+
+func TestLoad_ASetRetentionDaysValueIsUsedVerbatim(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_RETENTION_DAYS", "90")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RetentionDays != 90 {
+		t.Errorf("RetentionDays = %d, want 90", cfg.RetentionDays)
+	}
+}
+
+func TestLoad_NonIntegerRetentionDaysFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_RETENTION_DAYS", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_RETENTION_DAYS, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_RETENTION_DAYS") {
+		t.Errorf("error = %q, want it to name BEECON_RETENTION_DAYS", err.Error())
+	}
+}
+
+// TestLoad_NonPositiveRetentionDaysFailsFastWithClearMessage pins that the
+// installation-wide default itself may never be 0/unlimited — only a
+// per-org override on org_governance may be — even though 0 is a meaningful
+// value elsewhere in this same feature (PD44).
+func TestLoad_NonPositiveRetentionDaysFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_RETENTION_DAYS", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_RETENTION_DAYS=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_RETENTION_DAYS") {
+				t.Errorf("error = %q, want it to name BEECON_RETENTION_DAYS", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_UnsetPurgeIntervalFallsBackToTheDefaultOneDay(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_PURGE_INTERVAL", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantDefault := config.DefaultPurgeIntervalSeconds * time.Second
+	if cfg.PurgeInterval != wantDefault {
+		t.Errorf("PurgeInterval = %v, want the default %v", cfg.PurgeInterval, wantDefault)
+	}
+	if config.DefaultPurgeIntervalSeconds != 24*60*60 {
+		t.Fatalf("DefaultPurgeIntervalSeconds = %d, want exactly 24h in seconds", config.DefaultPurgeIntervalSeconds)
+	}
+}
+
+func TestLoad_ASetPurgeIntervalValueIsUsedAsSeconds(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_PURGE_INTERVAL", "3600")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PurgeInterval != time.Hour {
+		t.Errorf("PurgeInterval = %v, want %v", cfg.PurgeInterval, time.Hour)
+	}
+}
+
+func TestLoad_NonPositivePurgeIntervalFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_PURGE_INTERVAL", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_PURGE_INTERVAL=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_PURGE_INTERVAL") {
+				t.Errorf("error = %q, want it to name BEECON_PURGE_INTERVAL", err.Error())
+			}
+		})
+	}
+}
+
 func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooLong(t *testing.T) {
 	// base64 of 48 bytes, not 32.
 	_, err := config.DecodeEncryptionKey("MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3")
@@ -428,5 +547,134 @@ func TestDecodeEncryptionKey_FailsNamingTheVariableWhenDecodedLengthIsTooLong(t 
 	}
 	if !strings.Contains(err.Error(), "BEECON_ENCRYPTION_KEY") {
 		t.Errorf("error = %q, want it to name BEECON_ENCRYPTION_KEY", err.Error())
+	}
+}
+
+// --- BEECON_WEBHOOK_ENDPOINT_CAP / BEECON_ENDPOINT_AUTODISABLE_FAILURES
+// (PD45, Phase 4 Slice 8) — both share parsePositiveIntSetting's shape. ---
+
+func TestLoad_UnsetWebhookEndpointCapFallsBackToTheDefaultFive(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_WEBHOOK_ENDPOINT_CAP", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebhookEndpointCap != config.DefaultWebhookEndpointCap {
+		t.Errorf("WebhookEndpointCap = %d, want the default %d", cfg.WebhookEndpointCap, config.DefaultWebhookEndpointCap)
+	}
+	if config.DefaultWebhookEndpointCap != 5 {
+		t.Fatalf("DefaultWebhookEndpointCap = %d, want exactly 5", config.DefaultWebhookEndpointCap)
+	}
+}
+
+func TestLoad_ASetWebhookEndpointCapValueIsUsedVerbatim(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_WEBHOOK_ENDPOINT_CAP", "10")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebhookEndpointCap != 10 {
+		t.Errorf("WebhookEndpointCap = %d, want 10", cfg.WebhookEndpointCap)
+	}
+}
+
+func TestLoad_NonIntegerWebhookEndpointCapFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_WEBHOOK_ENDPOINT_CAP", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_WEBHOOK_ENDPOINT_CAP, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_WEBHOOK_ENDPOINT_CAP") {
+		t.Errorf("error = %q, want it to name BEECON_WEBHOOK_ENDPOINT_CAP", err.Error())
+	}
+}
+
+func TestLoad_NonPositiveWebhookEndpointCapFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_WEBHOOK_ENDPOINT_CAP", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_WEBHOOK_ENDPOINT_CAP=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_WEBHOOK_ENDPOINT_CAP") {
+				t.Errorf("error = %q, want it to name BEECON_WEBHOOK_ENDPOINT_CAP", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_UnsetEndpointAutoDisableFailuresFallsBackToTheDefaultFive(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_ENDPOINT_AUTODISABLE_FAILURES", "")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EndpointAutoDisableFailures != config.DefaultEndpointAutoDisableFailures {
+		t.Errorf("EndpointAutoDisableFailures = %d, want the default %d", cfg.EndpointAutoDisableFailures, config.DefaultEndpointAutoDisableFailures)
+	}
+	if config.DefaultEndpointAutoDisableFailures != 5 {
+		t.Fatalf("DefaultEndpointAutoDisableFailures = %d, want exactly 5", config.DefaultEndpointAutoDisableFailures)
+	}
+}
+
+func TestLoad_ASetEndpointAutoDisableFailuresValueIsUsedVerbatim(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_ENDPOINT_AUTODISABLE_FAILURES", "3")
+
+	cfg, err := config.Load()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EndpointAutoDisableFailures != 3 {
+		t.Errorf("EndpointAutoDisableFailures = %d, want 3", cfg.EndpointAutoDisableFailures)
+	}
+}
+
+func TestLoad_NonIntegerEndpointAutoDisableFailuresFailsFastWithClearMessage(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("BEECON_ENDPOINT_AUTODISABLE_FAILURES", "not-a-number")
+
+	_, err := config.Load()
+
+	if err == nil {
+		t.Fatal("expected an error for a non-integer BEECON_ENDPOINT_AUTODISABLE_FAILURES, got nil")
+	}
+	if !strings.Contains(err.Error(), "BEECON_ENDPOINT_AUTODISABLE_FAILURES") {
+		t.Errorf("error = %q, want it to name BEECON_ENDPOINT_AUTODISABLE_FAILURES", err.Error())
+	}
+}
+
+func TestLoad_NonPositiveEndpointAutoDisableFailuresFailsFastWithClearMessage(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			setValidEnv(t)
+			t.Setenv("BEECON_ENDPOINT_AUTODISABLE_FAILURES", value)
+
+			_, err := config.Load()
+
+			if err == nil {
+				t.Fatalf("expected an error for BEECON_ENDPOINT_AUTODISABLE_FAILURES=%q, got nil", value)
+			}
+			if !strings.Contains(err.Error(), "BEECON_ENDPOINT_AUTODISABLE_FAILURES") {
+				t.Errorf("error = %q, want it to name BEECON_ENDPOINT_AUTODISABLE_FAILURES", err.Error())
+			}
+		})
 	}
 }

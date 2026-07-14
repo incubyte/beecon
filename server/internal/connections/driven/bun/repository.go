@@ -10,10 +10,10 @@ import (
 	"time"
 
 	upstreambun "github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect"
 
 	"beecon/internal/catalog"
 	"beecon/internal/connections"
+	"beecon/internal/db"
 	"beecon/internal/organizations"
 )
 
@@ -44,65 +44,6 @@ type ConnectionRow struct {
 	ReconcileLeaseUntil   *time.Time `bun:"reconcile_lease_until"`
 	CreatedAt             time.Time  `bun:"created_at,notnull"`
 }
-
-// claimDueRefreshPostgres/claimDueRefreshSQLite are the dual-dialect claim
-// primitive for PD36's refresh scheduler: a nil token_expires_at (a
-// Phase-1-migrated row) is also due.
-const claimDueRefreshPostgres = `
-UPDATE connections
-SET refresh_lease_until = ?
-WHERE id IN (
-	SELECT id FROM connections
-	WHERE status = ? AND (token_expires_at IS NULL OR token_expires_at <= ?)
-		AND (refresh_lease_until IS NULL OR refresh_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-	FOR UPDATE SKIP LOCKED
-)
-RETURNING *
-`
-
-const claimDueRefreshSQLite = `
-UPDATE connections
-SET refresh_lease_until = ?
-WHERE id IN (
-	SELECT id FROM connections
-	WHERE status = ? AND (token_expires_at IS NULL OR token_expires_at <= ?)
-		AND (refresh_lease_until IS NULL OR refresh_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-)
-RETURNING *
-`
-
-// claimDueReconcilePostgres/claimDueReconcileSQLite: PD37's reconciliation
-// job — a nil reconciled_at (never yet reconciled) is also due immediately.
-const claimDueReconcilePostgres = `
-UPDATE connections
-SET reconcile_lease_until = ?
-WHERE id IN (
-	SELECT id FROM connections
-	WHERE status = ? AND (reconciled_at IS NULL OR reconciled_at <= ?)
-		AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-	FOR UPDATE SKIP LOCKED
-)
-RETURNING *
-`
-
-const claimDueReconcileSQLite = `
-UPDATE connections
-SET reconcile_lease_until = ?
-WHERE id IN (
-	SELECT id FROM connections
-	WHERE status = ? AND (reconciled_at IS NULL OR reconciled_at <= ?)
-		AND (reconcile_lease_until IS NULL OR reconcile_lease_until < ?)
-	ORDER BY created_at
-	LIMIT ?
-)
-RETURNING *
-`
 
 // OAuthStateRow is the oauth_states table schema.
 type OAuthStateRow struct {
@@ -202,33 +143,35 @@ func (r *Repository) TransitionStatus(ctx context.Context, org organizations.Org
 	return affected == 1, nil
 }
 
-// ClaimDueRefresh leases up to limit due connections, oldest-created first.
+// ClaimDueRefresh leases up to limit due connections, oldest-created first,
+// via the shared internal/db.ClaimDue lease-claim primitive (FD7, dual-
+// dialect per section 3 of the architecture doc): a nil token_expires_at (a
+// Phase-1-migrated row) is also due.
 func (r *Repository) ClaimDueRefresh(ctx context.Context, now time.Time, lead, leaseTTL time.Duration, limit int) ([]connections.Connection, error) {
-	query := claimDueRefreshSQLite
-	if r.db.Dialect().Name() == dialect.PG {
-		query = claimDueRefreshPostgres
-	}
-	leaseUntil := now.Add(leaseTTL)
 	dueBy := now.Add(lead)
 
 	var rows []ConnectionRow
-	if err := r.db.NewRaw(query, leaseUntil, string(connections.StatusActive), dueBy, now, limit).Scan(ctx, &rows); err != nil {
+	err := db.ClaimDue(ctx, r.db, &rows, "connections", "refresh_lease_until",
+		"status = ? AND (token_expires_at IS NULL OR token_expires_at <= ?)", []any{string(connections.StatusActive), dueBy},
+		now, leaseTTL, limit)
+	if err != nil {
 		return nil, err
 	}
 	return connectionsFromRows(rows), nil
 }
 
-// ClaimDueReconcile leases up to limit due connections, oldest-created first.
+// ClaimDueReconcile leases up to limit due connections, oldest-created
+// first, via the shared internal/db.ClaimDue lease-claim primitive (FD7):
+// PD37's reconciliation job — a nil reconciled_at (never yet reconciled) is
+// also due immediately.
 func (r *Repository) ClaimDueReconcile(ctx context.Context, now time.Time, interval, leaseTTL time.Duration, limit int) ([]connections.Connection, error) {
-	query := claimDueReconcileSQLite
-	if r.db.Dialect().Name() == dialect.PG {
-		query = claimDueReconcilePostgres
-	}
-	leaseUntil := now.Add(leaseTTL)
 	dueBefore := now.Add(-interval)
 
 	var rows []ConnectionRow
-	if err := r.db.NewRaw(query, leaseUntil, string(connections.StatusActive), dueBefore, now, limit).Scan(ctx, &rows); err != nil {
+	err := db.ClaimDue(ctx, r.db, &rows, "connections", "reconcile_lease_until",
+		"status = ? AND (reconciled_at IS NULL OR reconciled_at <= ?)", []any{string(connections.StatusActive), dueBefore},
+		now, leaseTTL, limit)
+	if err != nil {
 		return nil, err
 	}
 	return connectionsFromRows(rows), nil

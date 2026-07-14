@@ -61,3 +61,10 @@ func (e *DomainError) WithHeader(key, value string) *DomainError {
 func Unauthorized(message string) *DomainError {
 	return New(http.StatusUnauthorized, "unauthorized", message)
 }
+
+// Forbidden is the PD5 shape for a request whose credential authenticated
+// fine but is not permitted to perform the requested action — e.g. a
+// read-only org API key on a mutating route (PD41, authmw.RequireWrite).
+func Forbidden(message string) *DomainError {
+	return New(http.StatusForbidden, "forbidden", message)
+}

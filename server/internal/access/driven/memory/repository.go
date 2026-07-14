@@ -128,6 +128,7 @@ func (r *Repository) FindByPrefix(_ context.Context, prefix string) ([]access.Ap
 		matches = append(matches, access.ApiKeySecretCandidate{
 			KeyID:     key.ID,
 			OrgID:     key.OrgID,
+			Scope:     key.Scope,
 			RevokedAt: key.RevokedAt,
 			Secret:    secret,
 		})

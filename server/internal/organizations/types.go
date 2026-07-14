@@ -5,6 +5,7 @@
 package organizations
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -135,4 +136,184 @@ func NewUser(id UserID, org OrgID, name, externalID string, now time.Time) (User
 		ExternalID: strings.TrimSpace(externalID),
 		CreatedAt:  now,
 	}, nil
+}
+
+// DefaultFeaturedCap is the onboarding "featured" integration list's default
+// cap (PD43) — rolai's own limit of 8, applied whenever an org's governance
+// leaves FeaturedCap unset (<= 0).
+const DefaultFeaturedCap = 8
+
+// Governance is one organization's integration allow-list, per-integration
+// visibility, and onboarding "featured" configuration (PD42/PD43) — a
+// sibling aggregate to Organization, keyed by the same OrgID and persisted in
+// its own org_governance row. AllowList nil means "inherit the full
+// installation catalog" (PD42, continuity-preserving): an organization that
+// has never been configured — every organization before this phase shipped —
+// sees exactly what it saw before, and upgrading changes nothing until an
+// operator curates it. AllowList non-nil (even an empty slice) restricts the
+// org to exactly the listed integration ids, still minus anything Hidden.
+// Featured is an ordered subset of visible integration ids surfaced first
+// during onboarding (PD43), capped at FeaturedCap. LogRetentionDays and
+// EventRetentionDays (Slice 7, PD44) are each nil, 0, or a positive integer:
+// nil means "inherit the installation's own BEECON_RETENTION_DAYS default";
+// 0 means unlimited/disabled — the purge worker never purges this org's
+// rows for that entity kind, regardless of age; a positive value overrides
+// the installation default with this org's own window, in days. They are
+// set only through WithRetention, never through NewGovernance/
+// NewDefaultGovernance directly, so a governance-only PUT (SetGovernance)
+// and a retention-only PUT (SetRetention) can each replace their own half of
+// this shared settings record (FD8) without disturbing the other's fields.
+type Governance struct {
+	OrgID              OrgID
+	AllowList          *[]string
+	Hidden             []string
+	Featured           []string
+	FeaturedCap        int
+	LogRetentionDays   *int
+	EventRetentionDays *int
+}
+
+// NewDefaultGovernance returns org's continuity-preserving default
+// governance (PD42): no allow-list (inherit the full catalog), nothing
+// hidden, no featured list, and the platform's default featured cap — what
+// GetGovernance synthesizes for an organization with no governance row.
+func NewDefaultGovernance(org OrgID) Governance {
+	return Governance{OrgID: org, FeaturedCap: DefaultFeaturedCap}
+}
+
+// NewGovernance validates and constructs a Governance for org, applying
+// DefaultFeaturedCap when featuredCap is unset (<= 0) and rejecting a
+// featured list longer than the effective cap (PD43). allowList nil is
+// preserved as nil (PD42's "inherit all" state); a non-nil allowList is
+// copied so the caller's own slice can't be mutated out from under the
+// stored value.
+func NewGovernance(org OrgID, allowList *[]string, hidden, featured []string, featuredCap int) (Governance, error) {
+	cap := featuredCap
+	if cap <= 0 {
+		cap = DefaultFeaturedCap
+	}
+	if len(featured) > cap {
+		return Governance{}, ErrValidation("featured", fmt.Sprintf("exceeds the featured cap of %d", cap))
+	}
+	return Governance{
+		OrgID:       org,
+		AllowList:   copyAllowList(allowList),
+		Hidden:      copyStrings(hidden),
+		Featured:    copyStrings(featured),
+		FeaturedCap: cap,
+	}, nil
+}
+
+func copyAllowList(allowList *[]string) *[]string {
+	if allowList == nil {
+		return nil
+	}
+	copied := copyStrings(*allowList)
+	return &copied
+}
+
+func copyStrings(values []string) []string {
+	copied := make([]string, len(values))
+	copy(copied, values)
+	return copied
+}
+
+func copyIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// MinRetentionDays is the platform-wide floor a per-org retention window
+// must clear (Slice 7, AC5) — unless it is exactly 0, PD44's dedicated
+// "unlimited/disabled" escape hatch, which is always accepted regardless of
+// this floor. No compliance mandate is named for Beecon itself (PD44 names
+// no specific number), so the floor is deliberately small: its purpose is
+// to reject nonsensical windows (negative values, off-by-a-sign typos), not
+// to impose a business retention policy Beecon has no basis for.
+const MinRetentionDays = 1
+
+// validateRetentionWindow rejects a non-nil, non-zero days pointer below
+// MinRetentionDays; nil (inherit the installation default) and 0
+// (unlimited/disabled) are always accepted.
+func validateRetentionWindow(field string, days *int) error {
+	if days == nil || *days == 0 {
+		return nil
+	}
+	if *days < MinRetentionDays {
+		return ErrValidation(field, fmt.Sprintf("must be 0 (unlimited) or at least %d day(s)", MinRetentionDays))
+	}
+	return nil
+}
+
+// WithRetention returns a copy of g with its own log/event retention
+// windows replaced by logDays/eventDays (Slice 7, PD44), leaving every
+// other field (AllowList/Hidden/Featured/FeaturedCap) untouched — the
+// retention-only half of org_governance's whole-replace convention, mirrored
+// by Facade.SetRetention. nil means inherit the installation's own
+// BEECON_RETENTION_DAYS default; 0 means unlimited/disabled for this
+// organization; any other value below MinRetentionDays is rejected.
+func (g Governance) WithRetention(logDays, eventDays *int) (Governance, error) {
+	if err := validateRetentionWindow("logRetentionDays", logDays); err != nil {
+		return Governance{}, err
+	}
+	if err := validateRetentionWindow("eventRetentionDays", eventDays); err != nil {
+		return Governance{}, err
+	}
+	updated := g
+	updated.LogRetentionDays = copyIntPtr(logDays)
+	updated.EventRetentionDays = copyIntPtr(eventDays)
+	return updated, nil
+}
+
+// EffectiveLogRetentionDays resolves g's own log-retention override against
+// installationDefault (PD44, Slice 7): nil means inherit the installation's
+// own BEECON_RETENTION_DAYS default; 0 (explicitly set) means unlimited —
+// the purge worker never deletes this org's log entries, regardless of age.
+func (g Governance) EffectiveLogRetentionDays(installationDefault int) int {
+	if g.LogRetentionDays == nil {
+		return installationDefault
+	}
+	return *g.LogRetentionDays
+}
+
+// EffectiveEventRetentionDays is EffectiveLogRetentionDays' mirror for
+// terminal outbox events (PD44, Slice 7).
+func (g Governance) EffectiveEventRetentionDays(installationDefault int) int {
+	if g.EventRetentionDays == nil {
+		return installationDefault
+	}
+	return *g.EventRetentionDays
+}
+
+// IsHidden reports whether integrationID is on g's explicit hidden set —
+// hidden always wins regardless of AllowList (an operator hiding a
+// specifically allow-listed integration still hides it).
+func (g Governance) IsHidden(integrationID string) bool {
+	return containsString(g.Hidden, integrationID)
+}
+
+// IsVisible reports whether an organization governed by g may see
+// integrationID (PD42): hidden entries are never visible; with no allow-list
+// (nil) every non-hidden integration is visible (continuity's default); with
+// an allow-list set, only listed (and non-hidden) integrations are visible.
+func (g Governance) IsVisible(integrationID string) bool {
+	if g.IsHidden(integrationID) {
+		return false
+	}
+	if g.AllowList == nil {
+		return true
+	}
+	return containsString(*g.AllowList, integrationID)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

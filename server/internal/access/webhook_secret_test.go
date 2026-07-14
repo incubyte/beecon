@@ -16,6 +16,12 @@ import (
 	"beecon/internal/access"
 )
 
+// endpointA is a representative endpoint id: WebhookSigningSecret is scoped
+// to (org, endpoint) since Slice 8's per-endpoint secrets (PD45); these
+// tests exercise the org-scoping dimension, so every secret in this file
+// belongs to the same endpoint unless a test says otherwise.
+const endpointA = "wep_a"
+
 func containsString(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
@@ -28,7 +34,7 @@ func containsString(haystack []string, needle string) bool {
 func TestIssueWebhookSecret_ReturnsAWhsPrefixedIDAndAWhsecPrefixedSecret(t *testing.T) {
 	f := newFacade()
 
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -46,12 +52,12 @@ func TestIssueWebhookSecret_ReturnsAWhsPrefixedIDAndAWhsecPrefixedSecret(t *test
 
 func TestActiveWebhookSecrets_ReturnsTheIssuedSecretDecrypted(t *testing.T) {
 	f := newFacade()
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -64,7 +70,7 @@ func TestActiveWebhookSecrets_ReturnsTheIssuedSecretDecrypted(t *testing.T) {
 func TestActiveWebhookSecrets_ReturnsEmptyForAnOrgWithNoSecret(t *testing.T) {
 	f := newFacade()
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -76,11 +82,11 @@ func TestActiveWebhookSecrets_ReturnsEmptyForAnOrgWithNoSecret(t *testing.T) {
 
 func TestActiveWebhookSecrets_NeverLeaksAnotherOrganizationsSecret(t *testing.T) {
 	f := newFacade()
-	if _, err := f.IssueWebhookSecret(context.Background(), orgA); err != nil {
+	if _, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgB)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgB, endpointA)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -93,7 +99,7 @@ func TestActiveWebhookSecrets_NeverLeaksAnotherOrganizationsSecret(t *testing.T)
 func TestWebhookSecretPrefix_ReturnsEmptyForAnOrgWithNoSecret(t *testing.T) {
 	f := newFacade()
 
-	prefix, err := f.WebhookSecretPrefix(context.Background(), orgA)
+	prefix, err := f.WebhookSecretPrefix(context.Background(), orgA, endpointA)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -106,16 +112,16 @@ func TestWebhookSecretPrefix_ReturnsEmptyForAnOrgWithNoSecret(t *testing.T) {
 func TestRotateWebhookSecret_TheNewSecretIsActiveImmediately(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	if _, err := f.IssueWebhookSecret(context.Background(), orgA); err != nil {
+	if _, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, nil)
+	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,18 +137,18 @@ func TestRotateWebhookSecret_TheNewSecretIsActiveImmediately(t *testing.T) {
 func TestRotateWebhookSecret_TheOldSecretStaysActiveInsideTheDefaultOverlapWindow(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, nil)
+	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	clock.Advance(time.Duration(access.DefaultOverlapHours)*time.Hour - time.Nanosecond)
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,18 +163,18 @@ func TestRotateWebhookSecret_TheOldSecretStaysActiveInsideTheDefaultOverlapWindo
 func TestRotateWebhookSecret_TheOldSecretDropsOutAfterTheDefaultOverlapWindowEnds(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, nil)
+	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	clock.Advance(time.Duration(access.DefaultOverlapHours) * time.Hour)
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,12 +189,12 @@ func TestRotateWebhookSecret_TheOldSecretDropsOutAfterTheDefaultOverlapWindowEnd
 func TestRotateWebhookSecret_ACustomOverlapHoursOverridesTheDefault(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	customHours := 2
-	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, &customHours)
+	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, &customHours)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -198,7 +204,7 @@ func TestRotateWebhookSecret_ACustomOverlapHoursOverridesTheDefault(t *testing.T
 	}
 
 	clock.Advance(2*time.Hour - time.Nanosecond)
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -207,7 +213,7 @@ func TestRotateWebhookSecret_ACustomOverlapHoursOverridesTheDefault(t *testing.T
 	}
 
 	clock.Advance(time.Nanosecond) // now exactly at the 2h mark
-	active, err = f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err = f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,12 +229,12 @@ func TestRotateWebhookSecret_ACustomOverlapHoursOverridesTheDefault(t *testing.T
 func TestRotateWebhookSecret_ASecondRotationBeforeTheFirstOverlapEndsLeavesAtMostTwoLiveSecrets(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.IssueWebhookSecret(context.Background(), orgA)
+	issued, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	firstOverlap := 2
-	firstRotation, err := f.RotateWebhookSecret(context.Background(), orgA, &firstOverlap)
+	firstRotation, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, &firstOverlap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,12 +242,12 @@ func TestRotateWebhookSecret_ASecondRotationBeforeTheFirstOverlapEndsLeavesAtMos
 	clock.Advance(1 * time.Hour) // still inside the first rotation's 2h window
 
 	secondOverlap := 5
-	secondRotation, err := f.RotateWebhookSecret(context.Background(), orgA, &secondOverlap)
+	secondRotation, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, &secondOverlap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	active, err := f.ActiveWebhookSecrets(context.Background(), orgA)
+	active, err := f.ActiveWebhookSecrets(context.Background(), orgA, endpointA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,12 +264,12 @@ func TestRotateWebhookSecret_ASecondRotationBeforeTheFirstOverlapEndsLeavesAtMos
 
 func TestRotateWebhookSecret_ReturnsValidationErrorForANegativeOverlapHours(t *testing.T) {
 	f := newFacade()
-	if _, err := f.IssueWebhookSecret(context.Background(), orgA); err != nil {
+	if _, err := f.IssueWebhookSecret(context.Background(), orgA, endpointA); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	negative := -1
 
-	_, err := f.RotateWebhookSecret(context.Background(), orgA, &negative)
+	_, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, &negative)
 
 	assertDomainError(t, err, access.CodeValidationFailed, 422)
 }
@@ -275,7 +281,7 @@ func TestRotateWebhookSecret_OnAnOrgWithNoExistingSecretStillMintsAFirstOne(t *t
 	// simply "expire whatever's live (nothing), then mint fresh."
 	f := newFacade()
 
-	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, nil)
+	rotated, err := f.RotateWebhookSecret(context.Background(), orgA, endpointA, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

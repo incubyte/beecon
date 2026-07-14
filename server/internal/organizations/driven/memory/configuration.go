@@ -13,11 +13,12 @@ var fixedTestTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // Overrides configures NewFacadeWithOverrides. Any zero-value field falls
 // back to a deterministic in-memory default.
 type Overrides struct {
-	Repository     organizations.Repository
-	UserRepository organizations.UserRepository
-	NewID          func() string
-	NewUserID      func() string
-	Now            func() time.Time
+	Repository           organizations.Repository
+	UserRepository       organizations.UserRepository
+	GovernanceRepository organizations.GovernanceRepository
+	NewID                func() string
+	NewUserID            func() string
+	Now                  func() time.Time
 }
 
 // NewFacadeWithOverrides builds an organizations.Facade backed by the
@@ -26,13 +27,17 @@ type Overrides struct {
 func NewFacadeWithOverrides(o Overrides) *organizations.Facade {
 	repository := o.Repository
 	userRepository := o.UserRepository
-	if repository == nil || userRepository == nil {
+	governanceRepository := o.GovernanceRepository
+	if repository == nil || userRepository == nil || governanceRepository == nil {
 		shared := NewRepository()
 		if repository == nil {
 			repository = shared
 		}
 		if userRepository == nil {
 			userRepository = shared
+		}
+		if governanceRepository == nil {
+			governanceRepository = shared
 		}
 	}
 	newID := o.NewID
@@ -47,7 +52,7 @@ func NewFacadeWithOverrides(o Overrides) *organizations.Facade {
 	if now == nil {
 		now = func() time.Time { return fixedTestTime }
 	}
-	return organizations.NewFacade(repository, userRepository, newID, newUserID, now)
+	return organizations.NewFacade(repository, userRepository, governanceRepository, newID, newUserID, now)
 }
 
 func sequentialIDs(prefix string) func() string {

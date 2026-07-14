@@ -8,12 +8,20 @@ import (
 
 const rfc3339Millis = "2006-01-02T15:04:05.000Z07:00"
 
+// issueKeyRequestDTO is Issue's optional request body (PD41, Slice 4): an
+// empty/absent scope defaults to "read-write" (access.ParseScope), keeping
+// every pre-existing caller's full-access behavior unchanged.
+type issueKeyRequestDTO struct {
+	Scope string `json:"scope"`
+}
+
 // issuedKeyDTO is the response to Issue: the only time the full secret ever
 // appears in an API response.
 type issuedKeyDTO struct {
 	ID        string `json:"id"`
 	Key       string `json:"key"`
 	Prefix    string `json:"prefix"`
+	Scope     string `json:"scope"`
 	CreatedAt string `json:"createdAt"`
 }
 
@@ -22,16 +30,22 @@ func toIssuedKeyDTO(issued access.IssuedKey) issuedKeyDTO {
 		ID:        string(issued.ID),
 		Key:       issued.Secret,
 		Prefix:    issued.Prefix,
+		Scope:     string(issued.Scope),
 		CreatedAt: issued.CreatedAt.Format(rfc3339Millis),
 	}
 }
 
-// keyDTO is the response to List: id, prefix, created date, and rotation
-// state (Slice 8, AC5) — never the secret or its hash.
+// keyDTO is the response to List: id, prefix, scope (PD41), created date,
+// and rotation/revocation state (Slice 4/Slice 8 AC5) — never the secret or
+// its hash. RevokedAt (Slice 4, AC3: the console must show revocation
+// state) is the same optional-timestamp shape RotatedAt/OverlapExpiresAt
+// already use.
 type keyDTO struct {
 	ID               string  `json:"id"`
 	Prefix           string  `json:"prefix"`
+	Scope            string  `json:"scope"`
 	CreatedAt        string  `json:"createdAt"`
+	RevokedAt        *string `json:"revokedAt,omitempty"`
 	RotatedAt        *string `json:"rotatedAt,omitempty"`
 	OverlapExpiresAt *string `json:"overlapExpiresAt,omitempty"`
 }
@@ -40,7 +54,9 @@ func toKeyDTO(listing access.KeyListing) keyDTO {
 	return keyDTO{
 		ID:               string(listing.ID),
 		Prefix:           listing.Prefix,
+		Scope:            string(listing.Scope),
 		CreatedAt:        listing.CreatedAt.Format(rfc3339Millis),
+		RevokedAt:        formatOptionalTime(listing.RevokedAt),
 		RotatedAt:        formatOptionalTime(listing.RotatedAt),
 		OverlapExpiresAt: formatOptionalTime(listing.OverlapExpiresAt),
 	}

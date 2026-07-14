@@ -141,7 +141,7 @@ func TestListIntegrations_ReturnsEverySummaryOrderedByCreation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	summaries, err := f.ListIntegrations(ctx)
+	summaries, err := f.ListIntegrations(ctx, testOrgID)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -157,7 +157,7 @@ func TestListIntegrations_ReturnsEverySummaryOrderedByCreation(t *testing.T) {
 func TestListIntegrations_ReturnsEmptySliceWhenNoneExist(t *testing.T) {
 	f := newCatalogFacade(t)
 
-	summaries, err := f.ListIntegrations(context.Background())
+	summaries, err := f.ListIntegrations(context.Background(), testOrgID)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

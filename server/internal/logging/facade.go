@@ -17,15 +17,25 @@ const (
 
 // Facade is the logging module's only public surface.
 type Facade struct {
-	repo  Repository
-	newID func() string
-	now   func() time.Time
+	repo      Repository
+	retention RetentionReader
+	newID     func() string
+	now       func() time.Time
 }
 
 // NewFacade wires the facade with an injected id minter and a clock so tests
 // can supply deterministic ids and a fixed time.
 func NewFacade(repo Repository, newID func() string, now func() time.Time) *Facade {
 	return &Facade{repo: repo, newID: newID, now: now}
+}
+
+// WithRetention wires PurgeOnce's RetentionReader port (Slice 7, PD44). A
+// Facade built without one (NewFacade's own zero value) makes PurgeOnce a
+// silent no-op, the same nil-safe convention delivery.Facade's WithMetrics/
+// WithOutboxStats already established.
+func (f *Facade) WithRetention(retention RetentionReader) *Facade {
+	f.retention = retention
+	return f
 }
 
 // Record persists one EventLog for a tool execution or an OAuth token
@@ -125,4 +135,38 @@ func decodeCursor(raw string) (*Cursor, error) {
 		return nil, ErrInvalidCursor()
 	}
 	return &Cursor{CreatedAt: createdAt, ID: LogID(fields[1])}, nil
+}
+
+// PurgeOnce is the purge worker's Run func for logging's half of PD44
+// (Slice 7): for every organization in the installation, it resolves that
+// org's own effective log-retention window and, unless the window is 0
+// (unlimited/disabled for that org — skipped entirely), hard-deletes its
+// EventLog rows older than now minus that window. A Facade built without
+// WithRetention makes this a silent no-op, mirroring delivery's own
+// nil-Recorder convention. Age-only: unlike delivery's own PurgeOnce, a log
+// entry carries no in-flight state to protect — every entry past the
+// window is eligible regardless of its Kind.
+func (f *Facade) PurgeOnce(ctx context.Context) error {
+	if f.retention == nil {
+		return nil
+	}
+	orgs, err := f.retention.ListOrgIDs(ctx)
+	if err != nil {
+		return err
+	}
+	now := f.now()
+	for _, org := range orgs {
+		days, err := f.retention.EffectiveLogRetentionDays(ctx, org)
+		if err != nil {
+			return err
+		}
+		if days <= 0 {
+			continue
+		}
+		cutoff := now.AddDate(0, 0, -days)
+		if _, err := f.repo.PurgeOlderThan(ctx, org, cutoff); err != nil {
+			return err
+		}
+	}
+	return nil
 }

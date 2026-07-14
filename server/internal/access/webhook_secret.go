@@ -23,7 +23,7 @@ const WebhookSecretPrefix = "whsec_"
 // webhook secret GetEndpoint shows so an org recognizes which secret is
 // live — cosmetic only, mirroring SigningSecretDisplayPrefixLength; never
 // used to find the secret again (ActiveWebhookSecrets reads every
-// non-expired secret for the org directly).
+// non-expired secret for the endpoint directly).
 const WebhookSecretDisplayPrefixLength = 12
 
 // generateWebhookSecret mints a fresh "whsec_<random>" secret (PD27: 32
@@ -56,9 +56,12 @@ type IssuedWebhookSecret struct {
 	CreatedAt time.Time
 }
 
-// IssueWebhookSecret mints org's first webhook signing secret (PD27/PD31)
-// and returns the full secret exactly once.
-func (f *Facade) IssueWebhookSecret(ctx context.Context, org organizations.OrgID) (IssuedWebhookSecret, error) {
+// IssueWebhookSecret mints the first webhook signing secret for the given
+// endpoint (PD27/PD31, extended per-endpoint by PD45/Slice 8 — endpointID
+// is delivery's own wep_ id, carried as a plain string so *Facade satisfies
+// delivery.SecretIssuer without an import cycle, see types.go's EndpointID
+// doc comment) and returns the full secret exactly once.
+func (f *Facade) IssueWebhookSecret(ctx context.Context, org organizations.OrgID, endpointID string) (IssuedWebhookSecret, error) {
 	secret, err := generateWebhookSecret()
 	if err != nil {
 		return IssuedWebhookSecret{}, err
@@ -70,6 +73,7 @@ func (f *Facade) IssueWebhookSecret(ctx context.Context, org organizations.OrgID
 	record := WebhookSigningSecret{
 		ID:              WebhookSecretID(f.newWebhookSecretID()),
 		OrgID:           org,
+		EndpointID:      EndpointID(endpointID),
 		DisplayPrefix:   webhookSecretDisplayPrefix(secret),
 		EncryptedSecret: encrypted,
 		CreatedAt:       f.now(),
@@ -95,18 +99,18 @@ type RotateWebhookSecretResult struct {
 	OverlapExpiresAt time.Time
 }
 
-// RotateWebhookSecret mints a fresh webhook signing secret for org — it
-// authenticates deliveries immediately — and schedules every currently live
-// secret's expiry for the end of an overlap window (default
-// DefaultOverlapHours, or overlapHours when given — PD31 mirrors PD23
-// verbatim). At most two secrets are ever live at once, the same guarantee
-// expireLiveSecrets gives ApiKeySecret rotation. A negative overlapHours is
-// rejected as invalid.
-func (f *Facade) RotateWebhookSecret(ctx context.Context, org organizations.OrgID, overlapHours *int) (RotateWebhookSecretResult, error) {
+// RotateWebhookSecret mints a fresh webhook signing secret for the given
+// endpoint — it authenticates deliveries immediately — and schedules every
+// currently live secret of that same endpoint's expiry for the end of an
+// overlap window (default DefaultOverlapHours, or overlapHours when given —
+// PD31 mirrors PD23 verbatim). At most two secrets are ever live per
+// endpoint at once, the same guarantee expireLiveSecrets gives
+// ApiKeySecret rotation. A negative overlapHours is rejected as invalid.
+func (f *Facade) RotateWebhookSecret(ctx context.Context, org organizations.OrgID, endpointID string, overlapHours *int) (RotateWebhookSecretResult, error) {
 	if overlapHours != nil && *overlapHours < 0 {
 		return RotateWebhookSecretResult{}, ErrValidation("overlapHours", "must not be negative")
 	}
-	secrets, err := f.webhookSecrets.ListByOrg(ctx, org)
+	secrets, err := f.webhookSecrets.ListByEndpoint(ctx, org, EndpointID(endpointID))
 	if err != nil {
 		return RotateWebhookSecretResult{}, err
 	}
@@ -128,6 +132,7 @@ func (f *Facade) RotateWebhookSecret(ctx context.Context, org organizations.OrgI
 	fresh := WebhookSigningSecret{
 		ID:              WebhookSecretID(f.newWebhookSecretID()),
 		OrgID:           org,
+		EndpointID:      EndpointID(endpointID),
 		DisplayPrefix:   webhookSecretDisplayPrefix(secret),
 		EncryptedSecret: encrypted,
 		CreatedAt:       now,
@@ -168,15 +173,15 @@ func (f *Facade) expireLiveWebhookSecrets(ctx context.Context, org organizations
 	return nil
 }
 
-// ActiveWebhookSecrets returns org's currently active webhook signing
-// secrets, decrypted (1-2 during a rotation's overlap window, PD31) —
-// expired secrets are filtered out using the facade's own injected clock,
-// so tests can travel time past an overlap window without a real sleep.
-// delivery's signer (signing.go) signs every delivery attempt with each of
-// these, space-joined, so a verifier holding either secret passes. An org
-// with no webhook secret yet returns an empty slice.
-func (f *Facade) ActiveWebhookSecrets(ctx context.Context, org organizations.OrgID) ([]string, error) {
-	secrets, err := f.webhookSecrets.ListByOrg(ctx, org)
+// ActiveWebhookSecrets returns the given endpoint's currently active
+// webhook signing secrets, decrypted (1-2 during a rotation's overlap
+// window, PD31) — expired secrets are filtered out using the facade's own
+// injected clock, so tests can travel time past an overlap window without a
+// real sleep. delivery's signer (signing.go) signs every delivery attempt
+// with each of these, space-joined, so a verifier holding either secret
+// passes. An endpoint with no webhook secret yet returns an empty slice.
+func (f *Facade) ActiveWebhookSecrets(ctx context.Context, org organizations.OrgID, endpointID string) ([]string, error) {
+	secrets, err := f.webhookSecrets.ListByEndpoint(ctx, org, EndpointID(endpointID))
 	if err != nil {
 		return nil, err
 	}
@@ -195,12 +200,13 @@ func (f *Facade) ActiveWebhookSecrets(ctx context.Context, org organizations.Org
 	return active, nil
 }
 
-// WebhookSecretPrefix returns the display prefix of org's currently active
-// webhook signing secret — GetEndpoint's own "secretPrefix" field, the one
-// IssueWebhookSecret or the most recent RotateWebhookSecret call left with
-// ExpiresAt nil. An org with no webhook secret yet returns "".
-func (f *Facade) WebhookSecretPrefix(ctx context.Context, org organizations.OrgID) (string, error) {
-	secrets, err := f.webhookSecrets.ListByOrg(ctx, org)
+// WebhookSecretPrefix returns the display prefix of the given endpoint's
+// currently active webhook signing secret — GetEndpoint's own
+// "secretPrefix" field, the one IssueWebhookSecret or the most recent
+// RotateWebhookSecret call left with ExpiresAt nil. An endpoint with no
+// webhook secret yet returns "".
+func (f *Facade) WebhookSecretPrefix(ctx context.Context, org organizations.OrgID, endpointID string) (string, error) {
+	secrets, err := f.webhookSecrets.ListByEndpoint(ctx, org, EndpointID(endpointID))
 	if err != nil {
 		return "", err
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"beecon/internal/access"
 	"beecon/internal/access/driving/authmw"
 	"beecon/internal/httpx"
 	"beecon/internal/organizations"
@@ -24,14 +25,14 @@ const validOrg = organizations.OrgID("org_1")
 // over the same httpx.Unauthorized) — never a plain error, which authmw's
 // own PD38b logic (autherror.go) would instead treat as an infrastructure
 // failure and render as 500.
-func fakeVerify(_ context.Context, secret string) (organizations.OrgID, error) {
+func fakeVerify(_ context.Context, secret string) (access.VerifiedKey, error) {
 	switch secret {
 	case validSecret:
-		return validOrg, nil
+		return access.VerifiedKey{OrgID: validOrg, Scope: access.ScopeReadWrite}, nil
 	case revokedSecret:
-		return "", httpx.Unauthorized("revoked api key")
+		return access.VerifiedKey{}, httpx.Unauthorized("revoked api key")
 	default:
-		return "", httpx.Unauthorized("unknown api key")
+		return access.VerifiedKey{}, httpx.Unauthorized("unknown api key")
 	}
 }
 

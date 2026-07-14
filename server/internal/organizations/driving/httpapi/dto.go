@@ -29,3 +29,19 @@ func toOrganizationDTO(org organizations.Organization) organizationDTO {
 }
 
 const rfc3339Millis = "2006-01-02T15:04:05.000Z07:00"
+
+// organizationsPageDTO is List's response: one cursor-paginated page of
+// every organization in the installation (Slice 1, PD40), newest first;
+// nextCursor is absent when this was the last page.
+type organizationsPageDTO struct {
+	Items      []organizationDTO `json:"items"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+}
+
+func toOrganizationsPageDTO(result organizations.ListAllResult) organizationsPageDTO {
+	items := make([]organizationDTO, 0, len(result.Organizations))
+	for _, org := range result.Organizations {
+		items = append(items, toOrganizationDTO(org))
+	}
+	return organizationsPageDTO{Items: items, NextCursor: result.NextCursor}
+}

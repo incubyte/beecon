@@ -116,16 +116,16 @@ func TestVerify_PicksTheCorrectOrgByHashWhenTwoKeysShareALookupPrefix(t *testing
 	if err != nil {
 		t.Fatalf("Verify(secretA) unexpected error: %v", err)
 	}
-	if gotOrgForA != "org_a" {
-		t.Errorf("Verify(secretA) org = %q, want %q", gotOrgForA, "org_a")
+	if gotOrgForA.OrgID != "org_a" {
+		t.Errorf("Verify(secretA) org = %q, want %q", gotOrgForA.OrgID, "org_a")
 	}
 
 	gotOrgForB, err := facade.Verify(context.Background(), secretB)
 	if err != nil {
 		t.Fatalf("Verify(secretB) unexpected error: %v", err)
 	}
-	if gotOrgForB != "org_b" {
-		t.Errorf("Verify(secretB) org = %q, want %q", gotOrgForB, "org_b")
+	if gotOrgForB.OrgID != "org_b" {
+		t.Errorf("Verify(secretB) org = %q, want %q", gotOrgForB.OrgID, "org_b")
 	}
 }
 

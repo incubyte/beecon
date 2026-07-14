@@ -30,16 +30,45 @@ type ListFilter struct {
 
 // Repository is the delivery module's org-scoped driven port over both
 // entities it owns (BOUNDARIES: WebhookEndpoint and Outbox/WebhookDelivery).
-// SaveEndpoint both creates org's one endpoint and persists a later URL
-// change (PD31: one per organization) — there is no separate Update.
-// SaveEvent both inserts a freshly enqueued Event and persists its later
-// status/attempt transitions (DispatchOnce, Redeliver).
+// SaveEndpoint both creates a new endpoint and persists a later change to
+// one (URL, event-type filter, status, consecutive-failure count) — there
+// is no separate Update; it upserts by the endpoint's own id (Slice 8,
+// PD45: many endpoints per org, so the old org-unique upsert no longer
+// applies). FindEndpoint returns org's first/oldest endpoint — the PD31
+// single-endpoint API's alias target, and dispatchOne's fallback for an
+// Event that carries no specific EndpointID (FD7's manually-redelivered
+// NO_ENDPOINT case) — while FindEndpointByID/ListEndpoints/DeleteEndpoint
+// serve the multi-endpoint CRUD surface. SaveEvent both inserts a freshly
+// enqueued Event and persists its later status/attempt transitions
+// (DispatchOnce, Redeliver). PurgeTerminalOlderThan (Slice 7, PD44)
+// hard-deletes org's own outbox events whose Status is one of
+// TerminalStatuses (DELIVERED/FAILED/NO_ENDPOINT) AND whose CreatedAt is
+// strictly before cutoff — a PENDING event can never match the status
+// predicate, so it is never purged at any age, the critical guarantee this
+// port exists to make explicit at the interface itself.
 type Repository interface {
 	SaveEndpoint(ctx context.Context, endpoint Endpoint) error
 	FindEndpoint(ctx context.Context, org organizations.OrgID) (*Endpoint, error)
+	FindEndpointByID(ctx context.Context, org organizations.OrgID, id EndpointID) (*Endpoint, error)
+	ListEndpoints(ctx context.Context, org organizations.OrgID) ([]Endpoint, error)
+	DeleteEndpoint(ctx context.Context, org organizations.OrgID, id EndpointID) error
 	SaveEvent(ctx context.Context, event Event) error
 	FindEvent(ctx context.Context, org organizations.OrgID, id EventID) (*Event, error)
 	ListEventsPage(ctx context.Context, org organizations.OrgID, filter ListFilter) ([]Event, error)
+	PurgeTerminalOlderThan(ctx context.Context, org organizations.OrgID, cutoff time.Time) (int, error)
+}
+
+// RetentionReader is PurgeOnce's narrow, consumer-defined port onto the
+// installation's organizations (Slice 7, PD44) — mirrors logging.
+// RetentionReader exactly (same two-method shape, same "wired in app/"
+// reasoning: the effective window combines org's own governance override
+// with the installation's BEECON_RETENTION_DAYS config value, which
+// delivery itself never imports). EffectiveEventRetentionDays is
+// EffectiveLogRetentionDays' mirror for terminal outbox events; 0 means
+// unlimited/disabled for that org — PurgeOnce skips it entirely.
+type RetentionReader interface {
+	ListOrgIDs(ctx context.Context) ([]organizations.OrgID, error)
+	EffectiveEventRetentionDays(ctx context.Context, org organizations.OrgID) (int, error)
 }
 
 // WorkQueue is deliberately installation-level, not org-scoped (see
@@ -63,18 +92,24 @@ type WorkQueue interface {
 }
 
 // SecretIssuer is a narrow, consumer-defined port satisfied by
-// *access.Facade (BOUNDARIES: delivery depends on access): SetEndpoint
+// *access.Facade (BOUNDARIES: delivery depends on access): CreateEndpoint
 // mints a webhook signing secret at creation (IssueWebhookSecret),
-// RotateSecret rotates it (RotateWebhookSecret, PD31 mirroring PD23),
-// GetEndpoint shows the currently active secret's display prefix
-// (WebhookSecretPrefix), and DispatchOnce signs every attempt with every
-// currently active secret (ActiveWebhookSecrets, 1-2 during a rotation's
-// overlap window).
+// RotateEndpointSecret rotates it (RotateWebhookSecret, PD31 mirroring
+// PD23), GetEndpoint/ListEndpoints show the currently active secret's
+// display prefix (WebhookSecretPrefix), and dispatchOne signs every attempt
+// with every currently active secret (ActiveWebhookSecrets, 1-2 during a
+// rotation's overlap window) — all four now scoped to one specific
+// endpoint (Slice 8, PD45: secrets are per-endpoint, not per-org).
+// endpointID is delivery's own EndpointID, carried as a plain string:
+// access cannot import delivery.EndpointID (BOUNDARIES: access depends on
+// organizations only), so *access.Facade's own methods take a plain string
+// here — see access/types.go's own EndpointID doc comment for the mirrored
+// reasoning on the other side of this port.
 type SecretIssuer interface {
-	IssueWebhookSecret(ctx context.Context, org organizations.OrgID) (access.IssuedWebhookSecret, error)
-	RotateWebhookSecret(ctx context.Context, org organizations.OrgID, overlapHours *int) (access.RotateWebhookSecretResult, error)
-	ActiveWebhookSecrets(ctx context.Context, org organizations.OrgID) ([]string, error)
-	WebhookSecretPrefix(ctx context.Context, org organizations.OrgID) (string, error)
+	IssueWebhookSecret(ctx context.Context, org organizations.OrgID, endpointID string) (access.IssuedWebhookSecret, error)
+	RotateWebhookSecret(ctx context.Context, org organizations.OrgID, endpointID string, overlapHours *int) (access.RotateWebhookSecretResult, error)
+	ActiveWebhookSecrets(ctx context.Context, org organizations.OrgID, endpointID string) ([]string, error)
+	WebhookSecretPrefix(ctx context.Context, org organizations.OrgID, endpointID string) (string, error)
 }
 
 // EndpointCaller is the delivery module's driven port for actually

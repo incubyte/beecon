@@ -1,0 +1,181 @@
+/*
+ * Shared stylesheet for the connect/params/error middle-man pages
+ * (Slice 10, PD48). Values are the design tokens carried forward from
+ * `.claude/DESIGN.md` (the same palette the admin console uses), so the
+ * connect pages and the console read as one product. Previously each
+ * template carried its own verbatim copy of this CSS inline.
+ */
+
+:root {
+  color-scheme: light;
+
+  --connect-primary: #2563eb;
+  --connect-primary-hover: #1d4ed8;
+  --connect-focus-ring: #93c5fd;
+
+  --connect-bg: #f5f6f8;
+  --connect-surface: #ffffff;
+  --connect-border: #e5e7eb;
+  --connect-border-strong: #d1d5db;
+
+  --connect-text: #111827;
+  --connect-text-secondary: #4b5563;
+  --connect-text-muted: #6b7280;
+  --connect-error: #b91c1c;
+
+  --connect-radius-sm: 8px;
+  --connect-radius-lg: 12px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--connect-bg);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.card {
+  background: var(--connect-surface);
+  border: 1px solid var(--connect-border);
+  border-radius: var(--connect-radius-lg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  padding: 32px;
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+}
+
+/* The param-collection form's card is wider and left-aligned so its labels
+   and inputs read naturally; the connect and error cards stay centered. */
+.card--form {
+  max-width: 400px;
+  text-align: left;
+}
+
+.logo {
+  display: block;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  border-radius: var(--connect-radius-sm);
+  object-fit: contain;
+}
+
+h1 {
+  font-size: 18px;
+  line-height: 1.3;
+  margin: 0 0 8px;
+  color: var(--connect-text);
+  text-align: center;
+}
+
+/* The error page's heading uses the error token instead of the default
+   text color; scoped to .error-page so it never leaks into the connect or
+   params pages, which share the same plain h1. */
+.error-page h1 {
+  color: var(--connect-error);
+}
+
+.error-page p {
+  margin: 0;
+}
+
+p {
+  color: var(--connect-text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 24px;
+}
+
+p.intro {
+  text-align: center;
+}
+
+.field {
+  margin-bottom: 20px;
+}
+
+label {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--connect-text);
+  margin-bottom: 4px;
+}
+
+.field-description {
+  color: var(--connect-text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0 0 6px;
+}
+
+input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--connect-border-strong);
+  border-radius: var(--connect-radius-sm);
+  font-size: 15px;
+}
+
+input:focus-visible {
+  outline: 3px solid var(--connect-focus-ring);
+  outline-offset: 1px;
+  border-color: var(--connect-primary);
+}
+
+.field-error {
+  color: var(--connect-error);
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+
+.connect-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 12px 24px;
+  background: var(--connect-primary);
+  color: #ffffff;
+  border: none;
+  text-decoration: none;
+  border-radius: var(--connect-radius-sm);
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+/* The param-collection form's submit button spans the form's full width;
+   the connect page's anchor button sizes to its label. */
+.connect-button--block {
+  display: flex;
+  width: 100%;
+}
+
+.connect-button:hover {
+  background: var(--connect-primary-hover);
+}
+
+.connect-button:focus-visible {
+  outline: 3px solid var(--connect-focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connect-button {
+    transition: none;
+  }
+}

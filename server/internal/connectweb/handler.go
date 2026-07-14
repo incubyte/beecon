@@ -18,20 +18,27 @@ import (
 	"beecon/internal/httpx"
 )
 
-// Handler serves GET /connect/{token} and GET /connect/oauth/callback.
+// Handler serves GET /connect/{token}, GET /connect/oauth/callback, and the
+// shared stylesheet the connect templates link (Slice 10, PD48).
 type Handler struct {
-	facade    *connections.Facade
-	templates *template.Template
+	facade     *connections.Facade
+	templates  *template.Template
+	stylesheet []byte
 }
 
-// NewHandler parses the embedded templates once at wiring time, so a
-// malformed template fails fast at boot rather than on the first request.
+// NewHandler parses the embedded templates and reads the embedded
+// stylesheet once at wiring time, so a malformed template or a missing
+// stylesheet fails fast at boot rather than on the first request.
 func NewHandler(facade *connections.Facade) (*Handler, error) {
 	templates, err := parseTemplates()
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{facade: facade, templates: templates}, nil
+	css, err := stylesheet()
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{facade: facade, templates: templates, stylesheet: css}, nil
 }
 
 // connectPageData is what connect.gohtml renders (AC1): the provider's name
@@ -200,6 +207,15 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, outcome.RedirectURL, http.StatusFound)
+}
+
+// Stylesheet serves the shared design-token stylesheet (Slice 10, PD48) that
+// connect.gohtml, params.gohtml, and error.gohtml link instead of each
+// carrying its own duplicated inline <style> block.
+func (h *Handler) Stylesheet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(h.stylesheet)
 }
 
 func (h *Handler) render(w http.ResponseWriter, status int, name string, data any) {

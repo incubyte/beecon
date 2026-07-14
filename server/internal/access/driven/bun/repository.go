@@ -18,12 +18,15 @@ import (
 
 // ServerApiKeyRow is the server_api_keys table schema. Since migration 0012
 // (Slice 8, PD23) it carries only the key's own identity — no secret
-// material; that lives in ApiKeySecretRow.
+// material; that lives in ApiKeySecretRow. Since migration 0017 (Slice 4,
+// PD41) it also carries Scope; existing rows migrated to "read-write" by
+// the migration's column default.
 type ServerApiKeyRow struct {
 	upstreambun.BaseModel `bun:"table:server_api_keys,alias:k"`
 
 	ID        string     `bun:"id,pk"`
 	OrgID     string     `bun:"org_id,notnull"`
+	Scope     string     `bun:"scope,notnull"`
 	CreatedAt time.Time  `bun:"created_at,notnull"`
 	RevokedAt *time.Time `bun:"revoked_at"`
 }
@@ -185,6 +188,7 @@ func keyRowFrom(key access.ServerApiKey) ServerApiKeyRow {
 	return ServerApiKeyRow{
 		ID:        string(key.ID),
 		OrgID:     string(key.OrgID),
+		Scope:     string(key.Scope),
 		CreatedAt: key.CreatedAt,
 		RevokedAt: key.RevokedAt,
 	}
@@ -194,6 +198,7 @@ func keyFromRow(row *ServerApiKeyRow) access.ServerApiKey {
 	return access.ServerApiKey{
 		ID:        access.KeyID(row.ID),
 		OrgID:     organizations.OrgID(row.OrgID),
+		Scope:     access.Scope(row.Scope),
 		CreatedAt: row.CreatedAt,
 		RevokedAt: row.RevokedAt,
 	}
@@ -264,6 +269,7 @@ func candidatesFrom(secretRows []ApiKeySecretRow, keyRowsByID map[string]ServerA
 		candidates = append(candidates, access.ApiKeySecretCandidate{
 			KeyID:     access.KeyID(keyRow.ID),
 			OrgID:     organizations.OrgID(keyRow.OrgID),
+			Scope:     access.Scope(keyRow.Scope),
 			RevokedAt: keyRow.RevokedAt,
 			Secret:    secret,
 		})

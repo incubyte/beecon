@@ -39,6 +39,38 @@ func toIntegrationSummaryDTOs(summaries []catalog.IntegrationSummary) []integrat
 	return dtos
 }
 
+// integrationVisibilityDTO is ListWithVisibility's response shape (Slice 5,
+// AC1): the same integration identity fields as integrationSummaryDTO plus
+// its effective visibility for the requested org.
+type integrationVisibilityDTO struct {
+	ID           string `json:"id"`
+	ProviderSlug string `json:"providerSlug"`
+	Name         string `json:"name"`
+	Logo         string `json:"logo"`
+	AuthScheme   string `json:"authScheme"`
+	Visibility   string `json:"visibility"`
+}
+
+func toIntegrationVisibilityDTO(item catalog.IntegrationVisibility) integrationVisibilityDTO {
+	summary := toIntegrationSummaryDTO(item.Integration)
+	return integrationVisibilityDTO{
+		ID:           summary.ID,
+		ProviderSlug: summary.ProviderSlug,
+		Name:         summary.Name,
+		Logo:         summary.Logo,
+		AuthScheme:   summary.AuthScheme,
+		Visibility:   item.Visibility,
+	}
+}
+
+func toIntegrationVisibilityDTOs(items []catalog.IntegrationVisibility) []integrationVisibilityDTO {
+	dtos := make([]integrationVisibilityDTO, 0, len(items))
+	for _, item := range items {
+		dtos = append(dtos, toIntegrationVisibilityDTO(item))
+	}
+	return dtos
+}
+
 // toolProviderDTO is the provider identity nested inside a toolSummaryDTO
 // (API Shape): a consumer addressing tools by slug alone (PD8) still needs
 // to know which provider a tool belongs to.
@@ -177,4 +209,66 @@ func toTriggerDefinitionsPageDTO(page catalog.TriggerDefinitionPage) triggerDefi
 		items = append(items, toTriggerDefinitionSummaryDTO(trigger))
 	}
 	return triggerDefinitionsPageDTO{Items: items, NextCursor: page.NextCursor}
+}
+
+// providerDefinitionSummaryDTO is one row of GET /api/v1/provider-definitions
+// (PD40, Slice 6, AC1): the operator's unfiltered, installation-wide view —
+// name/logo/authScheme identify the provider, formatVersion names the
+// definition format it was parsed under, and toolCount/triggerCount let an
+// operator scan the catalog without opening every provider's full detail.
+type providerDefinitionSummaryDTO struct {
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	Logo          string `json:"logo"`
+	AuthScheme    string `json:"authScheme"`
+	FormatVersion int    `json:"formatVersion"`
+	ToolCount     int    `json:"toolCount"`
+	TriggerCount  int    `json:"triggerCount"`
+}
+
+func toProviderDefinitionSummaryDTO(summary catalog.ProviderDefinitionSummary) providerDefinitionSummaryDTO {
+	return providerDefinitionSummaryDTO{
+		Slug:          summary.Slug,
+		Name:          summary.Name,
+		Logo:          summary.Logo,
+		AuthScheme:    summary.AuthScheme,
+		FormatVersion: summary.FormatVersion,
+		ToolCount:     summary.ToolCount,
+		TriggerCount:  summary.TriggerCount,
+	}
+}
+
+// providerDefinitionsPageDTO is one cursor-paginated page of provider
+// definition summaries (PD15): nextCursor is empty when this was the last
+// page.
+type providerDefinitionsPageDTO struct {
+	Items      []providerDefinitionSummaryDTO `json:"items"`
+	NextCursor string                         `json:"nextCursor,omitempty"`
+}
+
+func toProviderDefinitionsPageDTO(page catalog.ProviderDefinitionPage) providerDefinitionsPageDTO {
+	items := make([]providerDefinitionSummaryDTO, 0, len(page.Items))
+	for _, summary := range page.Items {
+		items = append(items, toProviderDefinitionSummaryDTO(summary))
+	}
+	return providerDefinitionsPageDTO{Items: items, NextCursor: page.NextCursor}
+}
+
+// providerDefinitionDetailDTO is GET /api/v1/provider-definitions/{slug}'s
+// response (PD40, Slice 6, AC2): the definition's full versioned bundle,
+// rendered client-side in a collapsible, copyable mono JSON/YAML viewer.
+type providerDefinitionDetailDTO struct {
+	Slug          string         `json:"slug"`
+	Name          string         `json:"name"`
+	FormatVersion int            `json:"formatVersion"`
+	Bundle        map[string]any `json:"bundle"`
+}
+
+func toProviderDefinitionDetailDTO(detail catalog.ProviderDefinitionBundleDetail) providerDefinitionDetailDTO {
+	return providerDefinitionDetailDTO{
+		Slug:          detail.Slug,
+		Name:          detail.Name,
+		FormatVersion: detail.FormatVersion,
+		Bundle:        detail.Bundle,
+	}
 }

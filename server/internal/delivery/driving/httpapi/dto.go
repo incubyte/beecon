@@ -102,3 +102,125 @@ func toEventsPageDTO(result delivery.ListEventsResult) eventsPageDTO {
 	}
 	return eventsPageDTO{Items: items, NextCursor: result.NextCursor}
 }
+
+// eventTypesPointer renders a nil EventTypes filter as JSON null (match
+// every event type, PD45) rather than an empty array, matching the API
+// Shape's `eventTypes|null`; a non-nil (possibly multi-element) filter
+// renders as its own JSON array.
+func eventTypesPointer(types []string) *[]string {
+	if types == nil {
+		return nil
+	}
+	return &types
+}
+
+// endpointListItemDTO is one item in GET /api/v1/webhook-endpoints'
+// response (Slice 8, API Shape): never a secret, only its display prefix.
+type endpointListItemDTO struct {
+	ID                  string    `json:"id"`
+	URL                 string    `json:"url"`
+	EventTypes          *[]string `json:"eventTypes"`
+	Status              string    `json:"status"`
+	ConsecutiveFailures int       `json:"consecutiveFailures"`
+	SecretPrefix        string    `json:"secretPrefix"`
+	CreatedAt           string    `json:"createdAt"`
+}
+
+func toEndpointListItemDTO(item delivery.EndpointListItem) endpointListItemDTO {
+	return endpointListItemDTO{
+		ID:                  string(item.ID),
+		URL:                 item.URL,
+		EventTypes:          eventTypesPointer(item.EventTypes),
+		Status:              string(item.Status),
+		ConsecutiveFailures: item.ConsecutiveFailures,
+		SecretPrefix:        item.SecretPrefix,
+		CreatedAt:           item.CreatedAt.Format(rfc3339Millis),
+	}
+}
+
+// endpointListDTO is GET /api/v1/webhook-endpoints' response envelope
+// (Slice 8, API Shape) — a flat items array, no cursor pagination (the cap
+// keeps an org's own endpoint count small).
+type endpointListDTO struct {
+	Items []endpointListItemDTO `json:"items"`
+}
+
+func toEndpointListDTO(items []delivery.EndpointListItem) endpointListDTO {
+	dtos := make([]endpointListItemDTO, 0, len(items))
+	for _, item := range items {
+		dtos = append(dtos, toEndpointListItemDTO(item))
+	}
+	return endpointListDTO{Items: dtos}
+}
+
+// createEndpointRequest is POST /api/v1/webhook-endpoints' request body
+// (Slice 8, API Shape): EventTypes absent or JSON null means "match every
+// event type" (PD45); present (even []) restricts the endpoint to exactly
+// those types.
+type createEndpointRequest struct {
+	URL        string    `json:"url"`
+	EventTypes *[]string `json:"eventTypes"`
+}
+
+func (req createEndpointRequest) eventTypes() []string {
+	if req.EventTypes == nil {
+		return nil
+	}
+	return *req.EventTypes
+}
+
+// createEndpointDTO is CreateEndpoint's response (Slice 8, API Shape): the
+// secret shown exactly once, at creation.
+type createEndpointDTO struct {
+	ID         string    `json:"id"`
+	URL        string    `json:"url"`
+	EventTypes *[]string `json:"eventTypes"`
+	Secret     string    `json:"secret"`
+}
+
+func toCreateEndpointDTO(result delivery.CreateEndpointResult) createEndpointDTO {
+	return createEndpointDTO{
+		ID:         string(result.ID),
+		URL:        result.URL,
+		EventTypes: eventTypesPointer(result.EventTypes),
+		Secret:     result.Secret,
+	}
+}
+
+// updateEndpointRequest is PUT /api/v1/webhook-endpoints/{wepId}'s request
+// body (Slice 8, API Shape): a whole-object update — url is always
+// required (mirroring setWebhookEndpointRequest's own rule), eventTypes
+// nil clears the filter back to "match every type".
+type updateEndpointRequest struct {
+	URL        string    `json:"url"`
+	EventTypes *[]string `json:"eventTypes"`
+}
+
+func (req updateEndpointRequest) eventTypes() []string {
+	if req.EventTypes == nil {
+		return nil
+	}
+	return *req.EventTypes
+}
+
+// updateEndpointDTO is UpdateEndpoint's/EnableEndpoint's/DisableEndpoint's
+// shared response shape (Slice 8): never a secret.
+type updateEndpointDTO struct {
+	ID                  string    `json:"id"`
+	URL                 string    `json:"url"`
+	EventTypes          *[]string `json:"eventTypes"`
+	Status              string    `json:"status"`
+	ConsecutiveFailures int       `json:"consecutiveFailures"`
+	CreatedAt           string    `json:"createdAt"`
+}
+
+func toUpdateEndpointDTO(result delivery.UpdateEndpointResult) updateEndpointDTO {
+	return updateEndpointDTO{
+		ID:                  string(result.ID),
+		URL:                 result.URL,
+		EventTypes:          eventTypesPointer(result.EventTypes),
+		Status:              string(result.Status),
+		ConsecutiveFailures: result.ConsecutiveFailures,
+		CreatedAt:           result.CreatedAt.Format(rfc3339Millis),
+	}
+}

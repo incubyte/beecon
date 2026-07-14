@@ -147,6 +147,23 @@ func TestOrganizationsUserRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestOrganizationsGovernanceRepository_EveryMethodIsOrgScoped: Slice 5
+// (PD42/PD43) — a Governance settings record belongs to exactly one
+// organization (its primary key IS the organization_id, migration 0018), and
+// Slice 5's own AC requires that changing one org's governance never affects
+// another's, so every persistence-port operation on it must take that
+// organization's id. FindByOrg takes organizations.OrgID directly;
+// SaveGovernance takes the whole Governance (which itself carries an OrgID
+// field) — the same "Save(ctx, wholeEntity)" shape goodInterface's own
+// fixture above documents as acceptable.
+func TestOrganizationsGovernanceRepository_EveryMethodIsOrgScoped(t *testing.T) {
+	got := orgScopeViolations(reflect.TypeOf((*organizations.GovernanceRepository)(nil)).Elem())
+
+	if len(got) != 0 {
+		t.Fatalf("organizations.GovernanceRepository has org-scope violations: %v", got)
+	}
+}
+
 // TestConnectionsRepository_EveryMethodIsOrgScoped: Slice 3 (BOUNDARIES:
 // connections depends on organizations) — a Connection belongs to exactly one
 // organization, so every persistence-port method must take that organization
@@ -251,9 +268,16 @@ func TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
 // "kid" header before any organization is known, pre-auth exactly like
 // PrefixLookup; organizations.Repository operates on Organization itself,
 // which IS the isolation unit with no wider scope to filter by;
-// catalog.Repository is installation-level by design (PD7: an Integration is
-// visible to every organization in the installation) — there is no
-// organization id to filter by; connections.OAuthRepository is deliberately
+// organizations.Repository's own ListAll (Slice 1, PD40) is the same
+// installation-level shape once more: an operator-only view over every
+// organization in the installation, guarded by AdminAuth rather than any
+// org-scoped key — see
+// TestOrganizationsRepository_ListAllWouldFailOrgScopingIfNotWhitelisted
+// (organizations_repository_installation_level_test.go) for the pinning
+// test that proves this whitelist entry is deliberate; catalog.Repository is
+// installation-level by design (PD7: an Integration is visible to every
+// organization in the installation) — there is no organization id to filter
+// by; connections.OAuthRepository is deliberately
 // pre-auth (Slice 4): the connect page and OAuth callback authenticate a
 // connection attempt through its single-use connect token or CSRF state,
 // arriving in the end user's browser before any organization API key is

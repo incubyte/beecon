@@ -1,11 +1,13 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"beecon/internal/catalog"
+	"beecon/internal/organizations"
 	"beecon/internal/vault"
 )
 
@@ -17,13 +19,27 @@ var fixedTestTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 var defaultTestVaultKey = []byte("catalog-test-vault-key-32-bytes!")
 
 // Overrides configures NewFacadeWithOverrides. Any zero-value field falls
-// back to a deterministic in-memory default.
+// back to a deterministic in-memory default. Governance defaults to
+// unrestrictedGovernanceReader (Slice 5) — every org inherits the full
+// catalog unless a test explicitly wires its own organizations.GovernanceReader
+// (or the real organizations.Facade), matching PD42's continuity guarantee
+// for every catalog test written before governance existed.
 type Overrides struct {
 	Repository  catalog.Repository
 	Definitions []catalog.ProviderDefinition
 	NewID       func() string
 	Now         func() time.Time
 	Vault       *vault.Vault
+	Governance  organizations.GovernanceReader
+}
+
+// unrestrictedGovernanceReader is the default Overrides.Governance: every
+// organization inherits the full installation catalog (PD42's default),
+// regardless of which org id is asked about.
+type unrestrictedGovernanceReader struct{}
+
+func (unrestrictedGovernanceReader) GetGovernance(_ context.Context, org organizations.OrgID) (organizations.Governance, error) {
+	return organizations.NewDefaultGovernance(org), nil
 }
 
 // NewFacadeWithOverrides builds a catalog.Facade backed by the in-memory
@@ -57,7 +73,11 @@ func NewFacadeWithOverrides(o Overrides) (*catalog.Facade, error) {
 	if tokenVault == nil {
 		tokenVault, _ = vault.NewVault(defaultTestVaultKey)
 	}
-	return catalog.NewFacade(repository, definitions, newID, now, tokenVault), nil
+	governance := o.Governance
+	if governance == nil {
+		governance = unrestrictedGovernanceReader{}
+	}
+	return catalog.NewFacade(repository, definitions, newID, now, tokenVault, governance), nil
 }
 
 func sequentialIDs(prefix string) func() string {

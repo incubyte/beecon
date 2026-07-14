@@ -26,10 +26,23 @@ func NewHandler(facade *access.Facade, errors *httpx.ErrorRenderer) *Handler {
 }
 
 // Issue handles POST /api/v1/organizations/{orgId}/api-keys: the full
-// secret is returned exactly once, at creation.
+// secret is returned exactly once, at creation. An optional "scope" body
+// field chooses "read-only" or "read-write" (PD41, Slice 4); an empty or
+// absent body defaults to "read-write", so every pre-existing caller keeps
+// full access.
 func (h *Handler) Issue(w http.ResponseWriter, r *http.Request) {
 	org := organizations.OrgID(chi.URLParam(r, "orgId"))
-	issued, err := h.facade.Issue(r.Context(), org)
+	var req issueKeyRequestDTO
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		h.errors.WriteError(w, r, access.ErrValidation("scope", "request body must be valid JSON"))
+		return
+	}
+	scope, err := access.ParseScope(req.Scope)
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	issued, err := h.facade.Issue(r.Context(), org, scope)
 	if err != nil {
 		h.errors.WriteError(w, r, err)
 		return

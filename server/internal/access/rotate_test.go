@@ -33,7 +33,7 @@ func newFacadeWithClock(clock *movableClock) *access.Facade {
 func TestRotate_TheNewSecretAuthenticatesImmediately(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -47,15 +47,15 @@ func TestRotate_TheNewSecretAuthenticatesImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the freshly rotated secret must authenticate immediately, got error: %v", err)
 	}
-	if got != orgA {
-		t.Errorf("Verify(rotated secret) org = %q, want %q", got, orgA)
+	if got.OrgID != orgA {
+		t.Errorf("Verify(rotated secret) org = %q, want %q", got.OrgID, orgA)
 	}
 }
 
 func TestRotate_ReturnsANewSecretDifferentFromTheOriginalAndPrefixedCorrectly(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRotate_ReturnsANewSecretDifferentFromTheOriginalAndPrefixedCorrectly(t 
 func TestRotate_TheOldSecretStillAuthenticatesInsideTheDefaultOverlapWindow(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,15 +96,15 @@ func TestRotate_TheOldSecretStillAuthenticatesInsideTheDefaultOverlapWindow(t *t
 	if err != nil {
 		t.Fatalf("the old secret must still authenticate one nanosecond before the default %dh overlap window ends, got error: %v", access.DefaultOverlapHours, err)
 	}
-	if got != orgA {
-		t.Errorf("Verify(old secret) org = %q, want %q", got, orgA)
+	if got.OrgID != orgA {
+		t.Errorf("Verify(old secret) org = %q, want %q", got.OrgID, orgA)
 	}
 }
 
 func TestRotate_TheOldSecretIsRejectedOnceTheDefaultOverlapWindowEnds(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRotate_TheOldSecretIsRejectedOnceTheDefaultOverlapWindowEnds(t *testing
 func TestRotate_ACustomOverlapHoursOverridesTheDefaultAndIsHonoredByVerify(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRotate_ReturnsNotFoundForAnUnknownKeyID(t *testing.T) {
 // secret was even created).
 func TestRotate_ReturnsValidationErrorForANegativeOverlapHours(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRotate_ReturnsValidationErrorForANegativeOverlapHours(t *testing.T) {
 
 func TestRotate_ReturnsNotFoundForAKeyBelongingToAnotherOrg(t *testing.T) {
 	f := newFacade()
-	issuedToA, err := f.Issue(context.Background(), orgA)
+	issuedToA, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRotate_ReturnsNotFoundForAKeyBelongingToAnotherOrg(t *testing.T) {
 // a secret that can never authenticate.
 func TestRotate_OnAnAlreadyRevokedKeyIsRejectedAsNotFound(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestRotate_OnAnAlreadyRevokedKeyIsRejectedAsNotFound(t *testing.T) {
 func TestRotate_ASecondRotationBeforeTheFirstOverlapWindowEndsImmediatelyRejectsTheOriginalSecret(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestRotate_ASecondRotationBeforeTheFirstOverlapWindowEndsImmediatelyRejects
 
 func TestList_ShowsNoRotationStateBeforeAnyRotation(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestList_ShowsNoRotationStateBeforeAnyRotation(t *testing.T) {
 func TestList_ShowsRotatedAtAndOverlapExpiresAtAfterARotationAndNeverAnySecret(t *testing.T) {
 	clock := newMovableClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f := newFacadeWithClock(clock)
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestList_ShowsRotatedAtAndOverlapExpiresAtAfterARotationAndNeverAnySecret(t
 
 func TestRevoke_AfterARotationImmediatelyRejectsBothTheOldAndNewSecret(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -377,8 +377,8 @@ func TestVerify_PicksTheCorrectSecretByHashAcrossTheSecretsTableWhenTwoDifferent
 			t.Errorf("%s: unexpected error: %v", name, err)
 			continue
 		}
-		if got != tc.wantOrg {
-			t.Errorf("%s: Verify() org = %q, want %q", name, got, tc.wantOrg)
+		if got.OrgID != tc.wantOrg {
+			t.Errorf("%s: Verify() org = %q, want %q", name, got.OrgID, tc.wantOrg)
 		}
 	}
 

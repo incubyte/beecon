@@ -1,6 +1,7 @@
 package organizations
 
 import (
+	"fmt"
 	"net/http"
 
 	"beecon/internal/httpx"
@@ -39,4 +40,25 @@ func ErrValidation(field, issue string) *httpx.DomainError {
 // surfaces identically — no existence leak (PD5).
 func ErrUserNotFound() *httpx.DomainError {
 	return httpx.New(http.StatusNotFound, CodeNotFound, "user not found")
+}
+
+// ErrInvalidCursor is returned when ListAll is given a pagination cursor
+// that is not valid base64, or does not decode to the created_at/id shape
+// ListAll itself encodes (Slice 1, PD40).
+func ErrInvalidCursor() *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
+		WithDetails(map[string]any{"field": "cursor", "issue": "malformed pagination cursor"})
+}
+
+// ErrUnsupportedSchemaVersion is returned when a config import document's
+// schemaVersion is not CurrentConfigSchemaVersion (Slice 9, PD46): checked
+// first, before anything else in ImportConfig, so a document from an
+// unknown or incompatible schema version is rejected and nothing is read or
+// written.
+func ErrUnsupportedSchemaVersion(version int) *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "unsupported config schema version").
+		WithDetails(map[string]any{
+			"field": "schemaVersion",
+			"issue": fmt.Sprintf("version %d is not supported (expected %d)", version, CurrentConfigSchemaVersion),
+		})
 }

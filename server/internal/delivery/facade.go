@@ -31,30 +31,38 @@ const leaseMargin = 5 * time.Second
 
 // Facade is the delivery module's only public surface.
 type Facade struct {
-	repo            Repository
-	workQueue       WorkQueue
-	secrets         SecretIssuer
-	caller          EndpointCaller
-	recorder        Recorder
-	metrics         *metrics.Registry
-	outboxStats     OutboxStats
-	newEndpointID   func() string
-	newEventID      func() string
-	deliveryTimeout time.Duration
-	jitter          func() float64
-	nudge           func()
-	now             func() time.Time
+	repo                 Repository
+	workQueue            WorkQueue
+	secrets              SecretIssuer
+	caller               EndpointCaller
+	recorder             Recorder
+	metrics              *metrics.Registry
+	outboxStats          OutboxStats
+	retention            RetentionReader
+	newEndpointID        func() string
+	newEventID           func() string
+	deliveryTimeout      time.Duration
+	endpointCap          int
+	autoDisableThreshold int
+	jitter               func() float64
+	nudge                func()
+	now                  func() time.Time
 }
 
 // NewFacade wires the facade with its driven Repository, the
 // installation-level WorkQueue DispatchOnce claims through, the
 // access-provided SecretIssuer port, the EndpointCaller driven adapter, the
 // consumer-defined Recorder port (nil is a silent no-op), injected id
-// minters, BEECON_DELIVERY_TIMEOUT, and a clock so tests can supply
-// deterministic ids and a fixed time. Jitter defaults to math/rand.Float64
-// (WithJitter overrides it for deterministic tests); nudge defaults to a
-// no-op (WithNudge wires it to the dispatcher loop's wake, so Enqueue's
-// first attempt runs promptly instead of waiting out the scan interval).
+// minters, BEECON_DELIVERY_TIMEOUT, BEECON_WEBHOOK_ENDPOINT_CAP (Slice 8,
+// PD45 — CreateEndpoint rejects a request that would push an org past this
+// many endpoints), BEECON_ENDPOINT_AUTODISABLE_FAILURES (Slice 8, PD45 —
+// dispatchOne's inline auto-disable bookkeeping flips an endpoint to
+// DISABLED_AUTO after this many consecutive terminal FAILED deliveries),
+// and a clock so tests can supply deterministic ids and a fixed time.
+// Jitter defaults to math/rand.Float64 (WithJitter overrides it for
+// deterministic tests); nudge defaults to a no-op (WithNudge wires it to
+// the dispatcher loop's wake, so Enqueue's first attempt runs promptly
+// instead of waiting out the scan interval).
 func NewFacade(
 	repo Repository,
 	workQueue WorkQueue,
@@ -64,20 +72,24 @@ func NewFacade(
 	newEndpointID func() string,
 	newEventID func() string,
 	deliveryTimeout time.Duration,
+	endpointCap int,
+	autoDisableThreshold int,
 	now func() time.Time,
 ) *Facade {
 	return &Facade{
-		repo:            repo,
-		workQueue:       workQueue,
-		secrets:         secrets,
-		caller:          caller,
-		recorder:        recorder,
-		newEndpointID:   newEndpointID,
-		newEventID:      newEventID,
-		deliveryTimeout: deliveryTimeout,
-		jitter:          rand.Float64,
-		nudge:           func() {},
-		now:             now,
+		repo:                 repo,
+		workQueue:            workQueue,
+		secrets:              secrets,
+		caller:               caller,
+		recorder:             recorder,
+		newEndpointID:        newEndpointID,
+		newEventID:           newEventID,
+		deliveryTimeout:      deliveryTimeout,
+		endpointCap:          endpointCap,
+		autoDisableThreshold: autoDisableThreshold,
+		jitter:               rand.Float64,
+		nudge:                func() {},
+		now:                  now,
 	}
 }
 
@@ -119,6 +131,50 @@ func (f *Facade) WithOutboxStats(stats OutboxStats) *Facade {
 	return f
 }
 
+// WithRetention wires PurgeOnce's RetentionReader port (Slice 7, PD44). A
+// Facade built without one (NewFacade's own zero value) makes PurgeOnce a
+// silent no-op, the same nil-safe convention WithOutboxStats/WithMetrics
+// already established.
+func (f *Facade) WithRetention(retention RetentionReader) *Facade {
+	f.retention = retention
+	return f
+}
+
+// PurgeOnce is the purge worker's Run func for delivery's half of PD44
+// (Slice 7): for every organization in the installation, it resolves that
+// org's own effective event-retention window and, unless the window is 0
+// (unlimited/disabled — skipped entirely), hard-deletes its outbox events
+// that are BOTH past the window AND in a terminal Status
+// (TerminalStatuses: DELIVERED/FAILED/NO_ENDPOINT). PENDING (or any future
+// in-flight/retrying status) never matches that predicate, so a pending or
+// retry-scheduled event survives a purge run regardless of its age — the
+// critical guarantee this method exists to uphold. A Facade built without
+// WithRetention makes this a silent no-op.
+func (f *Facade) PurgeOnce(ctx context.Context) error {
+	if f.retention == nil {
+		return nil
+	}
+	orgs, err := f.retention.ListOrgIDs(ctx)
+	if err != nil {
+		return err
+	}
+	now := f.now()
+	for _, org := range orgs {
+		days, err := f.retention.EffectiveEventRetentionDays(ctx, org)
+		if err != nil {
+			return err
+		}
+		if days <= 0 {
+			continue
+		}
+		cutoff := now.AddDate(0, 0, -days)
+		if _, err := f.repo.PurgeTerminalOlderThan(ctx, org, cutoff); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // OutboxPendingDepth returns how many outbox events are currently PENDING
 // (PD38d) — the outbox-depth metrics gauge's data source, queried fresh at
 // every scrape (a GaugeFunc) rather than maintained as a running counter.
@@ -151,10 +207,14 @@ type SetEndpointResult struct {
 	Secret    string
 }
 
-// SetEndpoint sets org's single webhook endpoint URL (PD31). A first call
-// for org mints a fresh signing secret (returned exactly once, in Secret);
-// a later call that only changes the URL keeps the existing secret (Secret
-// is empty). url must be an absolute http(s) URL.
+// SetEndpoint is the PD31 single-endpoint API kept as a compatibility
+// alias over the org's first endpoint (Slice 8, PD45): existing SDK/Phase 3
+// callers keep working unchanged. A first call for org creates that first
+// endpoint (no event-type filter, ENABLED — identical to Phase 3's own
+// behavior) and mints a fresh signing secret (returned exactly once, in
+// Secret); a later call updates that same first endpoint's URL only,
+// leaving its filter/status/failure count untouched (Secret is empty). url
+// must be an absolute http(s) URL.
 func (f *Facade) SetEndpoint(ctx context.Context, org organizations.OrgID, url string) (SetEndpointResult, error) {
 	if err := ValidateEndpointURL(url); err != nil {
 		return SetEndpointResult{}, err
@@ -166,27 +226,45 @@ func (f *Facade) SetEndpoint(ctx context.Context, org organizations.OrgID, url s
 	if existing != nil {
 		return f.updateEndpointURL(ctx, *existing, url)
 	}
-	return f.createEndpoint(ctx, org, url)
+	endpoint, secret, err := f.createEndpoint(ctx, org, url, nil)
+	if err != nil {
+		return SetEndpointResult{}, err
+	}
+	return SetEndpointResult{ID: endpoint.ID, URL: endpoint.URL, CreatedAt: endpoint.CreatedAt, Secret: secret}, nil
 }
 
 func (f *Facade) updateEndpointURL(ctx context.Context, existing Endpoint, url string) (SetEndpointResult, error) {
-	updated := Endpoint{ID: existing.ID, OrgID: existing.OrgID, URL: url, CreatedAt: existing.CreatedAt}
+	updated := existing
+	updated.URL = url
 	if err := f.repo.SaveEndpoint(ctx, updated); err != nil {
 		return SetEndpointResult{}, err
 	}
 	return SetEndpointResult{ID: updated.ID, URL: updated.URL, CreatedAt: updated.CreatedAt}, nil
 }
 
-func (f *Facade) createEndpoint(ctx context.Context, org organizations.OrgID, url string) (SetEndpointResult, error) {
-	issued, err := f.secrets.IssueWebhookSecret(ctx, org)
+// createEndpoint mints a fresh endpoint id, issues that endpoint's own
+// whsec_ secret (per-endpoint secrets, Slice 8 — the secret is issued
+// against the endpoint's own id, not just the org's), and persists the
+// endpoint ENABLED with zero consecutive failures. Shared by SetEndpoint
+// (the PD31 alias, always eventTypes nil) and CreateEndpoint (the
+// multi-endpoint CRUD surface, eventTypes optionally set).
+func (f *Facade) createEndpoint(ctx context.Context, org organizations.OrgID, url string, eventTypes []string) (Endpoint, string, error) {
+	endpoint := Endpoint{
+		ID:         EndpointID(f.newEndpointID()),
+		OrgID:      org,
+		URL:        url,
+		EventTypes: eventTypes,
+		Status:     EndpointStatusEnabled,
+		CreatedAt:  f.now(),
+	}
+	issued, err := f.secrets.IssueWebhookSecret(ctx, org, string(endpoint.ID))
 	if err != nil {
-		return SetEndpointResult{}, err
+		return Endpoint{}, "", err
 	}
-	endpoint := Endpoint{ID: EndpointID(f.newEndpointID()), OrgID: org, URL: url, CreatedAt: f.now()}
 	if err := f.repo.SaveEndpoint(ctx, endpoint); err != nil {
-		return SetEndpointResult{}, err
+		return Endpoint{}, "", err
 	}
-	return SetEndpointResult{ID: endpoint.ID, URL: endpoint.URL, CreatedAt: endpoint.CreatedAt, Secret: issued.Secret}, nil
+	return endpoint, issued.Secret, nil
 }
 
 // EndpointView is GetEndpoint's response: URL, secret prefix, and creation
@@ -199,8 +277,8 @@ type EndpointView struct {
 	CreatedAt    time.Time
 }
 
-// GetEndpoint returns org's configured webhook endpoint. An org with none
-// configured yet is not-found.
+// GetEndpoint is the PD31 alias's read: org's first endpoint (Slice 8). An
+// org with none configured yet is not-found.
 func (f *Facade) GetEndpoint(ctx context.Context, org organizations.OrgID) (EndpointView, error) {
 	endpoint, err := f.repo.FindEndpoint(ctx, org)
 	if err != nil {
@@ -209,24 +287,23 @@ func (f *Facade) GetEndpoint(ctx context.Context, org organizations.OrgID) (Endp
 	if endpoint == nil {
 		return EndpointView{}, ErrNotFound()
 	}
-	prefix, err := f.secrets.WebhookSecretPrefix(ctx, org)
+	prefix, err := f.secrets.WebhookSecretPrefix(ctx, org, string(endpoint.ID))
 	if err != nil {
 		return EndpointView{}, err
 	}
 	return EndpointView{ID: endpoint.ID, URL: endpoint.URL, SecretPrefix: prefix, CreatedAt: endpoint.CreatedAt}, nil
 }
 
-// RotateSecretResult is RotateSecret's response: the new secret, returned
-// exactly once.
+// RotateSecretResult is RotateSecret's/RotateEndpointSecret's response: the
+// new secret, returned exactly once.
 type RotateSecretResult struct {
 	Secret           string
 	Prefix           string
 	OverlapExpiresAt time.Time
 }
 
-// RotateSecret mints a fresh webhook signing secret for org's endpoint
-// (PD31, mirroring PD23): deliveries during the overlap window carry
-// signatures from both secrets. An org with no configured endpoint is
+// RotateSecret is the PD31 alias's rotate: org's first endpoint's secret
+// (Slice 8, mirroring PD23). An org with no configured endpoint is
 // rejected with a validation error — there is nothing to rotate.
 func (f *Facade) RotateSecret(ctx context.Context, org organizations.OrgID, overlapHours *int) (RotateSecretResult, error) {
 	endpoint, err := f.repo.FindEndpoint(ctx, org)
@@ -236,17 +313,25 @@ func (f *Facade) RotateSecret(ctx context.Context, org organizations.OrgID, over
 	if endpoint == nil {
 		return RotateSecretResult{}, ErrNoEndpoint()
 	}
-	rotated, err := f.secrets.RotateWebhookSecret(ctx, org, overlapHours)
+	return f.rotateSecretForEndpoint(ctx, org, *endpoint, overlapHours)
+}
+
+func (f *Facade) rotateSecretForEndpoint(ctx context.Context, org organizations.OrgID, endpoint Endpoint, overlapHours *int) (RotateSecretResult, error) {
+	rotated, err := f.secrets.RotateWebhookSecret(ctx, org, string(endpoint.ID), overlapHours)
 	if err != nil {
 		return RotateSecretResult{}, err
 	}
 	return RotateSecretResult{Secret: rotated.Secret, Prefix: rotated.Prefix, OverlapExpiresAt: rotated.OverlapExpiresAt}, nil
 }
 
-// SendTest enqueues a signed webhook.test event at org's configured
-// endpoint, proving the channel works before anything real depends on it.
-// An org with no configured endpoint is rejected with a validation error
-// (rather than silently landing NO_ENDPOINT, unlike every other event
+// SendTest enqueues a signed webhook.test event directly at org's first
+// endpoint (the PD31 alias target, Slice 8) — deliberately bypassing that
+// endpoint's own event-type filter and enabled/disabled status (unlike
+// ordinary fan-out, Enqueue below): a requested test targets one specific
+// endpoint's reachability, so it must still run even for a filtered or
+// disabled endpoint an operator is trying to diagnose before re-enabling
+// it. An org with no configured endpoint is rejected with a validation
+// error (rather than silently landing NO_ENDPOINT, unlike every other event
 // type) — requesting a test delivery only makes sense once there is
 // somewhere to deliver it.
 func (f *Facade) SendTest(ctx context.Context, org organizations.OrgID) (Event, error) {
@@ -257,48 +342,310 @@ func (f *Facade) SendTest(ctx context.Context, org organizations.OrgID) (Event, 
 	if endpoint == nil {
 		return Event{}, ErrNoEndpoint()
 	}
-	return f.Enqueue(ctx, org, EventTypeWebhookTest, map[string]any{})
+	return f.enqueueToEndpoint(ctx, *endpoint, EventTypeWebhookTest, map[string]any{})
 }
 
-// Enqueue marshals the PD32 envelope exactly once and persists it (the
-// outbox's own durability guarantee: an event accepted just before a
-// restart is still delivered after it). An org with no configured
-// endpoint gets Status NO_ENDPOINT and zero attempts (FD7); otherwise the
-// event is PENDING with its first attempt due immediately (PD30), and the
-// dispatcher loop is nudged so that first attempt runs promptly.
-func (f *Facade) Enqueue(ctx context.Context, org organizations.OrgID, eventType string, data any) (Event, error) {
+// Enqueue marshals the PD32 envelope once per matching endpoint and
+// persists each (the outbox's own durability guarantee: an event accepted
+// just before a restart is still delivered after it). It fans out (Slice 8,
+// PD45) to every ENABLED endpoint whose own event-type filter matches
+// eventType — nil filter matches everything, so a migrated Phase 3 org
+// (exactly one endpoint, no filter) fans out to exactly that one endpoint,
+// byte-for-byte the old single-delivery behavior. Each matching endpoint
+// gets its own Event row (own id, own retry schedule) — one endpoint's
+// failure never blocks another. An org with no ENABLED, filter-matching
+// endpoint at all (including "no endpoint configured", Phase 3's own case)
+// gets a single Status NO_ENDPOINT placeholder Event instead (FD7); the
+// dispatcher loop is nudged whenever at least one PENDING event was
+// created, so the first attempt runs promptly (PD30's "immediately").
+func (f *Facade) Enqueue(ctx context.Context, org organizations.OrgID, eventType string, data any) ([]Event, error) {
+	endpoints, err := f.repo.ListEndpoints(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	matching := matchingEnabledEndpoints(endpoints, eventType)
+	if len(matching) == 0 {
+		event, err := f.enqueueUnrouted(ctx, org, eventType, data)
+		if err != nil {
+			return nil, err
+		}
+		return []Event{event}, nil
+	}
+
+	events := make([]Event, 0, len(matching))
+	for _, endpoint := range matching {
+		event, err := f.enqueueToEndpoint(ctx, endpoint, eventType, data)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+// matchingEnabledEndpoints narrows endpoints to the ones Enqueue's fan-out
+// selects: ENABLED (never DISABLED or DISABLED_AUTO) and passing the
+// endpoint's own event-type filter for eventType.
+func matchingEnabledEndpoints(endpoints []Endpoint, eventType string) []Endpoint {
+	matches := make([]Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.IsEnabled() && endpoint.MatchesEventType(eventType) {
+			matches = append(matches, endpoint)
+		}
+	}
+	return matches
+}
+
+// enqueueToEndpoint persists one PENDING Event addressed at a specific,
+// already-selected endpoint — the fan-out unit both Enqueue's loop and
+// SendTest's direct, filter-bypassing delivery share.
+func (f *Facade) enqueueToEndpoint(ctx context.Context, endpoint Endpoint, eventType string, data any) (Event, error) {
 	now := f.now()
 	id := EventID(f.newEventID())
 	body, err := marshalEnvelope(id, eventType, data, now)
 	if err != nil {
 		return Event{}, err
 	}
-
-	endpoint, err := f.repo.FindEndpoint(ctx, org)
-	if err != nil {
-		return Event{}, err
-	}
-	status := StatusPending
-	if endpoint == nil {
-		status = StatusNoEndpoint
-	}
-
 	event := Event{
 		ID:            id,
-		OrgID:         org,
+		OrgID:         endpoint.OrgID,
+		EndpointID:    endpoint.ID,
 		Type:          eventType,
 		Body:          body,
-		Status:        status,
+		Status:        StatusPending,
 		NextAttemptAt: now,
 		CreatedAt:     now,
 	}
 	if err := f.repo.SaveEvent(ctx, event); err != nil {
 		return Event{}, err
 	}
-	if status == StatusPending {
-		f.nudge()
+	f.nudge()
+	return event, nil
+}
+
+// enqueueUnrouted persists a single NO_ENDPOINT placeholder Event with no
+// specific EndpointID (FD7): Enqueue's fallback when no ENABLED endpoint's
+// filter matched eventType, including the "org has zero endpoints
+// configured" case Phase 3 itself produced. It stays put — no attempts, no
+// nudge — until a manual Redeliver, at which point dispatchOne resolves it
+// against org's first endpoint (mirroring Phase 3's own single-endpoint
+// lookup, so a later-configured or later-matching endpoint can still
+// deliver it).
+func (f *Facade) enqueueUnrouted(ctx context.Context, org organizations.OrgID, eventType string, data any) (Event, error) {
+	now := f.now()
+	id := EventID(f.newEventID())
+	body, err := marshalEnvelope(id, eventType, data, now)
+	if err != nil {
+		return Event{}, err
+	}
+	event := Event{ID: id, OrgID: org, Type: eventType, Body: body, Status: StatusNoEndpoint, NextAttemptAt: now, CreatedAt: now}
+	if err := f.repo.SaveEvent(ctx, event); err != nil {
+		return Event{}, err
 	}
 	return event, nil
+}
+
+// ListEndpoints returns every one of org's endpoints, oldest first (Slice
+// 8, API Shape) — never a secret, only each one's display prefix (mirrors
+// EndpointView's own PD31 convention).
+func (f *Facade) ListEndpoints(ctx context.Context, org organizations.OrgID) ([]EndpointListItem, error) {
+	endpoints, err := f.repo.ListEndpoints(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]EndpointListItem, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		prefix, err := f.secrets.WebhookSecretPrefix(ctx, org, string(endpoint.ID))
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, endpointListItemFrom(endpoint, prefix))
+	}
+	return items, nil
+}
+
+// EndpointListItem is ListEndpoints' per-endpoint response shape (Slice 8,
+// API Shape): never a secret, only its display prefix.
+type EndpointListItem struct {
+	ID                  EndpointID
+	URL                 string
+	EventTypes          []string
+	Status              EndpointStatus
+	ConsecutiveFailures int
+	SecretPrefix        string
+	CreatedAt           time.Time
+}
+
+func endpointListItemFrom(endpoint Endpoint, secretPrefix string) EndpointListItem {
+	return EndpointListItem{
+		ID:                  endpoint.ID,
+		URL:                 endpoint.URL,
+		EventTypes:          endpoint.EventTypes,
+		Status:              endpoint.Status,
+		ConsecutiveFailures: endpoint.ConsecutiveFailures,
+		SecretPrefix:        secretPrefix,
+		CreatedAt:           endpoint.CreatedAt,
+	}
+}
+
+// CreateEndpointResult is CreateEndpoint's response: the endpoint's
+// identity and configuration plus the freshly minted secret, shown exactly
+// once (Slice 8, AC1).
+type CreateEndpointResult struct {
+	ID         EndpointID
+	URL        string
+	EventTypes []string
+	Status     EndpointStatus
+	CreatedAt  time.Time
+	Secret     string
+}
+
+// CreateEndpoint registers a new endpoint for org (Slice 8, AC1): rejected
+// with a validation error naming the configured cap once org already holds
+// BEECON_WEBHOOK_ENDPOINT_CAP endpoints (AC2). eventTypes nil matches every
+// event type; a non-nil filter is validated against KnownEventTypes.
+func (f *Facade) CreateEndpoint(ctx context.Context, org organizations.OrgID, url string, eventTypes []string) (CreateEndpointResult, error) {
+	if err := ValidateEndpointURL(url); err != nil {
+		return CreateEndpointResult{}, err
+	}
+	if err := ValidateEventTypeFilter(eventTypes); err != nil {
+		return CreateEndpointResult{}, err
+	}
+	existing, err := f.repo.ListEndpoints(ctx, org)
+	if err != nil {
+		return CreateEndpointResult{}, err
+	}
+	if len(existing) >= f.endpointCap {
+		return CreateEndpointResult{}, ErrEndpointCap(f.endpointCap)
+	}
+	endpoint, secret, err := f.createEndpoint(ctx, org, url, eventTypes)
+	if err != nil {
+		return CreateEndpointResult{}, err
+	}
+	return CreateEndpointResult{
+		ID:         endpoint.ID,
+		URL:        endpoint.URL,
+		EventTypes: endpoint.EventTypes,
+		Status:     endpoint.Status,
+		CreatedAt:  endpoint.CreatedAt,
+		Secret:     secret,
+	}, nil
+}
+
+// UpdateEndpointResult is UpdateEndpoint's/EnableEndpoint's/DisableEndpoint's
+// shared response shape: never a secret.
+type UpdateEndpointResult struct {
+	ID                  EndpointID
+	URL                 string
+	EventTypes          []string
+	Status              EndpointStatus
+	ConsecutiveFailures int
+	CreatedAt           time.Time
+}
+
+func updateEndpointResultFrom(endpoint Endpoint) UpdateEndpointResult {
+	return UpdateEndpointResult{
+		ID:                  endpoint.ID,
+		URL:                 endpoint.URL,
+		EventTypes:          endpoint.EventTypes,
+		Status:              endpoint.Status,
+		ConsecutiveFailures: endpoint.ConsecutiveFailures,
+		CreatedAt:           endpoint.CreatedAt,
+	}
+}
+
+// UpdateEndpoint replaces one endpoint's URL and event-type filter (Slice
+// 8): a whole-object update, mirroring this codebase's governance/retention
+// PUT convention — url is always required (the same rule SetEndpoint
+// already enforces), eventTypes nil clears the filter back to "match every
+// type". An id belonging to another organization, or unknown, is not-found.
+func (f *Facade) UpdateEndpoint(ctx context.Context, org organizations.OrgID, id EndpointID, url string, eventTypes []string) (UpdateEndpointResult, error) {
+	if err := ValidateEndpointURL(url); err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	if err := ValidateEventTypeFilter(eventTypes); err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	endpoint, err := f.repo.FindEndpointByID(ctx, org, id)
+	if err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	if endpoint == nil {
+		return UpdateEndpointResult{}, ErrNotFound()
+	}
+	endpoint.URL = url
+	endpoint.EventTypes = eventTypes
+	if err := f.repo.SaveEndpoint(ctx, *endpoint); err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	return updateEndpointResultFrom(*endpoint), nil
+}
+
+// DeleteEndpoint permanently removes one endpoint (Slice 8, AC8). An id
+// belonging to another organization, or unknown, is not-found.
+func (f *Facade) DeleteEndpoint(ctx context.Context, org organizations.OrgID, id EndpointID) error {
+	endpoint, err := f.repo.FindEndpointByID(ctx, org, id)
+	if err != nil {
+		return err
+	}
+	if endpoint == nil {
+		return ErrNotFound()
+	}
+	return f.repo.DeleteEndpoint(ctx, org, id)
+}
+
+// EnableEndpoint turns an endpoint back on (Slice 8, AC6): resets
+// ConsecutiveFailures to 0 and sets Status ENABLED, resuming fan-out
+// immediately — the same reset an operator re-enabling a DISABLED_AUTO
+// endpoint gets, and equally available for an endpoint an operator merely
+// disabled themselves.
+func (f *Facade) EnableEndpoint(ctx context.Context, org organizations.OrgID, id EndpointID) (UpdateEndpointResult, error) {
+	endpoint, err := f.repo.FindEndpointByID(ctx, org, id)
+	if err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	if endpoint == nil {
+		return UpdateEndpointResult{}, ErrNotFound()
+	}
+	endpoint.Status = EndpointStatusEnabled
+	endpoint.ConsecutiveFailures = 0
+	if err := f.repo.SaveEndpoint(ctx, *endpoint); err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	return updateEndpointResultFrom(*endpoint), nil
+}
+
+// DisableEndpoint turns an endpoint off by operator request (Slice 8):
+// Status DISABLED — distinct from DISABLED_AUTO, which only dispatchOne's
+// own auto-disable bookkeeping sets — dropping it from future fan-out.
+func (f *Facade) DisableEndpoint(ctx context.Context, org organizations.OrgID, id EndpointID) (UpdateEndpointResult, error) {
+	endpoint, err := f.repo.FindEndpointByID(ctx, org, id)
+	if err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	if endpoint == nil {
+		return UpdateEndpointResult{}, ErrNotFound()
+	}
+	endpoint.Status = EndpointStatusDisabled
+	if err := f.repo.SaveEndpoint(ctx, *endpoint); err != nil {
+		return UpdateEndpointResult{}, err
+	}
+	return updateEndpointResultFrom(*endpoint), nil
+}
+
+// RotateEndpointSecret mints a fresh signing secret for one specific
+// endpoint (Slice 8, AC8, mirroring RotateSecret's own PD23 overlap-window
+// behavior). An id belonging to another organization, or unknown, is
+// not-found.
+func (f *Facade) RotateEndpointSecret(ctx context.Context, org organizations.OrgID, id EndpointID, overlapHours *int) (RotateSecretResult, error) {
+	endpoint, err := f.repo.FindEndpointByID(ctx, org, id)
+	if err != nil {
+		return RotateSecretResult{}, err
+	}
+	if endpoint == nil {
+		return RotateSecretResult{}, ErrNotFound()
+	}
+	return f.rotateSecretForEndpoint(ctx, org, *endpoint, overlapHours)
 }
 
 // ListEventsParams is ListEvents' caller-facing filter shape: Type and/or
@@ -344,9 +691,10 @@ func (f *Facade) ListEvents(ctx context.Context, org organizations.OrgID, params
 // and body (PD32's idempotency guarantee holds across manual redelivery
 // too), status PENDING, next attempt due immediately. Works regardless of
 // the event's current status — including NO_ENDPOINT (FD7: an event that
-// landed undeliverable because no endpoint existed yet can be redelivered
-// manually once one is configured) and FAILED (retry exhaustion). An
-// unknown id, or one belonging to another organization, is not-found.
+// landed undeliverable because no matching endpoint existed yet can be
+// redelivered manually once one is configured or enabled) and FAILED
+// (retry exhaustion). An unknown id, or one belonging to another
+// organization, is not-found.
 func (f *Facade) Redeliver(ctx context.Context, org organizations.OrgID, id EventID) (Event, error) {
 	event, err := f.repo.FindEvent(ctx, org, id)
 	if err != nil {
@@ -386,13 +734,28 @@ func (f *Facade) DispatchOnce(ctx context.Context) error {
 	return nil
 }
 
+// resolveDispatchEndpoint finds the endpoint a claimed event should deliver
+// to (Slice 8): its own endpoint, when the fan-out already addressed one
+// (the normal case); otherwise — an event carrying no EndpointID at all, a
+// NO_ENDPOINT placeholder manually redelivered (FD7) — org's first
+// endpoint, mirroring Phase 3's own single-endpoint lookup exactly, so a
+// migrated org's continuity holds even on this fallback path.
+func (f *Facade) resolveDispatchEndpoint(ctx context.Context, event Event) (*Endpoint, error) {
+	if event.EndpointID != "" {
+		return f.repo.FindEndpointByID(ctx, event.OrgID, event.EndpointID)
+	}
+	return f.repo.FindEndpoint(ctx, event.OrgID)
+}
+
 // dispatchOne makes exactly one delivery attempt for event, signs it with
-// every currently active secret (1-2 during a rotation's overlap window),
-// applies PD30's outcome (DELIVERED, rescheduled, or FAILED at
-// MaxAttempts), persists that outcome, and always writes one attempt log
-// entry (the AC's "every delivery attempt", success or failure).
+// every currently active secret of the endpoint it resolves to (1-2 during
+// a rotation's overlap window), applies PD30's outcome (DELIVERED,
+// rescheduled, or FAILED at MaxAttempts), persists that outcome, applies
+// PD45's inline auto-disable bookkeeping (Slice 8) against that same
+// endpoint, and always writes one attempt log entry (the AC's "every
+// delivery attempt", success or failure).
 func (f *Facade) dispatchOne(ctx context.Context, event Event) error {
-	endpoint, err := f.repo.FindEndpoint(ctx, event.OrgID)
+	endpoint, err := f.resolveDispatchEndpoint(ctx, event)
 	if err != nil {
 		return err
 	}
@@ -403,7 +766,7 @@ func (f *Facade) dispatchOne(ctx context.Context, event Event) error {
 		// is re-claimed next scan.
 		return nil
 	}
-	secrets, err := f.secrets.ActiveWebhookSecrets(ctx, event.OrgID)
+	secrets, err := f.secrets.ActiveWebhookSecrets(ctx, event.OrgID, string(endpoint.ID))
 	if err != nil {
 		return err
 	}
@@ -417,7 +780,38 @@ func (f *Facade) dispatchOne(ctx context.Context, event Event) error {
 	if err := f.repo.SaveEvent(ctx, updated); err != nil {
 		return err
 	}
+	if err := f.applyAutoDisableBookkeeping(ctx, *endpoint, updated.Status); err != nil {
+		return err
+	}
 	return f.recordAttempt(ctx, event, attemptNumber, status, duration)
+}
+
+// applyAutoDisableBookkeeping is PD45's inline auto-disable step (Slice 8),
+// applied once per dispatch attempt's own outcome — not per attempt loop
+// iteration, since only a terminal outcome (DELIVERED or FAILED) changes
+// anything; a merely-rescheduled retry (still PENDING) leaves the counter
+// untouched. A terminal FAILED increments endpoint's ConsecutiveFailures,
+// flipping Status to DISABLED_AUTO once autoDisableThreshold is reached
+// (dropping the endpoint from future fan-out — Enqueue only ever selects
+// ENABLED endpoints); a DELIVERED resets the counter to 0 whenever it was
+// nonzero.
+func (f *Facade) applyAutoDisableBookkeeping(ctx context.Context, endpoint Endpoint, outcome Status) error {
+	switch outcome {
+	case StatusDelivered:
+		if endpoint.ConsecutiveFailures == 0 {
+			return nil
+		}
+		endpoint.ConsecutiveFailures = 0
+		return f.repo.SaveEndpoint(ctx, endpoint)
+	case StatusFailed:
+		endpoint.ConsecutiveFailures++
+		if endpoint.ConsecutiveFailures >= f.autoDisableThreshold {
+			endpoint.Status = EndpointStatusDisabledAuto
+		}
+		return f.repo.SaveEndpoint(ctx, endpoint)
+	default:
+		return nil
+	}
 }
 
 // signAndPost signs event with every currently active secret and POSTs it,

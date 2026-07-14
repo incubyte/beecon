@@ -15,6 +15,15 @@ var fixedTestTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // EndpointCaller in a unit test could plausibly hit it.
 const defaultTestDeliveryTimeout = 10 * time.Second
 
+// defaultTestEndpointCap and defaultTestAutoDisableThreshold are the
+// BEECON_WEBHOOK_ENDPOINT_CAP/BEECON_ENDPOINT_AUTODISABLE_FAILURES
+// stand-ins when Overrides doesn't supply its own (Slice 8, PD45) —
+// mirror config.go's own production defaults.
+const (
+	defaultTestEndpointCap          = 5
+	defaultTestAutoDisableThreshold = 5
+)
+
 // Overrides configures NewFacadeWithOverrides. Repository/WorkQueue,
 // NewEndpointID, NewEventID, DeliveryTimeout, Jitter, and Now fall back to
 // a deterministic in-memory default when left zero-valued. Secrets,
@@ -24,17 +33,19 @@ const defaultTestDeliveryTimeout = 10 * time.Second
 // EndpointCaller) directly, the same way app/wiring.go composes them in
 // production.
 type Overrides struct {
-	Repository      delivery.Repository
-	WorkQueue       delivery.WorkQueue
-	OutboxStats     delivery.OutboxStats
-	Secrets         delivery.SecretIssuer
-	Caller          delivery.EndpointCaller
-	Recorder        delivery.Recorder
-	NewEndpointID   func() string
-	NewEventID      func() string
-	DeliveryTimeout time.Duration
-	Jitter          func() float64
-	Now             func() time.Time
+	Repository           delivery.Repository
+	WorkQueue            delivery.WorkQueue
+	OutboxStats          delivery.OutboxStats
+	Secrets              delivery.SecretIssuer
+	Caller               delivery.EndpointCaller
+	Recorder             delivery.Recorder
+	NewEndpointID        func() string
+	NewEventID           func() string
+	DeliveryTimeout      time.Duration
+	EndpointCap          int
+	AutoDisableThreshold int
+	Jitter               func() float64
+	Now                  func() time.Time
 }
 
 // NewFacadeWithOverrides builds a delivery.Facade backed by the in-memory
@@ -68,12 +79,20 @@ func NewFacadeWithOverrides(o Overrides) *delivery.Facade {
 	if deliveryTimeout <= 0 {
 		deliveryTimeout = defaultTestDeliveryTimeout
 	}
+	endpointCap := o.EndpointCap
+	if endpointCap <= 0 {
+		endpointCap = defaultTestEndpointCap
+	}
+	autoDisableThreshold := o.AutoDisableThreshold
+	if autoDisableThreshold <= 0 {
+		autoDisableThreshold = defaultTestAutoDisableThreshold
+	}
 	now := o.Now
 	if now == nil {
 		now = func() time.Time { return fixedTestTime }
 	}
 
-	facade := delivery.NewFacade(repository, workQueue, o.Secrets, o.Caller, o.Recorder, newEndpointID, newEventID, deliveryTimeout, now)
+	facade := delivery.NewFacade(repository, workQueue, o.Secrets, o.Caller, o.Recorder, newEndpointID, newEventID, deliveryTimeout, endpointCap, autoDisableThreshold, now)
 	if o.Jitter != nil {
 		facade = facade.WithJitter(o.Jitter)
 	} else {

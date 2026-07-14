@@ -61,6 +61,13 @@ func (f fakeIntegrationReader) GetIntegration(_ context.Context, id catalog.Inte
 	return integration, nil
 }
 
+// GetVisibleIntegration is governance-blind in this fake — it always
+// answers exactly like GetIntegration, so every existing test built before
+// Slice 5 keeps its original behavior unchanged.
+func (f fakeIntegrationReader) GetVisibleIntegration(ctx context.Context, _ organizations.OrgID, id catalog.IntegrationID) (catalog.Integration, error) {
+	return f.GetIntegration(ctx, id)
+}
+
 type fakeProviderReader struct {
 	definitions map[string]catalog.ProviderDefinition
 }

@@ -93,6 +93,30 @@ func (r *Repository) Query(ctx context.Context, org organizations.OrgID, filter 
 	return entries, nil
 }
 
+// PurgeOlderThan hard-deletes org's own EventLog rows whose CreatedAt is
+// strictly before cutoff (Slice 7, PD44) — unconditional by age, mirroring
+// the existing idx_event_logs_org_created_at (org_id, created_at DESC, id
+// DESC) index's own leading columns, so this scan is index-backed with no
+// new migration needed. Like delivery.Repository.PurgeTerminalOlderThan,
+// this needs no lease column of its own: the DELETE itself is the terminal
+// action, so a concurrent second binary instance's identical DELETE simply
+// removes nothing further.
+func (r *Repository) PurgeOlderThan(ctx context.Context, org organizations.OrgID, cutoff time.Time) (int, error) {
+	result, err := r.db.NewDelete().
+		Model((*EventLogRow)(nil)).
+		Where("org_id = ?", string(org)).
+		Where("created_at < ?", cutoff).
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
 func rowFromEventLog(entry logging.EventLog) EventLogRow {
 	return EventLogRow{
 		ID:                string(entry.ID),

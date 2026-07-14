@@ -246,3 +246,61 @@ type ToolPage struct {
 	Items      []ToolSummary
 	NextCursor string
 }
+
+// ProviderDefinitionSummary is one row of ListProviderDefinitions (PD40,
+// Slice 6): the installation-wide operator view over the loaded definitions
+// map — unlike IntegrationSummary/ToolSummary/TriggerDefinitionSummary, this
+// is never governance-filtered (AC7): an operator sees every provider
+// definition the installation has loaded, regardless of any organization's
+// allow-list or hidden set.
+type ProviderDefinitionSummary struct {
+	Slug          string
+	Name          string
+	Logo          string
+	AuthScheme    string
+	FormatVersion int
+	ToolCount     int
+	TriggerCount  int
+}
+
+// ProviderDefinitionPage is one cursor-paginated page of provider definition
+// summaries (PD15's platform-wide convention), sorted by slug the same way
+// ToolPage/TriggerDefinitionPage are: NextCursor is empty when this was the
+// last page.
+type ProviderDefinitionPage struct {
+	Items      []ProviderDefinitionSummary
+	NextCursor string
+}
+
+// ProviderDefinitionBundleDetail is Facade.ProviderDefinitionDetail's return
+// shape (PD40, Slice 6, AC2): the definition's full versioned Bundle —
+// formatVersion, the provider's own identity/OAuth block, its expected
+// params, and every tool and trigger it declares (with their complete
+// schemas and mapping) — so an operator can inspect exactly what this
+// installation has loaded for one provider in a single read, rendered
+// client-side in a collapsible, copyable mono JSON/YAML viewer.
+type ProviderDefinitionBundleDetail struct {
+	Slug          string
+	Name          string
+	FormatVersion int
+	Bundle        map[string]any
+}
+
+// Visibility states ListIntegrationsWithVisibility annotates each
+// installation integration with, for a given organization (Slice 5, AC1):
+// VISIBLE (the org can see and connect it), HIDDEN (the operator explicitly
+// hid it for this org), or NotAllowed (an allow-list is set and omits it).
+const (
+	VisibilityVisible    = "VISIBLE"
+	VisibilityHidden     = "HIDDEN"
+	VisibilityNotAllowed = "NOT_ALLOWED"
+)
+
+// IntegrationVisibility pairs one installation integration with its
+// effective visibility for a given organization (Slice 5, AC1) — the
+// operator's unfiltered governance view over the whole catalog, distinct
+// from ListIntegrations' already-filtered, org-facing result.
+type IntegrationVisibility struct {
+	Integration IntegrationSummary
+	Visibility  string
+}

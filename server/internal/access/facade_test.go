@@ -44,7 +44,7 @@ func assertDomainError(t *testing.T, err error, wantCode string, wantStatus int)
 func TestIssue_ReturnsAKeyPrefixedIDAndTheFullSecretWithTheBeeconSkPrefix(t *testing.T) {
 	f := newFacade()
 
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -63,11 +63,11 @@ func TestIssue_ReturnsAKeyPrefixedIDAndTheFullSecretWithTheBeeconSkPrefix(t *tes
 func TestIssue_ProducesADifferentSecretForEachKey(t *testing.T) {
 	f := newFacade()
 
-	first, err := f.Issue(context.Background(), orgA)
+	first, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	second, err := f.Issue(context.Background(), orgA)
+	second, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestIssue_ProducesADifferentSecretForEachKey(t *testing.T) {
 
 func TestList_ReturnsIDPrefixAndCreatedAtForEveryKeyIssuedToTheOrg(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -105,11 +105,11 @@ func TestList_ReturnsIDPrefixAndCreatedAtForEveryKeyIssuedToTheOrg(t *testing.T)
 
 func TestList_OnlyReturnsKeysBelongingToTheGivenOrg(t *testing.T) {
 	f := newFacade()
-	issuedToA, err := f.Issue(context.Background(), orgA)
+	issuedToA, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := f.Issue(context.Background(), orgB); err != nil {
+	if _, err := f.Issue(context.Background(), orgB, access.ScopeReadWrite); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestList_OnlyReturnsKeysBelongingToTheGivenOrg(t *testing.T) {
 
 func TestRevoke_MarksTheKeyRevokedSoAFutureVerifyOfItsSecretIsRejected(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestRevoke_MarksTheKeyRevokedSoAFutureVerifyOfItsSecretIsRejected(t *testin
 
 func TestRevoke_ReturnsNotFoundForAKeyBelongingToAnotherOrg(t *testing.T) {
 	f := newFacade()
-	issuedToA, err := f.Issue(context.Background(), orgA)
+	issuedToA, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRevoke_ReturnsNotFoundForAnUnknownKeyID(t *testing.T) {
 
 func TestVerify_ReturnsTheIssuingOrgForAFreshlyIssuedSecret(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,14 +176,14 @@ func TestVerify_ReturnsTheIssuingOrgForAFreshlyIssuedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != orgA {
-		t.Errorf("Verify() org = %q, want %q", got, orgA)
+	if got.OrgID != orgA {
+		t.Errorf("Verify() org = %q, want %q", got.OrgID, orgA)
 	}
 }
 
 func TestVerify_RejectsASecretWithAnUnknownLookupPrefix(t *testing.T) {
 	f := newFacade()
-	if _, err := f.Issue(context.Background(), orgA); err != nil {
+	if _, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestVerify_RejectsASecretWithAnUnknownLookupPrefix(t *testing.T) {
 
 func TestVerify_RejectsAWrongSecretThatSharesAnIssuedKeysLookupPrefix(t *testing.T) {
 	f := newFacade()
-	issued, err := f.Issue(context.Background(), orgA)
+	issued, err := f.Issue(context.Background(), orgA, access.ScopeReadWrite)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

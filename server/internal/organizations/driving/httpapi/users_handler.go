@@ -47,3 +47,31 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, toUserDTO(user))
 }
+
+// ListUsersByOrg handles GET /api/v1/organizations/{orgId}/users (Slice 4,
+// PD40): the Admin UI's new end-users read, mounted behind the admin key
+// with org injected from the path (AdminOrgScope/InjectOrgFromPath) — the
+// organization is read only from context, exactly like every other
+// org-scoped handler.
+func (h *Handler) ListUsersByOrg(w http.ResponseWriter, r *http.Request) {
+	org, ok := organizations.OrgIDFromContext(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, httpx.Unauthorized("missing organization context"))
+		return
+	}
+	query := r.URL.Query()
+	limit, err := parseIntQueryParam(query.Get("limit"))
+	if err != nil {
+		h.errors.WriteError(w, r, organizations.ErrValidation("limit", "must be a positive integer"))
+		return
+	}
+	result, err := h.facade.ListUsers(r.Context(), org, organizations.ListUsersParams{
+		Cursor: query.Get("cursor"),
+		Limit:  limit,
+	})
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toUsersPageDTO(result))
+}

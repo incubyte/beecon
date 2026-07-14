@@ -69,12 +69,14 @@ type IssuedKey struct {
 	ID        KeyID
 	Secret    string
 	Prefix    string
+	Scope     Scope
 	CreatedAt time.Time
 }
 
 // Issue mints a new server API key for org and its first secret, returning
-// the full secret exactly once.
-func (f *Facade) Issue(ctx context.Context, org organizations.OrgID) (IssuedKey, error) {
+// the full secret exactly once. scope restricts what the key may do (PD41,
+// Slice 4) — pass ScopeReadWrite for the pre-existing full-access behavior.
+func (f *Facade) Issue(ctx context.Context, org organizations.OrgID, scope Scope) (IssuedKey, error) {
 	secret, err := generateSecret()
 	if err != nil {
 		return IssuedKey{}, err
@@ -82,6 +84,7 @@ func (f *Facade) Issue(ctx context.Context, org organizations.OrgID) (IssuedKey,
 	key := ServerApiKey{
 		ID:        KeyID(f.newID()),
 		OrgID:     org,
+		Scope:     scope,
 		CreatedAt: f.now(),
 	}
 	if err := f.repo.SaveKey(ctx, key); err != nil {
@@ -101,6 +104,7 @@ func (f *Facade) Issue(ctx context.Context, org organizations.OrgID) (IssuedKey,
 		ID:        key.ID,
 		Secret:    secret,
 		Prefix:    firstSecret.LookupPrefix,
+		Scope:     key.Scope,
 		CreatedAt: key.CreatedAt,
 	}, nil
 }
@@ -128,6 +132,7 @@ func keyListingFrom(key ServerApiKey, secrets []ApiKeySecret) KeyListing {
 	return KeyListing{
 		ID:               key.ID,
 		Prefix:           activeSecretPrefix(secrets),
+		Scope:            key.Scope,
 		CreatedAt:        key.CreatedAt,
 		RevokedAt:        key.RevokedAt,
 		RotatedAt:        rotatedAt,
@@ -241,16 +246,26 @@ func (f *Facade) expireLiveSecrets(ctx context.Context, org organizations.OrgID,
 	return nil
 }
 
+// VerifiedKey is Verify's result: the organization a presented secret
+// belongs to, alongside the key's scope (PD41, FD4) — the auth middleware
+// injects both into context, and authmw.RequireWrite reads the scope to
+// reject a read-only key on a mutating route.
+type VerifiedKey struct {
+	OrgID organizations.OrgID
+	Scope Scope
+}
+
 // Verify authenticates a presented secret and returns the organization it
-// belongs to. A missing, malformed, unknown, revoked, or expired (PD23)
-// secret is unauthorized (PD5) — the caller never learns which.
-func (f *Facade) Verify(ctx context.Context, secret string) (organizations.OrgID, error) {
+// belongs to and its scope. A missing, malformed, unknown, revoked, or
+// expired (PD23) secret is unauthorized (PD5) — the caller never learns
+// which.
+func (f *Facade) Verify(ctx context.Context, secret string) (VerifiedKey, error) {
 	if !hasSecretPrefix(secret) {
-		return "", ErrUnauthorized()
+		return VerifiedKey{}, ErrUnauthorized()
 	}
 	candidates, err := f.prefixLookup.FindByPrefix(ctx, lookupPrefix(secret))
 	if err != nil {
-		return "", err
+		return VerifiedKey{}, err
 	}
 	now := f.now()
 	for _, candidate := range candidates {
@@ -258,12 +273,12 @@ func (f *Facade) Verify(ctx context.Context, secret string) (organizations.OrgID
 			continue
 		}
 		if candidate.IsRevoked() {
-			return "", ErrUnauthorized()
+			return VerifiedKey{}, ErrUnauthorized()
 		}
 		if candidate.Secret.IsExpired(now) {
-			return "", ErrUnauthorized()
+			return VerifiedKey{}, ErrUnauthorized()
 		}
-		return candidate.OrgID, nil
+		return VerifiedKey{OrgID: candidate.OrgID, Scope: candidate.Scope}, nil
 	}
-	return "", ErrUnauthorized()
+	return VerifiedKey{}, ErrUnauthorized()
 }

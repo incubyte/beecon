@@ -29,12 +29,14 @@ func (r *WebhookSecretRepository) Save(_ context.Context, secret access.WebhookS
 	return nil
 }
 
-func (r *WebhookSecretRepository) ListByOrg(_ context.Context, org organizations.OrgID) ([]access.WebhookSigningSecret, error) {
+// ListByEndpoint returns org's secrets scoped to one specific endpoint
+// (Slice 8), mirroring the bun repository's own filter.
+func (r *WebhookSecretRepository) ListByEndpoint(_ context.Context, org organizations.OrgID, endpoint access.EndpointID) ([]access.WebhookSigningSecret, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	matches := make([]access.WebhookSigningSecret, 0)
 	for _, secret := range r.secrets {
-		if secret.OrgID == org {
+		if secret.OrgID == org && secret.EndpointID == endpoint {
 			matches = append(matches, secret)
 		}
 	}

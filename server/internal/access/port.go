@@ -23,13 +23,15 @@ type Repository interface {
 }
 
 // ApiKeySecretCandidate is what PrefixLookup returns for a matching lookup
-// prefix: enough of the parent key (its id, organization, and revocation
-// state) alongside the specific secret version for Verify to pick the right
-// one by hash and reject a revoked key's secret, or an expired one, without
-// a second round trip.
+// prefix: enough of the parent key (its id, organization, scope — PD41 — and
+// revocation state) alongside the specific secret version for Verify to pick
+// the right one by hash, reject a revoked key's secret or an expired one,
+// and return the key's scope alongside its organization, without a second
+// round trip.
 type ApiKeySecretCandidate struct {
 	KeyID     KeyID
 	OrgID     organizations.OrgID
+	Scope     Scope
 	RevokedAt *time.Time
 	Secret    ApiKeySecret
 }
@@ -81,14 +83,16 @@ type SigningSecretLookup interface {
 }
 
 // WebhookSecrets is the access module's org-scoped driven port for webhook
-// endpoint signing secrets (PD27/PD31, Phase 3 Slice 3). Unlike
-// SigningSecrets, a WebhookSigningSecret belongs directly to an
+// endpoint signing secrets (PD27/PD31/PD45, Phase 3 Slice 3, Phase 4 Slice
+// 8). Unlike SigningSecrets, a WebhookSigningSecret belongs directly to an
 // organization (there is no intermediate "key" entity), but it rotates with
 // an overlap window like ApiKeySecret does — so this port mirrors
 // ApiKeySecrets' own shape (Save, a listing method, MarkExpiring) rather
-// than SigningSecrets' simpler one.
+// than SigningSecrets' simpler one. ListByEndpoint narrows to one specific
+// endpoint's own secrets (Slice 8: many endpoints per org, each with its
+// own secret lineage) rather than every secret ever issued for the org.
 type WebhookSecrets interface {
 	Save(ctx context.Context, secret WebhookSigningSecret) error
-	ListByOrg(ctx context.Context, org organizations.OrgID) ([]WebhookSigningSecret, error)
+	ListByEndpoint(ctx context.Context, org organizations.OrgID, endpoint EndpointID) ([]WebhookSigningSecret, error)
 	MarkExpiring(ctx context.Context, org organizations.OrgID, id WebhookSecretID, expiresAt time.Time) error
 }

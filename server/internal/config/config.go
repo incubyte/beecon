@@ -52,6 +52,29 @@ const DefaultRefreshScanIntervalSeconds = 60
 // reconciliation worker loop itself ticks — 6 hours.
 const DefaultReconcileIntervalSeconds = 6 * 60 * 60
 
+// DefaultRetentionDays is BEECON_RETENTION_DAYS' fallback when unset (PD44,
+// Phase 4 Slice 7): the installation-wide default purge window for both
+// event logs and terminal outbox events, applied to any organization that
+// has not set its own override on org_governance.
+const DefaultRetentionDays = 30
+
+// DefaultPurgeIntervalSeconds is BEECON_PURGE_INTERVAL's fallback when unset
+// (PD44, Phase 4 Slice 7): how often the purge worker loop itself ticks —
+// once a day.
+const DefaultPurgeIntervalSeconds = 24 * 60 * 60
+
+// DefaultWebhookEndpointCap is BEECON_WEBHOOK_ENDPOINT_CAP's fallback when
+// unset (PD45, Phase 4 Slice 8): the maximum number of webhook endpoints
+// one organization may register.
+const DefaultWebhookEndpointCap = 5
+
+// DefaultEndpointAutoDisableFailures is
+// BEECON_ENDPOINT_AUTODISABLE_FAILURES' fallback when unset (PD45, Phase 4
+// Slice 8): how many consecutive terminal FAILED deliveries an endpoint
+// tolerates before dispatchOne's inline bookkeeping flips it to
+// DISABLED_AUTO.
+const DefaultEndpointAutoDisableFailures = 5
+
 // DatabaseDriver is the persistence backend Beecon boots against.
 type DatabaseDriver string
 
@@ -62,18 +85,22 @@ const (
 
 // Config is Beecon's fully validated environment configuration.
 type Config struct {
-	DatabaseDriver      DatabaseDriver
-	DatabaseURL         string
-	AdminAPIKey         string
-	EncryptionKey       string
-	BaseURL             string
-	FilesDir            string
-	FileMaxBytes        int64
-	DeliveryTimeout     time.Duration
-	PollMinInterval     time.Duration
-	RefreshLead         time.Duration
-	RefreshScanInterval time.Duration
-	ReconcileInterval   time.Duration
+	DatabaseDriver              DatabaseDriver
+	DatabaseURL                 string
+	AdminAPIKey                 string
+	EncryptionKey               string
+	BaseURL                     string
+	FilesDir                    string
+	FileMaxBytes                int64
+	DeliveryTimeout             time.Duration
+	PollMinInterval             time.Duration
+	RefreshLead                 time.Duration
+	RefreshScanInterval         time.Duration
+	ReconcileInterval           time.Duration
+	RetentionDays               int
+	PurgeInterval               time.Duration
+	WebhookEndpointCap          int
+	EndpointAutoDisableFailures int
 }
 
 // Load reads .env.local (if present) then the process environment, and
@@ -141,19 +168,43 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	retentionDays, err := parseRetentionDays(env("BEECON_RETENTION_DAYS"))
+	if err != nil {
+		return nil, err
+	}
+
+	purgeInterval, err := parseSecondsSetting("BEECON_PURGE_INTERVAL", env("BEECON_PURGE_INTERVAL"), DefaultPurgeIntervalSeconds)
+	if err != nil {
+		return nil, err
+	}
+
+	webhookEndpointCap, err := parsePositiveIntSetting("BEECON_WEBHOOK_ENDPOINT_CAP", env("BEECON_WEBHOOK_ENDPOINT_CAP"), DefaultWebhookEndpointCap)
+	if err != nil {
+		return nil, err
+	}
+
+	endpointAutoDisableFailures, err := parsePositiveIntSetting("BEECON_ENDPOINT_AUTODISABLE_FAILURES", env("BEECON_ENDPOINT_AUTODISABLE_FAILURES"), DefaultEndpointAutoDisableFailures)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
-		DatabaseDriver:      driver,
-		DatabaseURL:         databaseURL,
-		AdminAPIKey:         adminKey,
-		EncryptionKey:       encryptionKey,
-		BaseURL:             baseURL,
-		FilesDir:            filesDir,
-		FileMaxBytes:        fileMaxBytes,
-		DeliveryTimeout:     deliveryTimeout,
-		PollMinInterval:     pollMinInterval,
-		RefreshLead:         refreshLead,
-		RefreshScanInterval: refreshScanInterval,
-		ReconcileInterval:   reconcileInterval,
+		DatabaseDriver:              driver,
+		DatabaseURL:                 databaseURL,
+		AdminAPIKey:                 adminKey,
+		EncryptionKey:               encryptionKey,
+		BaseURL:                     baseURL,
+		FilesDir:                    filesDir,
+		FileMaxBytes:                fileMaxBytes,
+		DeliveryTimeout:             deliveryTimeout,
+		PollMinInterval:             pollMinInterval,
+		RefreshLead:                 refreshLead,
+		RefreshScanInterval:         refreshScanInterval,
+		ReconcileInterval:           reconcileInterval,
+		RetentionDays:               retentionDays,
+		PurgeInterval:               purgeInterval,
+		WebhookEndpointCap:          webhookEndpointCap,
+		EndpointAutoDisableFailures: endpointAutoDisableFailures,
 	}, nil
 }
 
@@ -218,6 +269,41 @@ func parseSecondsSetting(name, raw string, defaultSeconds int) (time.Duration, e
 		return 0, fmt.Errorf("%s must be a positive integer number of seconds, got %q", name, raw)
 	}
 	return time.Duration(parsed) * time.Second, nil
+}
+
+// parseRetentionDays reads BEECON_RETENTION_DAYS (PD44, Phase 4 Slice 7):
+// unset falls back to DefaultRetentionDays (30); set, it must parse as a
+// positive integer number of days — the installation-wide default itself is
+// never "unlimited" (0 is only a meaningful per-org override on
+// org_governance, not the installation default).
+func parseRetentionDays(raw string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return DefaultRetentionDays, nil
+	}
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("BEECON_RETENTION_DAYS must be a positive integer number of days, got %q", raw)
+	}
+	return parsed, nil
+}
+
+// parsePositiveIntSetting reads a BEECON_* environment variable expressed as
+// a plain positive integer count, not a duration (PD45, Phase 4 Slice 8's
+// BEECON_WEBHOOK_ENDPOINT_CAP and BEECON_ENDPOINT_AUTODISABLE_FAILURES both
+// share this shape): unset falls back to defaultValue; set, it must parse
+// as a positive integer. name is only used to name the problem in the
+// returned error.
+func parsePositiveIntSetting(name, raw string, defaultValue int) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", name, raw)
+	}
+	return parsed, nil
 }
 
 // loadEnv loads .env.local into the process environment (without overriding

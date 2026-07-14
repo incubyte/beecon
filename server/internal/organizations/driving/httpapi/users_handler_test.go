@@ -31,6 +31,12 @@ func newUsersTestRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Post("/users", h.CreateUser)
 	r.Get("/users/{userId}", h.GetUser)
+	// The admin console's org-scoped mount (Slice 4, PD40): org comes from
+	// context exactly like the org-key routes above — this test router
+	// injects it directly (doRequestAsOrg), the same shortcut this file's own
+	// header explains, standing in for the real AdminOrgScope/InjectOrgFromPath
+	// middleware chain.
+	r.Get("/organizations/{orgId}/users", h.ListUsersByOrg)
 	return r
 }
 
@@ -162,5 +168,96 @@ func TestGetUser_Returns404ForAnUnknownIDWithThePD5NotFoundEnvelope(t *testing.T
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+}
+
+// --- ListUsersByOrg (Slice 4, PD40): the Admin UI's new list-users-per-org
+// read, mounted behind the admin key with org injected from the path in
+// production (AdminOrgScope/InjectOrgFromPath) — these tests inject org via
+// context directly, the same doRequestAsOrg shortcut CreateUser/GetUser's own
+// tests above use, since the handler itself reads org only from context. ---
+
+func TestListUsersByOrg_Returns200WithAPageOfUsersBelongingToTheOrg(t *testing.T) {
+	r := newUsersTestRouter()
+	doRequestAsOrg(r, http.MethodPost, "/users", "org_1", `{"name":"Ada Lovelace"}`)
+	doRequestAsOrg(r, http.MethodPost, "/users", "org_1", `{"name":"Grace Hopper"}`)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/organizations/org_1/users", "org_1", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page usersPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(page.Items))
+	}
+}
+
+func TestListUsersByOrg_NeverIncludesAnotherOrgsUsers(t *testing.T) {
+	r := newUsersTestRouter()
+	doRequestAsOrg(r, http.MethodPost, "/users", "org_a", `{"name":"Ada Lovelace"}`)
+	doRequestAsOrg(r, http.MethodPost, "/users", "org_b", `{"name":"Grace Hopper"}`)
+
+	w := doRequestAsOrg(r, http.MethodGet, "/organizations/org_a/users", "org_a", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page usersPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1 (org B's user must not leak into org A's page)", len(page.Items))
+	}
+	if page.Items[0].Name != "Ada Lovelace" {
+		t.Errorf("item name = %q, want %q", page.Items[0].Name, "Ada Lovelace")
+	}
+}
+
+func TestListUsersByOrg_ReturnsAnEmptyPageWhenTheOrgHasNoUsersYet(t *testing.T) {
+	r := newUsersTestRouter()
+
+	w := doRequestAsOrg(r, http.MethodGet, "/organizations/org_empty/users", "org_empty", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page usersPageDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("len(items) = %d, want 0", len(page.Items))
+	}
+	if page.NextCursor != "" {
+		t.Errorf("nextCursor = %q, want empty for a single, unfull page", page.NextCursor)
+	}
+}
+
+func TestListUsersByOrg_Returns401WhenTheRequestNeverPassedThroughOrgContextInjection(t *testing.T) {
+	r := newUsersTestRouter()
+
+	w := doRequestAsOrg(r, http.MethodGet, "/organizations/org_1/users", "", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestListUsersByOrg_RejectsAMalformedCursorWithThePD5ValidationEnvelope(t *testing.T) {
+	r := newUsersTestRouter()
+
+	w := doRequestAsOrg(r, http.MethodGet, "/organizations/org_1/users?cursor=not-valid!!", "org_1", "")
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	env := decodeError(t, w)
+	if env.Error.Code != "validation_failed" {
+		t.Errorf("error.code = %q, want %q", env.Error.Code, "validation_failed")
 	}
 }

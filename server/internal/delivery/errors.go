@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"fmt"
 	"net/http"
 
 	"beecon/internal/httpx"
@@ -38,4 +39,13 @@ func ErrInvalidCursor() *httpx.DomainError {
 func ErrNoEndpoint() *httpx.DomainError {
 	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
 		WithDetails(map[string]any{"field": "endpoint", "issue": "no webhook endpoint is configured"})
+}
+
+// ErrEndpointCap is returned when CreateEndpoint would push an org past
+// BEECON_WEBHOOK_ENDPOINT_CAP endpoints (Slice 8, PD45) — the message
+// itself names the configured cap, per the AC ("rejected with a validation
+// error naming the cap").
+func ErrEndpointCap(cap int) *httpx.DomainError {
+	return httpx.New(http.StatusUnprocessableEntity, CodeValidationFailed, "validation failed").
+		WithDetails(map[string]any{"field": "url", "issue": fmt.Sprintf("organization already has the maximum of %d webhook endpoints", cap)})
 }

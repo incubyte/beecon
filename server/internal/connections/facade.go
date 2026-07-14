@@ -196,7 +196,11 @@ func (f *Facade) Initiate(
 	if _, err := f.users.GetUser(ctx, org, userID); err != nil {
 		return InitiatedConnection{}, err
 	}
-	integration, err := f.integrations.GetIntegration(ctx, integrationID)
+	// GetVisibleIntegration (Slice 5, PD42, AC5): an org can never initiate a
+	// connection to an integration it cannot see — a hidden or non-allowed
+	// integration id surfaces exactly as not-found, matching the org's
+	// filtered catalog.
+	integration, err := f.integrations.GetVisibleIntegration(ctx, org, integrationID)
 	if err != nil {
 		return InitiatedConnection{}, err
 	}
