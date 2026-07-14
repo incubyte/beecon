@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+@import "./tokens.css";
+
+/*
+ * Tailwind v4 is CSS-first: this `@theme` block is what makes utilities
+ * like `bg-primary`, `text-text-secondary`, and `rounded-lg` resolve to the
+ * DESIGN.md tokens tokens.css defines as plain CSS custom properties
+ * (§2.6) — components consume Tailwind utilities; nothing hardcodes hex.
+ */
+@theme inline {
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
+  --color-primary-fg: var(--primary-fg);
+  --color-focus-ring: var(--focus-ring);
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent-text: var(--accent-text);
+
+  --color-success-solid: var(--success-solid);
+  --color-success-text: var(--success-text);
+  --color-success-bg: var(--success-bg);
+  --color-warning-solid: var(--warning-solid);
+  --color-warning-text: var(--warning-text);
+  --color-warning-bg: var(--warning-bg);
+  --color-error-solid: var(--error-solid);
+  --color-error-text: var(--error-text);
+  --color-error-bg: var(--error-bg);
+  --color-info-solid: var(--info-solid);
+  --color-info-text: var(--info-text);
+  --color-info-bg: var(--info-bg);
+  --color-neutral-solid: var(--neutral-solid);
+  --color-neutral-text: var(--neutral-text);
+  --color-neutral-bg: var(--neutral-bg);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-pill: var(--radius-pill);
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --spacing-1: var(--space-1);
+  --spacing-2: var(--space-2);
+  --spacing-3: var(--space-3);
+  --spacing-4: var(--space-4);
+  --spacing-5: var(--space-5);
+  --spacing-6: var(--space-6);
+  --spacing-8: var(--space-8);
+  --spacing-10: var(--space-10);
+  --spacing-12: var(--space-12);
+  --spacing-16: var(--space-16);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  /* DESIGN.md §9: every interactive element shows a visible focus-visible
+     ring using --focus-ring; outlines are never removed without this
+     replacement. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* DESIGN.md §8/§9: prefers-reduced-motion disables non-essential motion
+     everywhere, not just per-component. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Drawer (Slice 2, DESIGN.md §8: "Drawer slides in from the right"). The
+   reduced-motion override above already zeroes every animation-duration, so
+   these keyframes collapse to an instant, opacity-only state change rather
+   than needing a separate reduced-motion branch here. */
+@keyframes drawer-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.drawer-overlay {
+  animation: drawer-fade-in 200ms ease-out;
+}
+
+.drawer-content {
+  animation: drawer-slide-in 200ms ease-out;
+}
