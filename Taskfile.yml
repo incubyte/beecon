@@ -1,0 +1,102 @@
+version: '3'
+
+# Beecon build tasks (go-task / Taskfile). Install: https://taskfile.dev
+# Run `task --list` to see everything.
+
+tasks:
+  build-ui:
+    desc: Build the Admin UI into server/internal/adminui/dist (the //go:embed target).
+    # run: once — even when several build-* tasks depend on it in one invocation
+    # (e.g. build-all), the UI compiles a single time.
+    run: once
+    # Lands the static bundle at Vite's outDir, which is the //go:embed target
+    # (FD2). The committed placeholder dist/index.html + .gitkeep let a clean
+    # checkout's `go build` succeed even before this has ever run.
+    dir: apps/admin-ui
+    cmds:
+      - npm install
+      - npm run build
+
+  build:
+    desc: Build every Go package with the current Admin UI embedded.
+    deps: [build-ui]
+    dir: server
+    cmds:
+      - go build ./...
+
+  build-exe:
+    desc: Compile a single self-contained beecon.exe for this host OS (UI + API baked in — the PocketBase-style binary).
+    deps: [build-ui]
+    dir: server
+    cmds:
+      - go build -o beecon.exe ./cmd/beecon
+
+  build-mac:
+    desc: Cross-compile a macOS Apple-Silicon (arm64) binary → server/beecon-darwin-arm64.
+    # Pure-Go SQLite (modernc.org/sqlite), no cgo — so CGO_ENABLED=0 cross-compiles
+    # cleanly from any host. The embedded UI is platform-independent.
+    deps: [build-ui]
+    dir: server
+    env:
+      GOOS: darwin
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+    cmds:
+      - go build -o beecon-darwin-arm64 ./cmd/beecon
+
+  build-mac-intel:
+    desc: Cross-compile a macOS Intel (amd64) binary → server/beecon-darwin-amd64.
+    deps: [build-ui]
+    dir: server
+    env:
+      GOOS: darwin
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+    cmds:
+      - go build -o beecon-darwin-amd64 ./cmd/beecon
+
+  build-all:
+    desc: Build the Admin UI once, then all release binaries (Windows + macOS arm64/amd64).
+    deps: [build-ui]
+    cmds:
+      - task: build-exe
+      - task: build-mac
+      - task: build-mac-intel
+
+  run:
+    desc: Build the Admin UI, then run the server (needs BEECON_* env / server/.env.local).
+    deps: [build-ui]
+    dir: server
+    cmds:
+      - go run ./cmd/beecon serve
+
+  serve:
+    desc: Run the compiled beecon.exe (run build-exe first). Serves API at /api/v1 and UI at /admin on :8080.
+    dir: server
+    cmds:
+      - ./beecon.exe serve
+
+  restore-dist:
+    desc: Restore the committed dist placeholder after a UI build (git hygiene — do this before committing).
+    cmds:
+      - git checkout -- server/internal/adminui/dist/
+      - git clean -fd server/internal/adminui/dist/
+
+  test-server:
+    desc: Run the Go test suite.
+    dir: server
+    cmds:
+      - go test ./...
+
+  test-admin-ui:
+    desc: Run the Admin UI test suite.
+    dir: apps/admin-ui
+    cmds:
+      - npm install
+      - npm run test
+
+  test:
+    desc: Run both the server and Admin UI test suites.
+    cmds:
+      - task: test-server
+      - task: test-admin-ui
