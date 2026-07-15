@@ -19,7 +19,8 @@ export type StatusTaxonomy =
   | "apiKey"
   | "apiKeyScope"
   | "integrationVisibility"
-  | "endpoint";
+  | "endpoint"
+  | "operator";
 
 interface StatusVisual {
   label: string;
@@ -105,6 +106,14 @@ const endpointStatuses: Record<string, StatusVisual> = {
   DISABLED_AUTO: { label: "Auto-disabled", icon: AlertTriangle, textClass: "text-error-text", bgClass: "bg-error-bg" },
 };
 
+/** Operator-account taxonomy (Phase 5 Slice 4): ACTIVE/DISABLED — the same
+ * two-state shape as trigger instances', reusing its exact color/icon
+ * pairing (a deactivated operator is a paused capability, not a failure). */
+const operatorStatuses: Record<string, StatusVisual> = {
+  ACTIVE: { label: "Active", icon: Check, textClass: "text-success-text", bgClass: "bg-success-bg" },
+  DISABLED: { label: "Disabled", icon: Pause, textClass: "text-neutral-text", bgClass: "bg-neutral-bg" },
+};
+
 const taxonomies: Record<StatusTaxonomy, Record<string, StatusVisual>> = {
   connection: connectionStatuses,
   triggerInstance: triggerInstanceStatuses,
@@ -113,6 +122,7 @@ const taxonomies: Record<StatusTaxonomy, Record<string, StatusVisual>> = {
   apiKeyScope: apiKeyScopeStatuses,
   integrationVisibility: integrationVisibilityStatuses,
   endpoint: endpointStatuses,
+  operator: operatorStatuses,
 };
 
 export interface StatusBadgeProps {

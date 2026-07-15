@@ -5,7 +5,7 @@ import { Building2, LogOut, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useOrganizations } from "@/features/organizations/api";
-import { clearAdminKey } from "@/lib/auth";
+import { useSignOut } from "@/lib/auth";
 
 /**
  * CommandPalette is the Cmd/Ctrl-K entry point DESIGN.md §5/§7 specifies:
@@ -17,6 +17,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const { items } = useOrganizations();
+  const signOut = useSignOut();
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -83,7 +84,7 @@ export function CommandPalette() {
                     value="sign out"
                     onSelect={() => {
                       setOpen(false);
-                      clearAdminKey();
+                      signOut();
                     }}
                     className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-md px-3 text-sm text-text data-[selected=true]:bg-surface-muted"
                   >

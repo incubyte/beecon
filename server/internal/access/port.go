@@ -82,6 +82,61 @@ type SigningSecretLookup interface {
 	FindByKid(ctx context.Context, id SigningSecretID) (*SigningSecret, error)
 }
 
+// Operators is the access module's installation-level driven port over
+// operator accounts (PD49/PD58): deliberately not org-scoped — an operator
+// administers the whole installation, the same reasoning
+// PrefixLookup/SigningSecretLookup are already whitelisted under (§8 of the
+// architecture doc; the orgscope arch test's whitelist gains this port).
+// FindByEmail takes email pre-lowercased (normalizeEmail) — case-insensitive
+// uniqueness is enforced by always looking up (and storing) the normalized
+// form, never by the port doing its own case-folding. ListAll, UpdatePasswordHash,
+// SetStatus, and CountActive are Slice 4 additions: ListAll backs
+// ListOperators (never returns PasswordHash to a caller outside this
+// package); UpdatePasswordHash backs ChangeMyPassword and the break-glass
+// ResetPassword; SetStatus backs Deactivate (and ResetPassword's own
+// reactivation); CountActive backs Deactivate's last-active-operator guard
+// (never allow the count of ACTIVE operators to reach zero). RecordFailedAttempt
+// and ResetFailedAttempts are Slice 5 additions backing the per-account
+// brute-force lockout (FD-G): RecordFailedAttempt always increments the
+// stored FailedAttempts counter by one and, only when lockedUntil is
+// non-nil, also sets LockedUntil to it — the facade computes lockedUntil
+// from the count it already holds, so this method never reads the counter
+// back to decide; ResetFailedAttempts zeroes the counter and clears
+// LockedUntil on a successful login. Both are idempotent no-ops for an
+// unknown id (the facade has already confirmed the operator exists before
+// calling either).
+type Operators interface {
+	Save(ctx context.Context, operator Operator) error
+	FindByEmail(ctx context.Context, email string) (*Operator, error)
+	FindByID(ctx context.Context, id OperatorID) (*Operator, error)
+	Exists(ctx context.Context) (bool, error)
+	ListAll(ctx context.Context) ([]Operator, error)
+	UpdatePasswordHash(ctx context.Context, id OperatorID, passwordHash string) error
+	SetStatus(ctx context.Context, id OperatorID, status OperatorStatus) error
+	CountActive(ctx context.Context) (int, error)
+	RecordFailedAttempt(ctx context.Context, id OperatorID, lockedUntil *time.Time) error
+	ResetFailedAttempts(ctx context.Context, id OperatorID) error
+}
+
+// OperatorSessions is the access module's installation-level driven port
+// over operator sessions (PD51) — the same installation-level reasoning as
+// Operators above: a session belongs to one operator, not one organization.
+// Revoke ends exactly one session (Slice 2's Logout); RevokeAllForOperator
+// ends every one of an operator's sessions at once (Slice 4's deactivate and
+// break-glass reset-password paths). RevokeAllForOperatorExcept is Slice 4's
+// password-change semantics (spec Slice 2 AC4, carried forward): every
+// session belonging to operatorID is revoked EXCEPT exceptSessionID — the
+// acting session (the one that just changed its own password) stays alive.
+// All three are idempotent: revoking an already-revoked session, or an
+// operator with no sessions at all, is a no-op, never an error.
+type OperatorSessions interface {
+	Save(ctx context.Context, session OperatorSession) error
+	FindByTokenHash(ctx context.Context, tokenHash []byte) (*OperatorSession, error)
+	Revoke(ctx context.Context, id OperatorSessionID, at time.Time) error
+	RevokeAllForOperator(ctx context.Context, operatorID OperatorID, at time.Time) error
+	RevokeAllForOperatorExcept(ctx context.Context, operatorID OperatorID, exceptSessionID OperatorSessionID, at time.Time) error
+}
+
 // WebhookSecrets is the access module's org-scoped driven port for webhook
 // endpoint signing secrets (PD27/PD31/PD45, Phase 3 Slice 3, Phase 4 Slice
 // 8). Unlike SigningSecrets, a WebhookSigningSecret belongs directly to an

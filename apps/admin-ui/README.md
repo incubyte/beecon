@@ -31,35 +31,58 @@ Start's package uniquely provides.
 
 ## Auth — read this before touching `src/lib/auth.ts`
 
-Real operator accounts, sessions, and CSRF are explicitly deferred (PD39).
-This console authenticates every request with the installation's single,
-shared `BEECON_ADMIN_API_KEY`, entered once on the gate screen
-(`src/components/GateScreen.tsx`) and held in a plain JS module variable
-(`src/lib/auth.ts`) for the browser tab's lifetime only:
+Phase 5 Slice 1 (PD49/PD55) replaced PD39's shared admin-key gate with real
+per-operator accounts, sessions, and (Slice 3) CSRF. The SPA now holds **no
+credential of any kind** in JS memory:
 
-- **Never** written to `localStorage`, `sessionStorage`, or a cookie.
-- Gone on reload or in a new tab — the gate screen shows again.
-- Sent as `Authorization: Bearer <key>` on every `/api/v1` call
-  (`src/lib/api-client.ts`); a `401` response (wrong key, or an
-  already-open session whose key stopped working) clears it and the gate
-  reappears automatically.
-- Sign-out (top bar, or the command palette) clears it the same way.
+- `src/components/LoginScreen.tsx` posts `{ email, password }` to
+  `POST /api/v1/auth/login`. On success the server sets the
+  `beecon_session` (`HttpOnly`, `Secure`, `SameSite=Strict`) and
+  `beecon_csrf` cookies — the browser holds them, not this app's JS.
+- `src/lib/auth.ts`'s `useSession()` probes `GET /api/v1/auth/me`: 200 means
+  the same-origin session cookie authenticated the request; 401 means no
+  session (or an expired/revoked one). `routes/__root.tsx`'s guard reads
+  this to choose `LoginScreen` vs the authenticated shell.
+- `src/lib/api-client.ts` sends no `Authorization` header at all — every
+  `/api/v1` call rides the same-origin session cookie automatically
+  (`credentials: "same-origin"`). A `401` from any call other than the
+  session probe itself invalidates the `auth.me` query, so the SPA falls
+  back to `LoginScreen` on the next render.
+- Sign-out (top bar, or the command palette) is wired via
+  `useSignOut()` — Slice 1 only invalidates the local session probe; Slice 2
+  adds the real `POST /api/v1/auth/logout` call that revokes the session and
+  clears both cookies server-side (see the `TODO(Slice 2)` in
+  `src/lib/auth.ts`).
+- The CSRF cookie (`beecon_csrf`) is deliberately **not** `HttpOnly` — the
+  SPA reads it (`readCsrfToken()`) to echo as the `X-CSRF-Token` header on
+  mutating calls once Slice 3's CSRF-checking middleware lands (unused for
+  now — see the `TODO(Slice 3)` in `src/lib/auth.ts` and
+  `src/lib/api-client.ts`).
 
-This is a deliberate, documented trade-off: a single shared credential with
-no per-operator identity or audit trail, intended for a trusted-operator,
-network-restricted deployment (self-hosted behind a VPN / reverse-proxy
-auth) — not a substitute for real authentication. Do not "fix" this by
-adding persistence; that would silently widen the credential's exposure
-window past what PD39 accepted. Real accounts/sessions/CSRF/SSO are a later
-phase (the gate's layout already leaves the SSO slot empty for it).
+**Bootstrapping the first operator is deliberately not an SPA screen**
+(FD-C): an admin-key-held-in-JS bootstrap form would reintroduce exactly the
+posture PD55 just retired. Instead, create the first operator with a `curl`
+call against the admin-key-guarded, first-account-only endpoint:
+
+```bash
+curl -X POST https://<your-beecon-host>/api/v1/operators/bootstrap \
+  -H "Authorization: Bearer $BEECON_ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"a-strong-password-12-chars-plus"}'
+```
+
+This succeeds exactly once (`409` thereafter — bootstrap is first-account-
+only); after that, sign in through `LoginScreen`. The admin key is retained
+as a break-glass credential (see the backend architecture doc) but no longer
+authenticates the console's general routes once an operator account exists.
 
 ## Development
 
 ```bash
 cd apps/admin-ui
 npm install
-npm run dev       # Vite dev server; proxies /api and /admin/verify to
-                   # a beecon serve instance on http://localhost:8080
+npm run dev       # Vite dev server; proxies /api to a beecon serve
+                   # instance on http://localhost:8080
 ```
 
 ## Building for the Go binary

@@ -11,6 +11,7 @@ import {
   Radio,
   ScrollText,
   ShieldCheck,
+  ShieldUser,
   Settings,
   Users,
   Webhook,
@@ -32,6 +33,7 @@ interface NavItem {
     | "/events"
     | "/users"
     | "/api-keys"
+    | "/operators"
     | "/governance"
     | "/providers"
     | "/tools"
@@ -52,10 +54,11 @@ interface NavGroup {
  * "Providers"/"Tools"/"Trigger Definitions" (Slice 6), "Settings" (Slice 7,
  * retention config — routes to /settings/retention), "Webhook Endpoints"
  * (Slice 8, multi-endpoint CRUD, filters, auto-disable — routes to
- * /settings/webhook-endpoints), and, as of Slice 9, "Config" (export/import
- * — routes to /settings/config) have a `to` — every other area is real
- * estate for later slices and renders present-but-disabled rather than a
- * dead link. */
+ * /settings/webhook-endpoints), "Config" (Slice 9, export/import — routes to
+ * /settings/config), and, as of Phase 5 Slice 4, "Operators" (operator
+ * account management — routes to /operators) have a `to` — every other area
+ * is real estate for later slices and renders present-but-disabled rather
+ * than a dead link. */
 const groups: NavGroup[] = [
   {
     label: "Observe",
@@ -87,6 +90,7 @@ const groups: NavGroup[] = [
       { label: "Organizations", icon: Building2, to: "/organizations" },
       { label: "Users", icon: Users, to: "/users" },
       { label: "API Keys", icon: KeyRound, to: "/api-keys" },
+      { label: "Operators", icon: ShieldUser, to: "/operators" },
     ],
   },
   {

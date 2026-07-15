@@ -41,7 +41,17 @@ func newDashboardMetricsRouter(t *testing.T) http.Handler {
 	registry.RecordDeliveryAttempt("trigger.event", false)
 
 	cfg := &config.Config{AdminAPIKey: dashboardMetricsTestAdminKey}
-	return buildRouter(cfg, database, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, registry.SummaryHandler(), nil, nil)
+	noOperatorsYet := func(context.Context) (bool, error) { return false, nil }
+	return buildRouter(
+		cfg, database,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, // organizationsHandler..deliveryHandler
+		nil,                       // operatorHandler
+		nil,                       // metricsHandler
+		registry.SummaryHandler(), // dashboardMetricsHandler
+		nil, nil, nil,             // verifyOrgKey, verifyUserToken, verifySession
+		noOperatorsYet, // operatorsExist
+		nil,            // logger
+	)
 }
 
 type dashboardMetricsBody struct {

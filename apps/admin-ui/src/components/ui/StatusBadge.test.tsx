@@ -108,3 +108,34 @@ describe("StatusBadge endpoint taxonomy", () => {
     expect(new Set([enabledClass, disabledClass, disabledAutoClass]).size).toBe(3);
   });
 });
+
+/** StatusBadge operator taxonomy (Phase 5 Slice 4): ACTIVE/DISABLED — the
+ * operators list's own status column (OperatorsPage.test.tsx exercises it in
+ * situ; these tests pin the taxonomy mapping itself in isolation, the same
+ * precedent every other taxonomy block above already sets). */
+describe("StatusBadge operator taxonomy", () => {
+  it("ACTIVE renders the label 'Active' with an icon, not color alone", () => {
+    render(<StatusBadge taxonomy="operator" status="ACTIVE" />);
+
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(document.querySelector("svg[aria-hidden='true']")).not.toBeNull();
+  });
+
+  it("DISABLED renders the label 'Disabled' with an icon", () => {
+    render(<StatusBadge taxonomy="operator" status="DISABLED" />);
+
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(document.querySelector("svg[aria-hidden='true']")).not.toBeNull();
+  });
+
+  it("ACTIVE and DISABLED render visually distinct text colors, never relying on background alone", () => {
+    const { unmount: unmountActive } = render(<StatusBadge taxonomy="operator" status="ACTIVE" />);
+    const activeClass = screen.getByText("Active").className;
+    unmountActive();
+
+    render(<StatusBadge taxonomy="operator" status="DISABLED" />);
+    const disabledClass = screen.getByText("Disabled").className;
+
+    expect(activeClass).not.toBe(disabledClass);
+  });
+});

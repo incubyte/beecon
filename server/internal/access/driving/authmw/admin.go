@@ -33,13 +33,13 @@ func AdminAuth(adminKey string) func(http.Handler) http.Handler {
 }
 
 // InjectOrgFromPath reads the {orgId} path param and injects it into
-// context via organizations.WithOrgID — no admin-key check of its own. Use
-// this (not AdminOrgScope) when mounting the console's org-scoped routes
-// *inside* a route tree an outer middleware already guards with AdminAuth
-// (Slice 2: the /organizations/{orgId}/connections and /trigger-instances
-// mount sits inside the /organizations block's own AdminAuth), so the admin
-// key is checked exactly once per request rather than once by the outer
-// guard and again here.
+// context via organizations.WithOrgID — no auth check of its own. Use this
+// when mounting the console's org-scoped routes *inside* a route tree an
+// outer middleware already guards (Slice 2: the
+// /organizations/{orgId}/connections and /trigger-instances mount sits
+// inside the /organizations block's own guard, ConsoleAuth since Phase 5),
+// so the guard runs exactly once per request rather than once by the outer
+// middleware and again here.
 func InjectOrgFromPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		orgID := organizations.OrgID(chi.URLParam(r, "orgId"))
@@ -48,33 +48,11 @@ func InjectOrgFromPath(next http.Handler) http.Handler {
 	})
 }
 
-// AdminOrgScope guards the Admin UI's org-scoped console routes mounted
-// under /api/v1/organizations/{orgId}/… on their own, not already nested
-// inside another AdminAuth-guarded tree (FD3): the same constant-time admin
-// key check as AdminAuth, composed with InjectOrgFromPath — so every
-// existing org-scoped handler (built to read its organization only from
-// context, never the path) is reused verbatim behind the admin key instead
-// of an org API key.
-func AdminOrgScope(adminKey string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return AdminAuth(adminKey)(InjectOrgFromPath(next))
-	}
-}
-
-// VerifyAdminKey handles GET /admin/verify (FD3): mounted behind AdminAuth,
-// so simply reaching this handler already proves the presented key is
-// valid — it exists purely to give the Admin UI's gate screen a cheap
-// pre-flight check (204) before mounting the shell, rather than waiting for
-// the first real API call to surface a 401.
-func VerifyAdminKey(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // RequireWrite rejects a read-only org API key on a mutating route with a
 // scope-explaining 403 (PD41, Slice 4). It reads the scope OrgAuth (or
 // OrgOrUser's org-key branch) injected into context via
 // access.ScopeFromContext; a request carrying no scope at all — an
-// admin-key request (AdminAuth/AdminOrgScope inject no scope) or a
+// admin-key request (AdminAuth/ConsoleAuth inject no scope) or a
 // user-token request (UserAuth/OrgOrUser's user-token branch inject none
 // either) — passes through untouched, since scope is an org-key concept
 // only (BOUNDARIES). Mount this behind OrgAuth/OrgOrUser on every org-key

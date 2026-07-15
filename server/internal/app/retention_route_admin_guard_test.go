@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -37,7 +38,30 @@ func newRetentionRouteRouter(t *testing.T) http.Handler {
 	organizationsHandler := orgshttp.NewHandler(orgFacade, errorRenderer)
 
 	cfg := &config.Config{AdminAPIKey: retentionRouteTestAdminKey}
-	return buildRouter(cfg, database, organizationsHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	noOperatorsYet := func(context.Context) (bool, error) { return false, nil }
+	return buildRouter(
+		cfg,
+		database,
+		organizationsHandler,
+		nil,            // accessHandler
+		nil,            // catalogHandler
+		nil,            // connectionsHandler
+		nil,            // connectWebHandler
+		nil,            // adminUIHandler
+		nil,            // executionHandler
+		nil,            // filesHandler
+		nil,            // loggingHandler
+		nil,            // triggersHandler
+		nil,            // deliveryHandler
+		nil,            // operatorHandler
+		nil,            // metricsHandler
+		nil,            // dashboardMetricsHandler
+		nil,            // verifyOrgKey
+		nil,            // verifyUserToken
+		nil,            // verifySession
+		noOperatorsYet, // operatorsExist
+		nil,            // logger
+	)
 }
 
 func doRetentionRouteRequest(router http.Handler, method, path, authorizationHeader, body string) *httptest.ResponseRecorder {

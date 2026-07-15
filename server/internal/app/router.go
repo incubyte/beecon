@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -34,10 +36,14 @@ func buildRouter(
 	loggingHandler *logginghttp.Handler,
 	triggersHandler *triggershttp.Handler,
 	deliveryHandler *deliveryhttp.Handler,
+	operatorHandler *accesshttp.OperatorHandler,
 	metricsHandler http.Handler,
 	dashboardMetricsHandler http.Handler,
 	verifyOrgKey authmw.Verify,
 	verifyUserToken authmw.VerifyUserToken,
+	verifySession authmw.VerifySession,
+	operatorsExist func(context.Context) (bool, error),
+	logger *slog.Logger,
 ) chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -60,12 +66,23 @@ func buildRouter(
 	r.Get("/connect/style.css", connectWebHandler.Stylesheet)
 
 	// /admin/* is the embedded Admin UI (PD47/FD3, Slice 1): a static SPA
-	// mount, and /admin/verify is a thin pre-flight check for the gate
-	// screen. Both sit outside the logged group below, the same reasoning as
-	// /connect/* — the admin key never lands in the chi request log, and the
-	// SPA's own static-asset requests would otherwise flood it.
+	// mount, sitting outside the logged group below, the same reasoning as
+	// /connect/* — the SPA's own static-asset requests would otherwise flood
+	// the request log. (Phase 5: /admin/verify's admin-key pre-flight check
+	// is retired — the SPA no longer holds an admin key at all; PD55's
+	// GET /api/v1/auth/me session probe replaces it.)
 	r.Handle("/admin/*", adminUIHandler)
-	r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Get("/admin/verify", authmw.VerifyAdminKey)
+
+	// POST /api/v1/auth/login (PD51/PD55) sits outside the logged group
+	// below, the same reasoning as /connect/* and /admin/*: it carries a
+	// password in its body, and must never be attributed to an operator
+	// (there is no session yet) the way the logged group's
+	// authmw.AttributeOperator will do for every other mutating console
+	// call from Slice 4 on. authmw.SameOriginOnly (Slice 3, FD-F) is
+	// login's own CSRF defense — the double-submit X-CSRF-Token check
+	// ConsoleAuth/OperatorSession apply everywhere else can't apply here,
+	// since there is no session yet to bind a token to.
+	r.With(authmw.SameOriginOnly(cfg.BaseURL)).Post("/api/v1/auth/login", operatorHandler.Login)
 
 	// orgOrUser guards the browser-facing subset of the API (PD20): tools
 	// list, expected-params, initiate connection, list/get own connections,
@@ -86,14 +103,82 @@ func buildRouter(
 		r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Method(http.MethodGet, "/metrics", metricsHandler)
 
 		r.Route("/api/v1", func(r chi.Router) {
+			// consoleAuth guards the Admin UI's general console surface
+			// (FD-A, architecture doc §3): a session cookie authenticates
+			// once operators exist; the installation admin key still works
+			// as a Bearer token during the pre-bootstrap break-glass
+			// window (PD54), and stops the moment the first operator
+			// exists (Slice 4, AC8). Replaces every AdminAuth mount below
+			// that used to guard the browser-facing console (PD39 gate).
+			consoleAuth := authmw.ConsoleAuth(verifySession, cfg.AdminAPIKey, operatorsExist)
+
+			// attributeOperator captures the acting operator's id on
+			// mutating console requests (PD56, Slice 4): mounted AFTER
+			// consoleAuth/authmw.OperatorSession in every chain below that
+			// needs it, since it depends on the operator id those middlewares
+			// already injected into context.
+			attributeOperator := authmw.AttributeOperator(logger)
+
+			// /operators (PD54/Slice 4) gathers every operator-account route
+			// under one mount, the same "one r.Route, no second top-level
+			// registration on an overlapping pattern" reason the
+			// /organizations block's own doc comment gives: bootstrap
+			// (admin-key, first-account-only), the session-guarded
+			// management surface (list/create/change-own-password/
+			// deactivate), and the break-glass admin-key reset-password all
+			// live under /operators/*, each with its own explicit per-route
+			// middleware rather than one r.Use — bootstrap and reset-password
+			// must never go through authmw.OperatorSession (no session can
+			// exist yet the first time bootstrap succeeds; reset-password
+			// must keep working even once operators exist and are all locked
+			// out).
+			r.Route("/operators", func(r chi.Router) {
+				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/bootstrap", operatorHandler.Bootstrap)
+
+				r.With(authmw.OperatorSession(verifySession)).Get("/", operatorHandler.ListOperators)
+				r.With(authmw.OperatorSession(verifySession), attributeOperator).Post("/", operatorHandler.CreateOperator)
+				r.With(authmw.OperatorSession(verifySession), attributeOperator).Post("/me/password", operatorHandler.ChangeMyPassword)
+				r.With(authmw.OperatorSession(verifySession), attributeOperator).Post("/{opId}/deactivate", operatorHandler.Deactivate)
+
+				// /operators/{opId}/reset-password (FD-B) is the break-glass
+				// recovery path: admin-key Bearer, works even after operators
+				// exist (unlike bootstrap) — the one console-adjacent write the
+				// admin key still performs post-bootstrap.
+				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/{opId}/reset-password", operatorHandler.ResetPassword)
+			})
+
+			// /auth/me (PD55) is the SPA's session probe: session-only,
+			// never the admin key — authmw.OperatorSession has no
+			// break-glass branch at all.
+			r.With(authmw.OperatorSession(verifySession)).Get("/auth/me", operatorHandler.Me)
+
+			// /auth/logout (Slice 2, AC1/AC7) is session-only, the same
+			// authmw.OperatorSession guard as /auth/me above - a request
+			// carrying no valid session never reaches the handler at
+			// all in production; the handler's own idempotency (a
+			// missing/already-revoked token still answers 204) is what
+			// makes a repeated logout call against an already-cleared
+			// cookie safe, and is exercised directly at the
+			// handler-test level (operator_handler_test.go convention
+			// of calling handler methods without the middleware stack).
+			r.With(authmw.OperatorSession(verifySession)).Post("/auth/logout", operatorHandler.Logout)
+
 			// /dashboard/metrics is Slice 3's typed JSON read for the Admin
 			// UI's dashboard (architecture doc §3, this slice's "metrics
-			// read path" decision): admin-guarded and installation-wide,
+			// read path" decision): console-guarded and installation-wide,
 			// like GET /metrics itself, sourced from the same registry.
-			r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Method(http.MethodGet, "/dashboard/metrics", dashboardMetricsHandler)
+			r.With(consoleAuth).Method(http.MethodGet, "/dashboard/metrics", dashboardMetricsHandler)
 
 			r.Route("/organizations", func(r chi.Router) {
-				r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
+				r.Use(consoleAuth)
+				// attributeOperator (PD56, Slice 4) runs after consoleAuth
+				// on every route in this whole subtree — every mutation an
+				// operator performs on an organization or its org-scoped
+				// console mount (connections/trigger-instances/users/
+				// governance/retention/webhook-endpoints/config below) is
+				// attributed; a no-op for the many GET routes here too
+				// (AttributeOperator only ever logs on a mutating method).
+				r.Use(attributeOperator)
 				r.Post("/", organizationsHandler.Create)
 				r.Get("/", organizationsHandler.List)
 
@@ -231,7 +316,7 @@ func buildRouter(
 			})
 
 			r.Route("/integrations", func(r chi.Router) {
-				r.With(authmw.AdminAuth(cfg.AdminAPIKey)).Post("/", catalogHandler.Create)
+				r.With(consoleAuth, attributeOperator).Post("/", catalogHandler.Create)
 				r.With(orgOrUser).Get("/", catalogHandler.List)
 				r.With(orgOrUser).Get("/{intgId}/expected-params", catalogHandler.GetExpectedParams)
 			})
@@ -246,7 +331,7 @@ func buildRouter(
 			// definition's bundle already carries every tool and trigger it
 			// declares.
 			r.Route("/provider-definitions", func(r chi.Router) {
-				r.Use(authmw.AdminAuth(cfg.AdminAPIKey))
+				r.Use(consoleAuth)
 				r.Get("/", catalogHandler.ListProviderDefinitions)
 				r.Get("/{slug}", catalogHandler.GetProviderDefinition)
 			})

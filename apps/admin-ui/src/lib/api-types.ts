@@ -493,3 +493,31 @@ export interface ConfigImportApplyResult {
   applied: ConfigChange[];
   secrets: ConfigImportedSecret[];
 }
+
+/**
+ * Phase 5 Slice 4 additions mirroring
+ * server/internal/access/driving/httpapi/operator_dto.go: operator account
+ * management (list/create/deactivate) and self-service password change,
+ * read/written through GET/POST /api/v1/operators (+ /me/password,
+ * /{opId}/deactivate) — installation-wide, never org-scoped, like the
+ * operator's own session.
+ */
+export type OperatorStatus = "ACTIVE" | "DISABLED";
+
+/** OperatorAccount is one row of GET /api/v1/operators' response (AC3):
+ * email, status, and created date — never a password hash. */
+export interface OperatorAccount {
+  id: string;
+  email: string;
+  status: OperatorStatus;
+  createdAt: string;
+}
+
+export type OperatorsPage = Page<OperatorAccount>;
+
+/** CreatedOperator is POST /api/v1/operators' response (AC1): never the
+ * password or its hash. */
+export interface CreatedOperator {
+  id: string;
+  email: string;
+}

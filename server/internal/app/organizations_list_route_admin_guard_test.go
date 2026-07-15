@@ -39,7 +39,30 @@ func newOrganizationsListRouter(t *testing.T) (http.Handler, *organizations.Faca
 	organizationsHandler := orgshttp.NewHandler(orgFacade, errorRenderer)
 
 	cfg := &config.Config{AdminAPIKey: orgsListTestAdminKey}
-	router := buildRouter(cfg, database, organizationsHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	noOperatorsYet := func(context.Context) (bool, error) { return false, nil }
+	router := buildRouter(
+		cfg,
+		database,
+		organizationsHandler,
+		nil,            // accessHandler
+		nil,            // catalogHandler
+		nil,            // connectionsHandler
+		nil,            // connectWebHandler
+		nil,            // adminUIHandler
+		nil,            // executionHandler
+		nil,            // filesHandler
+		nil,            // loggingHandler
+		nil,            // triggersHandler
+		nil,            // deliveryHandler
+		nil,            // operatorHandler
+		nil,            // metricsHandler
+		nil,            // dashboardMetricsHandler
+		nil,            // verifyOrgKey
+		nil,            // verifyUserToken
+		nil,            // verifySession
+		noOperatorsYet, // operatorsExist
+		nil,            // logger
+	)
 	return router, orgFacade
 }
 

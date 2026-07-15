@@ -3,30 +3,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { server } from "@/test/msw/server";
 
-import { ApiError, createApiClient, verifyAdminKey } from "./api-client";
-import { clearAdminKey, getAdminKey, setAdminKey } from "./auth";
+import { ApiError, apiClient, createApiClient } from "./api-client";
+import { queryClient, queryKeys } from "./query";
 
 afterEach(() => {
-  clearAdminKey();
+  document.cookie = "beecon_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+  queryClient.setQueryData(queryKeys.auth.reauthRequired(), false);
 });
 
 describe("createApiClient", () => {
-  it("injects Authorization: Bearer <key> from the supplied key store on every request", async () => {
-    let capturedAuthHeader: string | null = null;
-    server.use(
-      http.get("/api/v1/widgets", ({ request }) => {
-        capturedAuthHeader = request.headers.get("Authorization");
-        return HttpResponse.json({ items: [] });
-      }),
-    );
-    const client = createApiClient({ getKey: () => "beecon_admin_the-key" });
-
-    await client.get("/widgets");
-
-    expect(capturedAuthHeader).toBe("Bearer beecon_admin_the-key");
-  });
-
-  it("sends no Authorization header when there is no key", async () => {
+  it("sends no Authorization header — the session cookie authenticates instead", async () => {
     let capturedAuthHeader: string | null = "not-yet-captured";
     server.use(
       http.get("/api/v1/widgets", ({ request }) => {
@@ -34,7 +20,7 @@ describe("createApiClient", () => {
         return HttpResponse.json({ items: [] });
       }),
     );
-    const client = createApiClient({ getKey: () => null });
+    const client = createApiClient();
 
     await client.get("/widgets");
 
@@ -43,7 +29,7 @@ describe("createApiClient", () => {
 
   it("resolves GET with the parsed JSON body", async () => {
     server.use(http.get("/api/v1/widgets", () => HttpResponse.json({ items: ["a", "b"] })));
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     const result = await client.get<{ items: string[] }>("/widgets");
 
@@ -58,54 +44,68 @@ describe("createApiClient", () => {
         return HttpResponse.json({ id: "widget_1" }, { status: 201 });
       }),
     );
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     await client.post("/widgets", { name: "Acme" });
 
     expect(capturedBody).toEqual({ name: "Acme" });
   });
 
-  // --- 401 handling (Slice 1, AC7: an API call that returns 401 sends the
-  // operator back to the gate). ---
+  // --- 401 handling (Phase 5 Slice 1, PD49/PD55: a call other than the
+  // session probe itself returning 401 invalidates the auth.me probe so the
+  // SPA falls back to the login screen). ---
 
-  it("calls onUnauthorized when a request returns 401", async () => {
+  it("calls onUnauthorized when a request other than /auth/me returns 401", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse(null, { status: 401 })));
     let unauthorizedCalls = 0;
-    const client = createApiClient({ getKey: () => "k", onUnauthorized: () => unauthorizedCalls++ });
+    const client = createApiClient({ onUnauthorized: () => unauthorizedCalls++ });
 
     await client.get("/widgets").catch(() => {});
 
     expect(unauthorizedCalls).toBe(1);
   });
 
+  it("does not call onUnauthorized for the /auth/me probe's own 401 (its own query error state already conveys this)", async () => {
+    server.use(http.get("/api/v1/auth/me", () => new HttpResponse(null, { status: 401 })));
+    let unauthorizedCalls = 0;
+    const client = createApiClient({ onUnauthorized: () => unauthorizedCalls++ });
+
+    await client.get("/auth/me").catch(() => {});
+
+    expect(unauthorizedCalls).toBe(0);
+  });
+
   it("does not call onUnauthorized for a non-401 error", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse(null, { status: 500 })));
     let unauthorizedCalls = 0;
-    const client = createApiClient({ getKey: () => "k", onUnauthorized: () => unauthorizedCalls++ });
+    const client = createApiClient({ onUnauthorized: () => unauthorizedCalls++ });
 
     await client.get("/widgets").catch(() => {});
 
     expect(unauthorizedCalls).toBe(0);
   });
 
-  // A client built with no overrides wires the real in-memory auth store
-  // (createApiClient's own defaults: getKey ?? getAdminKey, onUnauthorized ??
-  // clearAdminKey) — this pins the real end-to-end wiring Slice 1 depends
-  // on: a 401 through the real store actually clears the key the gate
-  // reads, not just a test double standing in for it. (Built inside the
-  // test body, not imported as the module-level `apiClient` singleton: the
-  // singleton is constructed at module-import time, before MSW's
-  // server.listen() has patched the global fetch, and so permanently binds
-  // the pre-interception fetch — an MSW/module-timing artifact of static
-  // imports, not something a real page load ever hits.)
-  it("a client wired with the real auth store clears the in-memory admin key on a 401", async () => {
+  // --- The real default onUnauthorized (Slice 5): markSessionExpiredMidWork,
+  // not a hard session invalidation — flags the reauthRequired flag rather
+  // than tearing down the cached auth.me probe, so AppShell stays mounted
+  // underneath ReauthModal instead of bouncing to LoginScreen. Exercised
+  // through the module's real singleton `apiClient` (not a custom-built
+  // client with an injected callback), since the default itself is what's
+  // under test here. ---
+  it("the default client (no onUnauthorized override) flags the session expired mid-work on a 401 from a call other than /auth/me", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse(null, { status: 401 })));
-    setAdminKey("beecon_admin_will-be-cleared");
-    const realClient = createApiClient();
 
-    await realClient.get("/widgets").catch(() => {});
+    await apiClient.get("/widgets").catch(() => {});
 
-    expect(getAdminKey()).toBeNull();
+    expect(queryClient.getQueryData(queryKeys.auth.reauthRequired())).toBe(true);
+  });
+
+  it("the default client does not flag the session expired mid-work for the /auth/me probe's own 401", async () => {
+    server.use(http.get("/api/v1/auth/me", () => new HttpResponse(null, { status: 401 })));
+
+    await apiClient.get("/auth/me").catch(() => {});
+
+    expect(queryClient.getQueryData(queryKeys.auth.reauthRequired())).toBe(false);
   });
 
   // --- PD5 DomainError envelope parsing. ---
@@ -119,7 +119,7 @@ describe("createApiClient", () => {
         ),
       ),
     );
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     await expect(client.get("/widgets")).rejects.toMatchObject({
       status: 422,
@@ -131,83 +131,117 @@ describe("createApiClient", () => {
 
   it("throws an ApiError instance specifically, not a plain object", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse(null, { status: 500 })));
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     await expect(client.get("/widgets")).rejects.toBeInstanceOf(ApiError);
   });
 
   it("falls back to a generic error shape when the error body isn't valid JSON", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse("not json", { status: 500 })));
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     await expect(client.get("/widgets")).rejects.toMatchObject({ status: 500, code: "unknown_error" });
   });
 
   it("returns undefined for a 204 No Content response", async () => {
     server.use(http.get("/api/v1/widgets", () => new HttpResponse(null, { status: 204 })));
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     const result = await client.get("/widgets");
 
     expect(result).toBeUndefined();
   });
 
-  // BUG FOUND DURING SLICE 3 TESTING (not fixed here — reported to the
-  // developer/slice-coder): request() only special-cases HTTP 204 before
-  // calling response.json(); a 202 Accepted with an empty body — exactly
-  // what the real backend returns for POST .../events/{evtId}/redeliver
-  // (delivery.Handler.Redeliver, confirmed 202 with a 0-byte body by the Go
-  // integration test's own request log) — makes response.json() throw
-  // "Unexpected end of JSON input" on the empty string, so
-  // useRedeliverEvent's mutation (features/events/api.ts) always reports
-  // isError even when the server accepted the redeliver. This test encodes
-  // the INTENDED behavior (resolve, don't throw, for any empty-bodied 2xx —
-  // not just 204) and is expected to fail until request() is fixed to treat
-  // "no body to parse" the same way for every empty-bodied success status,
-  // not only 204.
-  it("BUG: resolves (does not throw) for a 202 Accepted response with an empty body", async () => {
+  it("resolves (does not throw) for a 202 Accepted response with an empty body", async () => {
     server.use(http.post("/api/v1/widgets", () => new HttpResponse(null, { status: 202 })));
-    const client = createApiClient({ getKey: () => "k" });
+    const client = createApiClient();
 
     await expect(client.post("/widgets")).resolves.toBeUndefined();
   });
-});
 
-describe("verifyAdminKey", () => {
-  it("resolves true for a 204 response", async () => {
-    server.use(http.get("/admin/verify", () => new HttpResponse(null, { status: 204 })));
+  // --- X-CSRF-Token double-submit header (Phase 5 Slice 3, PD52): attached
+  // automatically on every mutating call, read fresh from the non-HttpOnly
+  // beecon_csrf cookie readCsrfToken() exposes; omitted on GET, where the
+  // server never checks it. ---
 
-    await expect(verifyAdminKey("any-key")).resolves.toBe(true);
-  });
+  describe("X-CSRF-Token header", () => {
+    it("attaches X-CSRF-Token (read from the beecon_csrf cookie) on POST", async () => {
+      document.cookie = "beecon_csrf=the-csrf-token";
+      let capturedHeader: string | null = "not-yet-captured";
+      server.use(
+        http.post("/api/v1/widgets", ({ request }) => {
+          capturedHeader = request.headers.get("X-CSRF-Token");
+          return HttpResponse.json({ id: "widget_1" }, { status: 201 });
+        }),
+      );
+      const client = createApiClient();
 
-  it("resolves false for a 401 response", async () => {
-    server.use(http.get("/admin/verify", () => new HttpResponse(null, { status: 401 })));
+      await client.post("/widgets", { name: "Acme" });
 
-    await expect(verifyAdminKey("any-key")).resolves.toBe(false);
-  });
+      expect(capturedHeader).toBe("the-csrf-token");
+    });
 
-  it("resolves false (never throws) when the network request itself fails", async () => {
-    server.use(
-      http.get("/admin/verify", () => {
-        throw new Error("network down");
-      }),
-    );
+    it("attaches X-CSRF-Token on PUT", async () => {
+      document.cookie = "beecon_csrf=the-csrf-token";
+      let capturedHeader: string | null = "not-yet-captured";
+      server.use(
+        http.put("/api/v1/widgets/widget_1", ({ request }) => {
+          capturedHeader = request.headers.get("X-CSRF-Token");
+          return HttpResponse.json({ id: "widget_1" });
+        }),
+      );
+      const client = createApiClient();
 
-    await expect(verifyAdminKey("any-key")).resolves.toBe(false);
-  });
+      await client.put("/widgets/widget_1", { name: "Acme" });
 
-  it("sends the candidate key as the Bearer token, not whatever is in the in-memory store", async () => {
-    setAdminKey("beecon_admin_currently-stored");
-    let capturedAuthHeader: string | null = null;
-    server.use(
-      http.get("/admin/verify", ({ request }) => {
-        capturedAuthHeader = request.headers.get("Authorization");
-        return new HttpResponse(null, { status: 204 });
-      }),
-    );
+      expect(capturedHeader).toBe("the-csrf-token");
+    });
 
-    await verifyAdminKey("beecon_admin_candidate");
+    it("attaches X-CSRF-Token on DELETE", async () => {
+      document.cookie = "beecon_csrf=the-csrf-token";
+      let capturedHeader: string | null = "not-yet-captured";
+      server.use(
+        http.delete("/api/v1/widgets/widget_1", ({ request }) => {
+          capturedHeader = request.headers.get("X-CSRF-Token");
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+      const client = createApiClient();
 
-    expect(capturedAuthHeader).toBe("Bearer beecon_admin_candidate");
+      await client.delete("/widgets/widget_1");
+
+      expect(capturedHeader).toBe("the-csrf-token");
+    });
+
+    it("omits X-CSRF-Token on GET", async () => {
+      document.cookie = "beecon_csrf=the-csrf-token";
+      let capturedHeader: string | null = "not-yet-captured";
+      server.use(
+        http.get("/api/v1/widgets", ({ request }) => {
+          capturedHeader = request.headers.get("X-CSRF-Token");
+          return HttpResponse.json({ items: [] });
+        }),
+      );
+      const client = createApiClient();
+
+      await client.get("/widgets");
+
+      expect(capturedHeader).toBeNull();
+    });
+
+    it("omits X-CSRF-Token on a mutating call when the beecon_csrf cookie is absent (e.g. login, which has no session yet)", async () => {
+      let capturedHeader: string | null = "not-yet-captured";
+      server.use(
+        http.post("/api/v1/widgets", ({ request }) => {
+          capturedHeader = request.headers.get("X-CSRF-Token");
+          return HttpResponse.json({ id: "widget_1" }, { status: 201 });
+        }),
+      );
+      const client = createApiClient();
+
+      await client.post("/widgets", { name: "Acme" });
+
+      expect(capturedHeader).toBeNull();
+    });
   });
 });

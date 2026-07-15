@@ -135,6 +135,10 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		WithInstallationDefaultRetentionDays(retentionDays)
 	accessFacade := buildAccessFacade(database, tokenVault, now)
 	accessHandler := accesshttp.NewHandler(accessFacade, errorRenderer)
+	operatorFacade := buildOperatorFacade(database, sessionTTLOrDefault(deps.Config.SessionTTL), now).
+		WithLoginThrottle(loginMaxAttemptsOrDefault(deps.Config.LoginMaxAttempts), loginLockoutOrDefault(deps.Config.LoginLockout))
+	secureCookies := config.SecureCookies(deps.Config.BaseURL)
+	operatorHandler := accesshttp.NewOperatorHandler(operatorFacade, errorRenderer, secureCookies)
 	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now, organizationsFacade)
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
 		_ = database.Close()
@@ -266,10 +270,14 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		loggingHandler,
 		triggersHandler,
 		deliveryHandler,
+		operatorHandler,
 		metricsRegistry.Handler(),
 		metricsRegistry.SummaryHandler(),
 		accessFacade.Verify,
 		accessFacade.VerifyUserToken,
+		operatorFacade.VerifySession,
+		operatorFacade.OperatorsExist,
+		deps.Logger,
 	)
 
 	return &Wired{
@@ -312,6 +320,45 @@ func buildAccessFacade(database *upstreambun.DB, secretVault *vault.Vault, now f
 	signingSecrets := accessbun.NewSigningSecretRepository(database)
 	webhookSecrets := accessbun.NewWebhookSecretRepository(database)
 	return access.NewFacade(repo, repo, repo, signingSecrets, signingSecrets, webhookSecrets, secretVault, idgen.Prefixed("key_"), idgen.Prefixed("sks_"), idgen.Prefixed("usk_"), idgen.Prefixed("whs_"), now)
+}
+
+// buildOperatorFacade wires the operator-auth facade (PD49/PD58, Phase 5
+// Slice 1) with its own bun-backed operator/session repositories —
+// installation-level, so no organizations dependency here at all.
+func buildOperatorFacade(database *upstreambun.DB, sessionTTL time.Duration, now func() time.Time) *access.OperatorFacade {
+	operators := accessbun.NewOperatorRepository(database)
+	sessions := accessbun.NewOperatorSessionRepository(database)
+	return access.NewOperatorFacade(operators, sessions, idgen.Prefixed("op_"), idgen.Prefixed("opsess_"), now, sessionTTL)
+}
+
+// sessionTTLOrDefault falls back to config.DefaultSessionTTLSeconds when
+// configured is unset (zero) — config.Load already applies this default, but
+// Deps.Config may also be built directly (tests) without going through Load.
+func sessionTTLOrDefault(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return config.DefaultSessionTTLSeconds * time.Second
+	}
+	return configured
+}
+
+// loginMaxAttemptsOrDefault falls back to config.DefaultLoginMaxAttempts when
+// configured is unset (zero or negative) — config.Load already applies this
+// default, but Deps.Config may also be built directly (tests) without going
+// through Load.
+func loginMaxAttemptsOrDefault(configured int) int {
+	if configured <= 0 {
+		return config.DefaultLoginMaxAttempts
+	}
+	return configured
+}
+
+// loginLockoutOrDefault falls back to config.DefaultLoginLockoutSeconds when
+// configured is unset (zero or negative).
+func loginLockoutOrDefault(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return config.DefaultLoginLockoutSeconds * time.Second
+	}
+	return configured
 }
 
 // buildCatalogFacade wires the catalog facade with its bun repository and

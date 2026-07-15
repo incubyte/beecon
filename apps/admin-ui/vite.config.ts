@@ -36,7 +36,6 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://localhost:8080",
-      "/admin/verify": "http://localhost:8080",
     },
   },
 });

@@ -2,21 +2,28 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { routeTree } from "@/routeTree.gen";
 import { server } from "@/test/msw/server";
-import { clearAdminKey } from "@/lib/auth";
 
-afterEach(() => {
-  clearAdminKey();
-});
-
-/** renderAppAuthenticated mirrors __root.test.tsx's own renderApp, but logs
- * in through the real gate flow first — the redirect this file tests only
- * ever matters once the shell has mounted. */
+/** renderAppAuthenticated mirrors the production route tree (session guard,
+ * shell, Organizations page), logging in through the real login flow first
+ * — the redirect this file tests only ever matters once the shell has
+ * mounted. */
 async function renderAppAuthenticated(initialEntry: string) {
-  server.use(http.get("/admin/verify", () => new HttpResponse(null, { status: 204 })));
+  let loggedIn = false;
+  server.use(
+    http.post("/api/v1/auth/login", () => {
+      loggedIn = true;
+      return new HttpResponse(null, { status: 204 });
+    }),
+    http.get("/api/v1/auth/me", () =>
+      loggedIn
+        ? HttpResponse.json({ id: "op_1", email: "operator@example.com" })
+        : new HttpResponse(null, { status: 401 }),
+    ),
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ["/organizations"] }) });
   render(
@@ -25,8 +32,9 @@ async function renderAppAuthenticated(initialEntry: string) {
     </QueryClientProvider>,
   );
   await screen.findByRole("heading", { name: /beecon admin/i });
-  fireEvent.change(screen.getByLabelText(/admin key/i), { target: { value: "beecon_admin_good-key" } });
-  fireEvent.click(screen.getByRole("button", { name: /open console/i }));
+  fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "operator@example.com" } });
+  fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "correct-password" } });
+  fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
   await screen.findByRole("complementary", { name: /primary/i });
 
   await router.navigate({ to: initialEntry });

@@ -23,6 +23,7 @@ function renderSidebarAt(initialPath: string) {
   const usersRoute = createRoute({ getParentRoute: () => rootRoute, path: "/users", component: () => null });
   const apiKeysRoute = createRoute({ getParentRoute: () => rootRoute, path: "/api-keys", component: () => null });
   const governanceRoute = createRoute({ getParentRoute: () => rootRoute, path: "/governance", component: () => null });
+  const operatorsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/operators", component: () => null });
   const router = createRouter({
     routeTree: rootRoute.addChildren([
       connectionsRoute,
@@ -33,6 +34,7 @@ function renderSidebarAt(initialPath: string) {
       usersRoute,
       apiKeysRoute,
       governanceRoute,
+      operatorsRoute,
     ]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),
   });
@@ -108,5 +110,20 @@ describe("Sidebar", () => {
     renderSidebarAt("/connections");
 
     expect(await screen.findByRole("link", { name: /^governance$/i })).toHaveAttribute("href", "/governance");
+  });
+
+  // Phase 5 Slice 4: the ADMINISTER group's "Operators" link. Operator
+  // accounts are installation-level, not org-scoped (architecture doc
+  // §2.5/§8 — an operator administers the whole installation, like the
+  // admin key it replaces): OperatorsPage itself never reads an `?org=`
+  // param at all (its own list request carries no orgId, unlike
+  // Users/API Keys above). The sidebar's own link-building is uniform
+  // across every item, so an org param present in the URL still rides
+  // along in the href — but it is inert for this destination.
+  it("is a real link (not a disabled placeholder) that routes to /operators", async () => {
+    renderSidebarAt("/connections?org=org_42");
+
+    const operatorsLink = await screen.findByRole("link", { name: /^operators$/i });
+    expect(operatorsLink.getAttribute("href")).toMatch(/^\/operators/);
   });
 });

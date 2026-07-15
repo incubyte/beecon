@@ -313,11 +313,22 @@ func TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
 // depth/oldest-pending-age gauges are installation-wide, scrape-time queries
 // by design — there is no organization to filter by, not an oversight
 // (StatusCounter's and OutboxStats' own doc comments, connections/port.go and
-// delivery/port.go).
+// delivery/port.go); and access.Operators/access.OperatorSessions (Phase 5
+// Slice 1, PD49/PD58) are the same "no organization to scope by" rationale
+// PrefixLookup/SigningSecretLookup already established, one credential class
+// later: an Operator administers the whole installation (not one
+// organization), exactly like the admin key it replaces, and an
+// OperatorSession belongs to one operator, never to an organization — see
+// TestAccessOperatorsRepository_WouldFailOrgScopingIfNotWhitelisted and
+// TestAccessOperatorSessionsRepository_WouldFailOrgScopingIfNotWhitelisted
+// (operators_repository_installation_level_test.go) for the pinning tests
+// that prove these two whitelist entries are deliberate.
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
 		reflect.TypeOf((*access.SigningSecretLookup)(nil)).Elem(),
+		reflect.TypeOf((*access.Operators)(nil)).Elem(),
+		reflect.TypeOf((*access.OperatorSessions)(nil)).Elem(),
 		reflect.TypeOf((*organizations.Repository)(nil)).Elem(),
 		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
 		reflect.TypeOf((*connections.OAuthRepository)(nil)).Elem(),

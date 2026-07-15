@@ -25,6 +25,16 @@ export const queryClient = new QueryClient({
  * only) — no filter query params to key on.
  */
 export const queryKeys = {
+  // Phase 5 Slice 1 (PD49/PD55): the session probe's own key — installation-
+  // wide, not org-scoped, like organizations.list itself.
+  auth: {
+    me: () => ["auth", "me"] as const,
+    // Slice 5: a plain react-query-cache-backed boolean flag (see
+    // lib/session-state.ts) — not itself fetched from the server — that
+    // tracks whether a console call hit a 401 mid-session, distinct from
+    // auth.me's own "is there a session at all" state.
+    reauthRequired: () => ["auth", "reauthRequired"] as const,
+  },
   organizations: {
     list: (cursor?: string) => ["organizations", "list", cursor ?? null] as const,
   },
@@ -71,6 +81,11 @@ export const queryKeys = {
     list: () => ["provider-definitions", "list"] as const,
     detail: (slug: string) => ["provider-definitions", "detail", slug] as const,
     bundles: () => ["provider-definitions", "bundles"] as const,
+  },
+  // Phase 5 Slice 4: installation-wide, never org-scoped — an operator
+  // administers the whole installation, like the admin key it replaces.
+  operators: {
+    list: () => ["operators", "list"] as const,
   },
 };
 

@@ -1,5 +1,11 @@
-import { clearAdminKey, getAdminKey } from "./auth";
+import { readCsrfToken } from "./csrf";
+import { markSessionExpiredMidWork } from "./session-state";
 import type { DomainErrorBody } from "./api-types";
+
+/** mutatingMethods is the double-submit CSRF header's own scope (Slice 3,
+ * PD52): the session cookie's X-CSRF-Token check on the server applies only
+ * to these — GET/HEAD never carry (or need) the header. */
+const mutatingMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /** ApiError is the typed shape every rejected api-client call throws,
  * carrying the PD5 envelope's machine-readable code and any details. */
@@ -22,7 +28,6 @@ export interface ApiClientOptions {
    * directly — the boundary the slice-tester needs (design brief §"Boundaries
    * are explicit"). */
   fetchImpl?: typeof fetch;
-  getKey?: () => string | null;
   onUnauthorized?: () => void;
 }
 
@@ -34,18 +39,33 @@ export interface ApiClient {
 }
 
 /**
- * createApiClient builds a thin fetch wrapper over /api/v1: it injects
- * `Authorization: Bearer <admin key>` from the in-memory PD39 store on
- * every call, parses the PD5 DomainError envelope into a typed ApiError,
- * and — on a 401, whether the key was wrong or an existing session expired
- * mid-use — clears the in-memory key so the gate guard in routes/__root.tsx
- * takes over on the next render (Slice 1, AC7). Every dependency is a
- * constructor parameter, never a hardcoded import, so a test can substitute
- * its own fetch and its own key store.
+ * createApiClient builds a thin fetch wrapper over /api/v1 (Phase 5 Slice 1,
+ * PD49/PD55): it sends the same-origin `beecon_session` cookie automatically
+ * (browsers attach same-origin cookies to `fetch` by default — no JS-held
+ * credential of any kind, unlike the retired PD39 admin-key store), parses
+ * the PD5 DomainError envelope into a typed ApiError, and — on a 401 from
+ * any call *other than* the session probe itself — flags the session as
+ * expired mid-work (Slice 5, `markSessionExpiredMidWork`) rather than
+ * invalidating the `auth.me` probe directly: the cached authenticated probe
+ * result is left in place, so AppShell stays mounted underneath ReauthModal
+ * instead of a hard bounce to LoginScreen that would lose in-progress page
+ * state. (The probe's own 401 is already the query's normal "not
+ * authenticated" error state — LoginScreen and the initial unauthenticated
+ * load are untouched by this.) Every dependency is a constructor
+ * parameter, never a hardcoded import, so a test can substitute its own
+ * fetch and its own onUnauthorized.
+ *
+ * On every mutating request (POST/PUT/PATCH/DELETE) it also attaches
+ * `X-CSRF-Token`, read fresh from the non-HttpOnly beecon_csrf cookie via
+ * readCsrfToken() on each call (Slice 3, PD52) — the double-submit value the
+ * server's authmw.ConsoleAuth/OperatorSession compare against the session's
+ * own CSRF token. GET/HEAD never attach it; when the cookie is absent (no
+ * session yet, e.g. the login call itself) the header is simply omitted, and
+ * the server rejects the request on the missing session rather than a CSRF
+ * mismatch.
  */
 export function createApiClient(options: ApiClientOptions = {}): ApiClient {
-  const getKey = options.getKey ?? getAdminKey;
-  const onUnauthorized = options.onUnauthorized ?? clearAdminKey;
+  const onUnauthorized = options.onUnauthorized ?? markSessionExpiredMidWork;
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // Resolved per-request, not captured once at createApiClient() call time:
@@ -59,14 +79,23 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const doFetch = options.fetchImpl ?? fetch;
     const headers = new Headers(init?.headers);
     headers.set("Accept", "application/json");
-    const key = getKey();
-    if (key) {
-      headers.set("Authorization", `Bearer ${key}`);
+    if (init?.method && mutatingMethods.has(init.method)) {
+      const csrfToken = readCsrfToken();
+      if (csrfToken) {
+        headers.set("X-CSRF-Token", csrfToken);
+      }
     }
 
-    const response = await doFetch(`/api/v1${path}`, { ...init, headers });
+    const response = await doFetch(`/api/v1${path}`, {
+      ...init,
+      headers,
+      // Explicit, even though "same-origin" is fetch's own default: the
+      // whole PD52 session model depends on the beecon_session cookie
+      // riding every /api/v1 call the SPA makes under /admin, same-origin.
+      credentials: "same-origin",
+    });
 
-    if (response.status === 401) {
+    if (response.status === 401 && path !== "/auth/me") {
       onUnauthorized();
     }
     if (!response.ok) {
@@ -127,21 +156,3 @@ async function parseErrorBody(response: Response): Promise<DomainErrorBody> {
 /** The app's single, real api-client instance. Tests build their own via
  * createApiClient with a mocked fetchImpl instead of importing this. */
 export const apiClient = createApiClient();
-
-/**
- * verifyAdminKey calls GET /admin/verify (FD3) with the given candidate key
- * — never the in-memory stored one, since this runs before the gate has
- * accepted it — and reports whether the key is valid (204) or not (401 or
- * any other failure). It never throws: the gate screen shows the same
- * inline error either way (Slice 1, AC5).
- */
-export async function verifyAdminKey(key: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
-  try {
-    const response = await fetchImpl("/admin/verify", {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    return response.status === 204;
-  } catch {
-    return false;
-  }
-}

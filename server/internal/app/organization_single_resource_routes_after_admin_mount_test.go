@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -35,13 +36,36 @@ func newSingleOrgRouteRouter(t *testing.T) http.Handler {
 	organizationsHandler := orgshttp.NewHandler(orgFacade, errorRenderer)
 
 	cfg := &config.Config{AdminAPIKey: singleOrgRouteTestAdminKey}
-	return buildRouter(cfg, database, organizationsHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	noOperatorsYet := func(context.Context) (bool, error) { return false, nil }
+	return buildRouter(
+		cfg,
+		database,
+		organizationsHandler,
+		nil,            // accessHandler
+		nil,            // catalogHandler
+		nil,            // connectionsHandler
+		nil,            // connectWebHandler
+		nil,            // adminUIHandler
+		nil,            // executionHandler
+		nil,            // filesHandler
+		nil,            // loggingHandler
+		nil,            // triggersHandler
+		nil,            // deliveryHandler
+		nil,            // operatorHandler
+		nil,            // metricsHandler
+		nil,            // dashboardMetricsHandler
+		nil,            // verifyOrgKey
+		nil,            // verifyUserToken
+		nil,            // verifySession
+		noOperatorsYet, // operatorsExist
+		nil,            // logger
+	)
 }
 
 // TestBuildRouter_SingleOrganizationGetAndPatchStillWorkAfterTheAdminConsoleMount
 // is a regression pin discovered while testing Slice 2: router.go mounts the
 // Admin UI's new r.Route("/{orgId}", ...) subrouter (for /connections and
-// /trigger-instances, guarded by AdminOrgScope) inside the very same
+// /trigger-instances, guarded by the console mount) inside the very same
 // r.Route("/organizations", ...) block that already registers direct leaf
 // handlers on the identical pattern — r.Get("/{orgId}", ...) and
 // r.Patch("/{orgId}", ...), i.e. the pre-existing (Phase 1)
@@ -50,7 +74,7 @@ func newSingleOrgRouteRouter(t *testing.T) http.Handler {
 // subrouter mount exists, both pre-existing routes 404 — this is a
 // regression the Slice 2 router change introduces, not a testability gap
 // this file works around, and it fails right now on the current
-// router.go. The AdminOrgScope-mounted /connections and /trigger-instances
+// router.go. The console-mounted /connections and /trigger-instances
 // routes underneath are unaffected (a different, deeper node); only the
 // exact "/{orgId}" leaf breaks.
 func TestBuildRouter_SingleOrganizationGetAndPatchStillWorkAfterTheAdminConsoleMount(t *testing.T) {

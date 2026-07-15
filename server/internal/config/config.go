@@ -63,6 +63,22 @@ const DefaultRetentionDays = 30
 // once a day.
 const DefaultPurgeIntervalSeconds = 24 * 60 * 60
 
+// DefaultSessionTTLSeconds is BEECON_SESSION_TTL's fallback when unset
+// (PD51/PD58, Phase 5 operator-auth Slice 1): the absolute lifetime of an
+// operator session, from login to forced re-authentication — 12 hours.
+const DefaultSessionTTLSeconds = 12 * 60 * 60
+
+// DefaultLoginMaxAttempts is BEECON_LOGIN_MAX_ATTEMPTS' fallback when unset
+// (Phase 5 operator-auth Slice 5, FD-G): how many consecutive wrong-password
+// guesses against one operator account are tolerated before the per-account
+// brute-force lockout engages.
+const DefaultLoginMaxAttempts = 5
+
+// DefaultLoginLockoutSeconds is BEECON_LOGIN_LOCKOUT's fallback when unset
+// (Phase 5 operator-auth Slice 5, FD-G): how long a locked-out account stays
+// locked once DefaultLoginMaxAttempts is reached — 15 minutes.
+const DefaultLoginLockoutSeconds = 15 * 60
+
 // DefaultWebhookEndpointCap is BEECON_WEBHOOK_ENDPOINT_CAP's fallback when
 // unset (PD45, Phase 4 Slice 8): the maximum number of webhook endpoints
 // one organization may register.
@@ -101,6 +117,9 @@ type Config struct {
 	PurgeInterval               time.Duration
 	WebhookEndpointCap          int
 	EndpointAutoDisableFailures int
+	SessionTTL                  time.Duration
+	LoginMaxAttempts            int
+	LoginLockout                time.Duration
 }
 
 // Load reads .env.local (if present) then the process environment, and
@@ -188,6 +207,21 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	sessionTTL, err := parseSecondsSetting("BEECON_SESSION_TTL", env("BEECON_SESSION_TTL"), DefaultSessionTTLSeconds)
+	if err != nil {
+		return nil, err
+	}
+
+	loginMaxAttempts, err := parsePositiveIntSetting("BEECON_LOGIN_MAX_ATTEMPTS", env("BEECON_LOGIN_MAX_ATTEMPTS"), DefaultLoginMaxAttempts)
+	if err != nil {
+		return nil, err
+	}
+
+	loginLockout, err := parseSecondsSetting("BEECON_LOGIN_LOCKOUT", env("BEECON_LOGIN_LOCKOUT"), DefaultLoginLockoutSeconds)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		DatabaseDriver:              driver,
 		DatabaseURL:                 databaseURL,
@@ -205,7 +239,18 @@ func Load() (*Config, error) {
 		PurgeInterval:               purgeInterval,
 		WebhookEndpointCap:          webhookEndpointCap,
 		EndpointAutoDisableFailures: endpointAutoDisableFailures,
+		SessionTTL:                  sessionTTL,
+		LoginMaxAttempts:            loginMaxAttempts,
+		LoginLockout:                loginLockout,
 	}, nil
+}
+
+// SecureCookies reports whether the operator-console session/CSRF cookies
+// should carry the Secure flag (FD-E): derived from whether baseURL is
+// served over https — never a separate config knob, so it can't drift out
+// of sync with the installation's actual public scheme.
+func SecureCookies(baseURL string) bool {
+	return strings.HasPrefix(baseURL, "https://")
 }
 
 // parseFileMaxBytes reads BEECON_FILE_MAX_BYTES (PD22, AC3): unset falls
