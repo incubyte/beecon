@@ -112,6 +112,12 @@ func buildRouter(
 			// that used to guard the browser-facing console (PD39 gate).
 			consoleAuth := authmw.ConsoleAuth(verifySession, cfg.AdminAPIKey, operatorsExist)
 
+			// adminOrConsole also accepts the durable installation admin key (no
+			// post-bootstrap demotion) on the routes automation drives (org
+			// provisioning and integration create); it still accepts an operator
+			// session for the Admin UI.
+			adminOrConsole := authmw.AdminOrConsoleAuth(verifySession, cfg.AdminAPIKey)
+
 			// attributeOperator captures the acting operator's id on
 			// mutating console requests (PD56, Slice 4): mounted AFTER
 			// consoleAuth/authmw.OperatorSession in every chain below that
@@ -170,17 +176,21 @@ func buildRouter(
 			r.With(consoleAuth).Method(http.MethodGet, "/dashboard/metrics", dashboardMetricsHandler)
 
 			r.Route("/organizations", func(r chi.Router) {
-				r.Use(consoleAuth)
-				// attributeOperator (PD56, Slice 4) runs after consoleAuth
-				// on every route in this whole subtree — every mutation an
-				// operator performs on an organization or its org-scoped
-				// console mount (connections/trigger-instances/users/
-				// governance/retention/webhook-endpoints/config below) is
-				// attributed; a no-op for the many GET routes here too
-				// (AttributeOperator only ever logs on a mutating method).
-				r.Use(attributeOperator)
-				r.Post("/", organizationsHandler.Create)
-				r.Get("/", organizationsHandler.List)
+				// Auth is applied per-route here rather than block-wide: the
+				// three server-to-server provisioning endpoints an installation's
+				// automation drives — create org (POST /), set the redirect-URI
+				// allow-list (PATCH /{orgId}), and issue an org API key
+				// (POST /{orgId}/api-keys) — accept EITHER an operator session
+				// (so the Admin UI keeps working) OR the durable admin key (so
+				// installation automation can drive them without a console
+				// session), via AdminOrConsoleAuth. Every other console route
+				// (List, api-key list/revoke/
+				// rotate, signing-secrets, and the org-scoped console mount below)
+				// stays session-gated via consoleAuth + attributeOperator, exactly
+				// as the /integrations block below already does per-route.
+
+				r.With(adminOrConsole, attributeOperator).Post("/", organizationsHandler.Create)
+				r.With(consoleAuth, attributeOperator).Get("/", organizationsHandler.List)
 
 				// Every /{orgId}/... route — the pre-existing single-organization
 				// endpoints and, since Slice 2, the Admin UI's org-scoped console
@@ -191,14 +201,14 @@ func buildRouter(
 				// so every /{orgId} sub-path is a relative path registered here,
 				// never a second top-level r.Route("/{orgId}", ...) call.
 				r.Route("/{orgId}", func(r chi.Router) {
-					r.Get("/", organizationsHandler.Get)
-					r.Patch("/", organizationsHandler.UpdateAllowedRedirectURIs)
-					r.Post("/api-keys", accessHandler.Issue)
-					r.Get("/api-keys", accessHandler.List)
-					r.Delete("/api-keys/{keyId}", accessHandler.Revoke)
-					r.Post("/api-keys/{keyId}/rotate", accessHandler.Rotate)
-					r.Post("/signing-secrets", accessHandler.IssueSigningSecret)
-					r.Get("/signing-secrets", accessHandler.ListSigningSecrets)
+					r.With(consoleAuth, attributeOperator).Get("/", organizationsHandler.Get)
+					r.With(adminOrConsole, attributeOperator).Patch("/", organizationsHandler.UpdateAllowedRedirectURIs)
+					r.With(adminOrConsole, attributeOperator).Post("/api-keys", accessHandler.Issue)
+					r.With(consoleAuth, attributeOperator).Get("/api-keys", accessHandler.List)
+					r.With(consoleAuth, attributeOperator).Delete("/api-keys/{keyId}", accessHandler.Revoke)
+					r.With(consoleAuth, attributeOperator).Post("/api-keys/{keyId}/rotate", accessHandler.Rotate)
+					r.With(consoleAuth, attributeOperator).Post("/signing-secrets", accessHandler.IssueSigningSecret)
+					r.With(consoleAuth, attributeOperator).Get("/signing-secrets", accessHandler.ListSigningSecrets)
 
 					// The Admin UI's org-scoped console routes (Slice 2, FD3): this
 					// subtree already sits inside the /organizations block's own
@@ -209,6 +219,8 @@ func buildRouter(
 					// read org from context exactly like every other org-scoped
 					// handler, reused verbatim.
 					r.Group(func(r chi.Router) {
+						r.Use(consoleAuth)
+						r.Use(attributeOperator)
 						r.Use(authmw.InjectOrgFromPath)
 
 						r.Route("/connections", func(r chi.Router) {
@@ -316,7 +328,7 @@ func buildRouter(
 			})
 
 			r.Route("/integrations", func(r chi.Router) {
-				r.With(consoleAuth, attributeOperator).Post("/", catalogHandler.Create)
+				r.With(adminOrConsole, attributeOperator).Post("/", catalogHandler.Create)
 				r.With(orgOrUser).Get("/", catalogHandler.List)
 				r.With(orgOrUser).Get("/{intgId}/expected-params", catalogHandler.GetExpectedParams)
 			})

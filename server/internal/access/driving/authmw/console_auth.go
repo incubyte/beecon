@@ -69,6 +69,42 @@ func ConsoleAuth(verify VerifySession, adminKey string, operatorsExist func(cont
 	}
 }
 
+// AdminOrConsoleAuth guards the server-to-server provisioning endpoints
+// (create org, issue org API key, set redirect-URI allow-list): it accepts
+// EITHER a valid operator session (so the Admin UI keeps working, with the
+// same CSRF enforcement and operator injection as ConsoleAuth) OR the
+// installation admin key as a Bearer token — and, unlike ConsoleAuth, the
+// admin key authenticates these routes DURABLY (no post-bootstrap demotion),
+// so installation automation can register orgs without an operator session.
+// It is deliberately scoped to only those provisioning routes; the rest of
+// the console stays on ConsoleAuth (admin key demoted once an operator exists).
+func AdminOrConsoleAuth(verify VerifySession, adminKey string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if token, ok := SessionTokenFromRequest(r); ok {
+				operator, err := verify(r.Context(), token)
+				if err != nil {
+					writeAuthError(w, err)
+					return
+				}
+				if isMutatingMethod(r.Method) && !csrfTokenMatches(r.Header.Get("X-CSRF-Token"), operator.CSRFToken) {
+					httpx.WriteDomainError(w, access.ErrCSRF())
+					return
+				}
+				ctx := access.WithOperator(r.Context(), operator.OperatorID)
+				ctx = access.WithOperatorSession(ctx, operator.SessionID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			if isValidAdminKey(r.Header.Get("Authorization"), adminKey) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			httpx.WriteDomainError(w, httpx.Unauthorized("missing or invalid session or admin key"))
+		})
+	}
+}
+
 // OperatorSession guards routes that only ever accept a session cookie —
 // never the admin key (FD-A, §3): /auth/me, /auth/logout (Slice 2),
 // /operators/* (Slice 4). Unlike ConsoleAuth, there is no break-glass
