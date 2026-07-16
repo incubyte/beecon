@@ -346,6 +346,7 @@ func buildRouter(
 				r.Use(consoleAuth)
 				r.Get("/", catalogHandler.ListProviderDefinitions)
 				r.Get("/{slug}", catalogHandler.GetProviderDefinition)
+				r.Get("/{slug}/integrations", catalogHandler.ListIntegrationsForProvider)
 			})
 
 			// RequireWrite (PD41, Slice 4) rejects a read-only org API key

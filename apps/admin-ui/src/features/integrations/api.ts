@@ -13,8 +13,9 @@ export function useCreateIntegration() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: CreateIntegrationRequest) => apiClient.post<IntegrationSummary>("/integrations", input),
-    onSuccess: () => {
+    onSuccess: (_integration, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.list() });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.providerDefinitions.integrations(variables.providerSlug) });
     },
   });
 }

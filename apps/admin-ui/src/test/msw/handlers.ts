@@ -15,6 +15,9 @@ import { http, HttpResponse } from "msw";
 export const handlers = [
   http.get("/api/v1/auth/me", () => new HttpResponse(null, { status: 401 })),
   http.get("/api/v1/organizations", () => HttpResponse.json({ items: [] })),
+  // Provider-scoped integrations (this slice): empty by default, same
+  // "closed" convention as every other list default above.
+  http.get("/api/v1/provider-definitions/:slug/integrations", () => HttpResponse.json({ items: [] })),
   // Slice 3 defaults: empty logs/events pages and a zeroed dashboard summary
   // so a test that doesn't care about these endpoints still gets a
   // plausible response instead of an MSW "unhandled request" error.

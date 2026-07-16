@@ -1,6 +1,5 @@
 import { useId, useState, type FormEvent } from "react";
 
-import { useProviderDefinitions } from "@/features/providers/api";
 import { Modal } from "@/components/ui/Modal";
 import { ApiError } from "@/lib/api-client";
 import type { IntegrationSummary } from "@/lib/api-types";
@@ -11,27 +10,29 @@ export interface CreateIntegrationModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (integration: IntegrationSummary) => void;
+  /** The provider this integration is created against — locked, not
+   * chosen: the modal always opens from a specific provider's detail page
+   * (this slice moved "add integration" off the installation-wide
+   * Providers list). */
+  providerSlug: string;
+  providerName: string;
 }
 
-/** CreateIntegrationModal is the operator's create-from-provider-definition
- * flow: pick a loaded provider, supply its OAuth client id and secret, and
- * register the installation integration. Like CreateOperatorModal (and
- * unlike CreateApiKeyModal), the credential is operator-supplied, not
+/** CreateIntegrationModal is the operator's create-integration flow, scoped
+ * to one provider: supply its OAuth client id and secret, and register the
+ * installation integration against providerSlug. Like CreateOperatorModal
+ * (and unlike CreateApiKeyModal), the credential is operator-supplied, not
  * server-minted — the clientSecret is write-once and the response never
  * returns it, so this modal never renders any secret back. */
-export function CreateIntegrationModal({ open, onOpenChange, onCreated }: CreateIntegrationModalProps) {
-  const { items: providers, isLoading: isLoadingProviders } = useProviderDefinitions();
+export function CreateIntegrationModal({ open, onOpenChange, onCreated, providerSlug, providerName }: CreateIntegrationModalProps) {
   const createIntegration = useCreateIntegration();
-  const [providerSlug, setProviderSlug] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const providerFieldId = useId();
   const clientIdFieldId = useId();
   const clientSecretFieldId = useId();
 
   function handleOpenChange(next: boolean) {
     if (!next) {
-      setProviderSlug("");
       setClientId("");
       setClientSecret("");
       createIntegration.reset();
@@ -52,36 +53,22 @@ export function CreateIntegrationModal({ open, onOpenChange, onCreated }: Create
     );
   }
 
-  const canSubmit = Boolean(providerSlug && clientId.trim() && clientSecret) && !createIntegration.isPending;
+  const canSubmit = Boolean(clientId.trim() && clientSecret) && !createIntegration.isPending;
 
   return (
     <Modal
       open={open}
       onOpenChange={handleOpenChange}
       title="Create integration"
-      description="Register an integration from a provider definition with its OAuth client credentials. The client secret is stored once and is never shown again."
+      description="Register an integration with this provider's OAuth client credentials. The client secret is stored once and is never shown again."
     >
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <label htmlFor={providerFieldId} className="flex flex-col gap-1 text-sm text-text-secondary">
+        <div className="flex flex-col gap-1 text-sm text-text-secondary">
           Provider
-          <select
-            id={providerFieldId}
-            value={providerSlug}
-            onChange={(event) => setProviderSlug(event.target.value)}
-            required
-            autoFocus
-            className="min-h-11 rounded-md border border-border-strong bg-surface px-3 text-sm text-text focus-visible:border-primary"
-          >
-            <option value="" disabled>
-              {isLoadingProviders ? "Loading providers…" : "Select a provider"}
-            </option>
-            {providers.map((provider) => (
-              <option key={provider.slug} value={provider.slug}>
-                {provider.name}
-              </option>
-            ))}
-          </select>
-        </label>
+          <p className="min-h-11 flex items-center rounded-md border border-border bg-surface-muted px-3 text-sm text-text">
+            {providerName}
+          </p>
+        </div>
 
         <label htmlFor={clientIdFieldId} className="flex flex-col gap-1 text-sm text-text-secondary">
           Client ID
@@ -91,6 +78,7 @@ export function CreateIntegrationModal({ open, onOpenChange, onCreated }: Create
             value={clientId}
             onChange={(event) => setClientId(event.target.value)}
             required
+            autoFocus
             autoComplete="off"
             className="min-h-11 rounded-md border border-border-strong bg-surface px-3 text-sm text-text focus-visible:border-primary"
           />

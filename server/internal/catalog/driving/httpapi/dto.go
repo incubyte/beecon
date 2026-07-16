@@ -39,6 +39,18 @@ func toIntegrationSummaryDTOs(summaries []catalog.IntegrationSummary) []integrat
 	return dtos
 }
 
+// integrationSummaryListDTO is ListIntegrationsForProvider's response
+// envelope: low cardinality (one provider's installation-level integrations)
+// so no cursor pagination is needed, unlike the tools/trigger-definitions
+// pages.
+type integrationSummaryListDTO struct {
+	Items []integrationSummaryDTO `json:"items"`
+}
+
+func toIntegrationSummaryListDTO(summaries []catalog.IntegrationSummary) integrationSummaryListDTO {
+	return integrationSummaryListDTO{Items: toIntegrationSummaryDTOs(summaries)}
+}
+
 // integrationVisibilityDTO is ListWithVisibility's response shape (Slice 5,
 // AC1): the same integration identity fields as integrationSummaryDTO plus
 // its effective visibility for the requested org.

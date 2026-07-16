@@ -3,7 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useCursorPagination, type UseCursorPaginationResult } from "@/lib/cursor";
 import { queryKeys } from "@/lib/query";
-import type { ProviderDefinitionDetail, ProviderDefinitionSummary, ProviderDefinitionsPage } from "@/lib/api-types";
+import type {
+  IntegrationSummary,
+  IntegrationSummaryList,
+  ProviderDefinitionDetail,
+  ProviderDefinitionSummary,
+  ProviderDefinitionsPage,
+} from "@/lib/api-types";
 
 /** useProviderDefinitions lists every provider definition this installation
  * has loaded (Slice 6, AC1), cursor-paginated, via the new admin-guarded
@@ -29,6 +35,27 @@ export function useProviderDefinition(slug: string | undefined) {
     queryFn: () => apiClient.get<ProviderDefinitionDetail>(`/provider-definitions/${slug}`),
     enabled: Boolean(slug),
   });
+}
+
+/** useProviderIntegrations reads the installation-level integrations created
+ * against one provider (this slice's new console read): the provider
+ * detail page's Integrations section, via the console-guarded GET
+ * /provider-definitions/{slug}/integrations — installation-wide and never
+ * governance-filtered, mirroring useProviderDefinition's own posture. Low
+ * cardinality, so no cursor pagination. */
+export function useProviderIntegrations(slug: string | undefined) {
+  const query = useQuery({
+    queryKey: queryKeys.providerDefinitions.integrations(slug ?? ""),
+    queryFn: () => apiClient.get<IntegrationSummaryList>(`/provider-definitions/${slug}/integrations`),
+    enabled: Boolean(slug),
+  });
+  return {
+    items: query.data?.items ?? ([] as IntegrationSummary[]),
+    isLoading: query.isLoading,
+    isError: query.isError,
+    error: query.error,
+    refetch: () => void query.refetch(),
+  };
 }
 
 async function fetchAllProviderDefinitionSlugs(): Promise<string[]> {

@@ -248,6 +248,14 @@ export interface IntegrationVisibility extends IntegrationSummary {
   visibility: IntegrationEffectiveVisibility;
 }
 
+/** IntegrationSummaryList mirrors GET
+ * /provider-definitions/{slug}/integrations' response envelope: one
+ * provider's installation-level integrations. Low cardinality, so — unlike
+ * Page<T> — there is no cursor pagination. */
+export interface IntegrationSummaryList {
+  items: IntegrationSummary[];
+}
+
 /**
  * Slice 7 additions mirroring
  * server/internal/organizations/driving/httpapi/retention_dto.go, read/

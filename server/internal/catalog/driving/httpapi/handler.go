@@ -228,6 +228,22 @@ func (h *Handler) GetProviderDefinition(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, http.StatusOK, toProviderDefinitionDetailDTO(detail))
 }
 
+// ListIntegrationsForProvider handles GET
+// /api/v1/provider-definitions/{slug}/integrations (console-guarded,
+// installation-wide route; mounted alongside GetProviderDefinition): every
+// integration created against this provider, unfiltered by any
+// organization's governance (mirrors ListProviderDefinitions' AC7 posture) —
+// the operator's real installed estate for this provider. An unknown slug is
+// not-found.
+func (h *Handler) ListIntegrationsForProvider(w http.ResponseWriter, r *http.Request) {
+	summaries, err := h.facade.ListIntegrationsForProvider(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		h.errors.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, toIntegrationSummaryListDTO(summaries))
+}
+
 func parseBoolQueryParam(raw string) bool {
 	parsed, _ := strconv.ParseBool(raw)
 	return parsed

@@ -1,15 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { server } from "@/test/msw/server";
-import type {
-  IntegrationSummary,
-  ProviderDefinitionSummary,
-  ProviderDefinitionsPage as ProviderDefinitionsPageDTO,
-} from "@/lib/api-types";
+import type { ProviderDefinitionSummary, ProviderDefinitionsPage as ProviderDefinitionsPageDTO } from "@/lib/api-types";
 
 import { ProviderDefinitionDetailPage } from "./ProviderDefinitionDetailPage";
 import { ProvidersPage } from "./ProvidersPage";
@@ -147,29 +143,15 @@ describe("ProvidersPage", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /load more/i })).not.toBeInTheDocument());
   });
 
-  it("creates an integration from the Create integration entry point and shows a success indication", async () => {
+  // This slice moved "add integration" off the installation-wide Providers
+  // list onto each provider's own detail page — the list surface is a pure
+  // read of loaded provider definitions again.
+  it("does not render a Create integration entry point on this list page", async () => {
     mockProviderDefinitions([providerDefinition({ slug: "outlook", name: "Outlook" })]);
-    let requestBody: unknown;
-    server.use(
-      http.post("/api/v1/integrations", async ({ request }) => {
-        requestBody = await request.json();
-        return HttpResponse.json(
-          { id: "int_new", providerSlug: "outlook", name: "Outlook", logo: "", authScheme: "oauth2" } satisfies IntegrationSummary,
-          { status: 201 },
-        );
-      }),
-    );
     renderProvidersApp();
+
     await screen.findByText("Outlook");
-
-    fireEvent.click(screen.getByRole("button", { name: /create integration/i }));
-    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "outlook" } });
-    fireEvent.change(screen.getByLabelText(/client id/i), { target: { value: "client-abc" } });
-    fireEvent.change(screen.getByLabelText(/client secret/i), { target: { value: "super-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: /^create integration$/i }));
-
-    expect(await screen.findByRole("status")).toHaveTextContent(/created/i);
-    expect(requestBody).toEqual({ providerSlug: "outlook", clientId: "client-abc", clientSecret: "super-secret" });
+    expect(screen.queryByRole("button", { name: /create integration/i })).not.toBeInTheDocument();
   });
 
   it("opening a row navigates to the provider's full-page bundle detail view", async () => {

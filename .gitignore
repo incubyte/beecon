@@ -9,6 +9,7 @@
 # Go
 server/bin/
 *.exe
+*.exe~
 *.test
 *.out
 coverage.*

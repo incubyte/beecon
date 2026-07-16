@@ -46,6 +46,31 @@ func (f *Facade) ProviderDefinitionDetail(_ context.Context, providerSlug string
 	}, nil
 }
 
+// ListIntegrationsForProvider returns every installation-level Integration
+// created against providerSlug (PD7: installation-wide, not org-scoped),
+// summarized the same way ListIntegrations summarizes each row. Mirrors
+// ProviderDefinitionDetail's validation: an unknown providerSlug is
+// ErrProviderNotFound, and — like ListProviderDefinitions/PD40 — the result
+// is never governance-filtered, since this is the operator's real installed
+// estate for one provider, not the org-facing catalog.
+func (f *Facade) ListIntegrationsForProvider(ctx context.Context, providerSlug string) ([]IntegrationSummary, error) {
+	if _, ok := f.definitions[providerSlug]; !ok {
+		return nil, ErrProviderNotFound()
+	}
+	integrations, err := f.repo.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]IntegrationSummary, 0, len(integrations))
+	for _, integration := range integrations {
+		if integration.ProviderSlug != providerSlug {
+			continue
+		}
+		summaries = append(summaries, f.summarize(integration))
+	}
+	return summaries, nil
+}
+
 func providerDefinitionSummaryFrom(definition ProviderDefinition) ProviderDefinitionSummary {
 	return ProviderDefinitionSummary{
 		Slug:          definition.Slug,

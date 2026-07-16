@@ -81,6 +81,10 @@ export const queryKeys = {
     list: () => ["provider-definitions", "list"] as const,
     detail: (slug: string) => ["provider-definitions", "detail", slug] as const,
     bundles: () => ["provider-definitions", "bundles"] as const,
+    // The provider detail page's Integrations section (GET
+    // /provider-definitions/{slug}/integrations) — installation-wide, keyed
+    // per provider slug like detail() itself.
+    integrations: (slug: string) => ["provider-definitions", "integrations", slug] as const,
   },
   // Phase 5 Slice 4: installation-wide, never org-scoped — an operator
   // administers the whole installation, like the admin key it replaces.

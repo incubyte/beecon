@@ -33,12 +33,15 @@ func providerDefinitionsFixture() []catalog.ProviderDefinition {
 // newProviderDefinitionsRouter builds the real router with a real catalog
 // handler (backed by the in-memory facade, seeded with providerDefinitionsFixture)
 // mounted exactly as app/router.go wires it — GET /api/v1/provider-definitions
-// (+ /{slug}) behind AdminAuth, installation-wide, no orgId anywhere — while
-// every other handler stays nil, mirroring newOrganizationsListRouter's own
-// convention (organizations_list_route_admin_guard_test.go). Returning the
+// (+ /{slug}, + /{slug}/integrations) behind AdminAuth, installation-wide, no
+// orgId anywhere — while every other handler stays nil, mirroring
+// newOrganizationsListRouter's own convention
+// (organizations_list_route_admin_guard_test.go). Returning the
 // organizations.Facade too lets a test set up an org's governance directly,
-// to prove that path is irrelevant to this route (AC7).
-func newProviderDefinitionsRouter(t *testing.T) (http.Handler, *organizations.Facade) {
+// to prove that path is irrelevant to this route (AC7); returning the
+// catalog.Facade too lets a test create integrations directly, to exercise
+// GET .../integrations.
+func newProviderDefinitionsRouter(t *testing.T) (http.Handler, *organizations.Facade, *catalog.Facade) {
 	t.Helper()
 	database, err := db.New(config.DriverSQLite, "file:provider_definitions_route_test?mode=memory&cache=shared")
 	if err != nil {
@@ -79,7 +82,7 @@ func newProviderDefinitionsRouter(t *testing.T) (http.Handler, *organizations.Fa
 		noOperatorsYet, // operatorsExist
 		nil,            // logger
 	)
-	return router, orgsFacade
+	return router, orgsFacade, catalogFacade
 }
 
 func doProviderDefinitionsRequest(router http.Handler, path, authorizationHeader string) *httptest.ResponseRecorder {
@@ -93,7 +96,7 @@ func doProviderDefinitionsRequest(router http.Handler, path, authorizationHeader
 }
 
 func TestProviderDefinitionsRoute_RejectsARequestWithNoAdminKey(t *testing.T) {
-	router, _ := newProviderDefinitionsRouter(t)
+	router, _, _ := newProviderDefinitionsRouter(t)
 
 	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions", "")
 
@@ -103,7 +106,7 @@ func TestProviderDefinitionsRoute_RejectsARequestWithNoAdminKey(t *testing.T) {
 }
 
 func TestProviderDefinitionsRoute_RejectsAWrongAdminKey(t *testing.T) {
-	router, _ := newProviderDefinitionsRouter(t)
+	router, _, _ := newProviderDefinitionsRouter(t)
 
 	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions", "Bearer wrong-key")
 
@@ -113,7 +116,7 @@ func TestProviderDefinitionsRoute_RejectsAWrongAdminKey(t *testing.T) {
 }
 
 func TestProviderDefinitionDetailRoute_RejectsARequestWithNoAdminKey(t *testing.T) {
-	router, _ := newProviderDefinitionsRouter(t)
+	router, _, _ := newProviderDefinitionsRouter(t)
 
 	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions/outlook", "")
 
@@ -129,7 +132,7 @@ func TestProviderDefinitionDetailRoute_RejectsARequestWithNoAdminKey(t *testing.
 // rather than silently scoping to that org. Mirrors
 // TestDashboardMetricsRoute_IsNotNestedUnderAnOrganizationPath.
 func TestProviderDefinitionsRoute_IsNotNestedUnderAnOrganizationPath(t *testing.T) {
-	router, _ := newProviderDefinitionsRouter(t)
+	router, _, _ := newProviderDefinitionsRouter(t)
 
 	w := doProviderDefinitionsRequest(router, "/api/v1/organizations/org_whatever/provider-definitions", "Bearer "+providerDefinitionsTestAdminKey)
 
@@ -149,7 +152,7 @@ func TestProviderDefinitionsRoute_IsNotNestedUnderAnOrganizationPath(t *testing.
 // unfiltered — because this route takes no orgId at all and never consults
 // GovernanceReader.
 func TestProviderDefinitionsRoute_ReturnsEveryLoadedDefinitionEvenWhenAnOrgsGovernanceHidesItsOnlyIntegration(t *testing.T) {
-	router, orgsFacade := newProviderDefinitionsRouter(t)
+	router, orgsFacade, _ := newProviderDefinitionsRouter(t)
 	org, err := orgsFacade.Create(context.Background(), "Restricted Co")
 	if err != nil {
 		t.Fatalf("create organization: %v", err)
@@ -173,5 +176,55 @@ func TestProviderDefinitionsRoute_ReturnsEveryLoadedDefinitionEvenWhenAnOrgsGove
 	}
 	if len(page.Items) != 1 || page.Items[0].Slug != "outlook" {
 		t.Fatalf("items = %+v, want the outlook provider definition present despite %s's empty-allow-list governance", page.Items, org.ID)
+	}
+}
+
+// TestProviderIntegrationsRoute_IsReachableThroughTheConsoleAuthGuardedRouter
+// proves GET /provider-definitions/{slug}/integrations is actually wired into
+// the real router (not just callable in isolation, as the httpapi package's
+// own handler tests exercise it) and reachable through the same admin-key
+// break-glass ConsoleAuth accepts on every other route in this block.
+func TestProviderIntegrationsRoute_IsReachableThroughTheConsoleAuthGuardedRouter(t *testing.T) {
+	router, _, catalogFacade := newProviderDefinitionsRouter(t)
+	if _, err := catalogFacade.CreateIntegration(context.Background(), "outlook", "client-id", "client-secret"); err != nil {
+		t.Fatalf("CreateIntegration: %v", err)
+	}
+
+	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions/outlook/integrations", "Bearer "+providerDefinitionsTestAdminKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var page struct {
+		Items []struct {
+			ID           string `json:"id"`
+			ProviderSlug string `json:"providerSlug"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode body: %v; body=%s", err, w.Body.String())
+	}
+	if len(page.Items) != 1 || page.Items[0].ProviderSlug != "outlook" {
+		t.Fatalf("items = %+v, want the one outlook integration just created", page.Items)
+	}
+}
+
+func TestProviderIntegrationsRoute_RejectsARequestWithNoAdminKey(t *testing.T) {
+	router, _, _ := newProviderDefinitionsRouter(t)
+
+	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions/outlook/integrations", "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+func TestProviderIntegrationsRoute_Returns404ForAnUnknownProviderSlug(t *testing.T) {
+	router, _, _ := newProviderDefinitionsRouter(t)
+
+	w := doProviderDefinitionsRequest(router, "/api/v1/provider-definitions/does-not-exist/integrations", "Bearer "+providerDefinitionsTestAdminKey)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
 	}
 }
