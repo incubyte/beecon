@@ -87,6 +87,12 @@ export const queryKeys = {
   operators: {
     list: () => ["operators", "list"] as const,
   },
+  // Integrations created from provider definitions (POST /integrations) are
+  // installation-wide, never org-scoped — same key shape as
+  // providerDefinitions, no "org" prefix.
+  integrations: {
+    list: () => ["integrations", "list"] as const,
+  },
 };
 
 /** LogsFilterKey is the subset of logging.QueryParams the console's filter

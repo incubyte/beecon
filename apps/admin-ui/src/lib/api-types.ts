@@ -221,12 +221,30 @@ export type GovernanceUpdate = Governance;
  * annotated with its effective visibility for the selected org. */
 export type IntegrationEffectiveVisibility = "VISIBLE" | "HIDDEN" | "NOT_ALLOWED";
 
-export interface IntegrationVisibility {
+/** IntegrationSummary mirrors the backend's integrationSummaryDTO: the
+ * shared installation-integration identity shape returned by POST
+ * /api/v1/integrations, and the base every catalog/governance integration
+ * row extends. It never carries the write-once clientSecret — that value is
+ * accepted on create and never returned by any endpoint. */
+export interface IntegrationSummary {
   id: string;
   providerSlug: string;
   name: string;
   logo: string;
   authScheme: string;
+}
+
+/** CreateIntegrationRequest mirrors the backend's createIntegrationRequest:
+ * POST /api/v1/integrations' body — a provider-definition slug plus the
+ * OAuth client credentials. clientSecret is write-once (sent on create,
+ * never read back). */
+export interface CreateIntegrationRequest {
+  providerSlug: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+export interface IntegrationVisibility extends IntegrationSummary {
   visibility: IntegrationEffectiveVisibility;
 }
 
