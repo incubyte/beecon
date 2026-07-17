@@ -86,7 +86,7 @@ func (f *Facade) FetchTriggerRecords(ctx context.Context, query PollQuery) (Poll
 		return PollResult{}, ErrValidation("connectionId", connectionNotActiveMessage(access.Status))
 	}
 
-	config := mergeConfigWithSchemaDefaults(query.Config, trigger.ConfigSchema)
+	config := mergeWithSchemaDefaults(query.Config, trigger.ConfigSchema)
 	request, err := buildPollRequest(definition.BaseURL, trigger.Poll, config, query.Watermark, access.AccessToken)
 	if err != nil {
 		return PollResult{}, err
@@ -216,34 +216,6 @@ func buildPollBody(mapping map[string]string, config map[string]any, watermark s
 		return "", err
 	}
 	return string(encoded), nil
-}
-
-// mergeConfigWithSchemaDefaults fills in every configSchema property's
-// declared "default" for a key config itself does not carry (PD35's
-// folderId-defaults-to-Inbox): triggers.Facade.Create validates config
-// against configSchema but never merges its defaults into what gets stored
-// (a trigger instance's config is exactly what the consumer submitted), so
-// the poll engine — the one place {config.x} is actually evaluated — applies
-// them here instead.
-func mergeConfigWithSchemaDefaults(config map[string]any, configSchema map[string]any) map[string]any {
-	merged := make(map[string]any, len(config))
-	for key, value := range config {
-		merged[key] = value
-	}
-	properties, _ := configSchema["properties"].(map[string]any)
-	for key, raw := range properties {
-		if _, exists := merged[key]; exists {
-			continue
-		}
-		propertySchema, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if def, ok := propertySchema["default"]; ok {
-			merged[key] = def
-		}
-	}
-	return merged
 }
 
 // extractPollRecords decodes a poll response body as JSON and reads its list

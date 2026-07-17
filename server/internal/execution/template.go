@@ -43,22 +43,41 @@ func RenderPath(path string, inputs, params map[string]any) (string, error) {
 	return rendered, nil
 }
 
-// RenderMappedValue renders one query or header mapping expression (e.g.
-// "{input.select}"). ok is false when the expression's input/param was not
-// supplied by the call — the caller drops that query parameter or header
-// entirely rather than sending an empty or literal "{input.x}" value. An
-// expression that carries no token at all is returned as-is (a literal
-// mapping value).
-func RenderMappedValue(expression string, inputs, params map[string]any) (rendered string, ok bool) {
-	match := templateTokenWholePattern.FindStringSubmatch(expression)
-	if match == nil {
-		return expression, true
+// RenderMappedValue renders one query, header, or body mapping expression.
+// A whole-token expression (e.g. "{input.select}") whose input/param is
+// absent reports ok=false — the caller drops that query parameter, header,
+// or body key entirely rather than sending an empty or literal "{input.x}"
+// value (unchanged from before embedded interpolation existed). An
+// expression that embeds one or more tokens inside a larger literal (e.g.
+// "receivedDateTime gt {input.since}" or "{input.first} {input.last}") is
+// substituted find-anywhere like RenderPath/RenderPollTemplate: every token
+// present is replaced in place, but a token the call did not supply is an
+// error naming the missing token — an embedded value can never be silently
+// sent half-rendered, unlike the whole-token case's backward-compatible
+// drop. An expression that carries no token at all is returned as-is (a
+// literal mapping value).
+func RenderMappedValue(expression string, inputs, params map[string]any) (rendered string, ok bool, err error) {
+	if match := templateTokenWholePattern.FindStringSubmatch(expression); match != nil {
+		value, found := lookupTemplateToken(match, inputs, params)
+		if !found {
+			return "", false, nil
+		}
+		return fmt.Sprint(value), true, nil
 	}
-	value, found := lookupTemplateToken(match, inputs, params)
-	if !found {
-		return "", false
+
+	var missing string
+	rendered = templateTokenFindPattern.ReplaceAllStringFunc(expression, func(token string) string {
+		value, found := lookupTemplateToken(templateTokenFindPattern.FindStringSubmatch(token), inputs, params)
+		if !found {
+			missing = token
+			return token
+		}
+		return fmt.Sprint(value)
+	})
+	if missing != "" {
+		return "", false, fmt.Errorf("mapping value references %s, which was not supplied", missing)
 	}
-	return fmt.Sprint(value), true
+	return rendered, true, nil
 }
 
 // lookupTemplateToken resolves a regexp match ([full, source, name]) against

@@ -323,6 +323,103 @@ func TestExecute_OmitsAHeaderMappingEntryWhenItsInputIsNotSupplied(t *testing.T)
 	}
 }
 
+// --- Slice 1 (Gap A, PD13): composable/embedded mapping values ---
+
+// toolWithEmbeddedQueryMapping declares a query mapping value that embeds a
+// token inside a larger literal, mirroring the Outlook OData-filter shape
+// the spec anchors on ("receivedDateTime gt {input.since}").
+func toolWithEmbeddedQueryMapping() catalog.ProviderTool {
+	tool := testTool()
+	tool.Mapping = catalog.Mapping{Query: map[string]string{"filter": "receivedDateTime gt {input.since}"}}
+	return tool
+}
+
+// toolWithEmbeddedBodyMapping declares a dotted-key body mapping whose value
+// embeds a token, mirroring hubspot-create-contact's "properties.email"
+// shape but with the value composed rather than a bare whole token.
+func toolWithEmbeddedBodyMapping() catalog.ProviderTool {
+	tool := testTool()
+	tool.Mapping = catalog.Mapping{Body: map[string]string{"properties.email": "mailto:{input.email}"}}
+	return tool
+}
+
+// TestExecute_AnEmbeddedQueryMappingValueRendersWithTheTokenSubstitutedInPlace
+// proves an embedded query mapping value reaches the provider substituted,
+// not sent verbatim with its braces intact.
+func TestExecute_AnEmbeddedQueryMappingValueRendersWithTheTokenSubstitutedInPlace(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithEmbeddedQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"since": "2024-01-01T00:00:00Z"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true; Error = %+v", result.Error)
+	}
+	want := "receivedDateTime gt 2024-01-01T00:00:00Z"
+	if got := provider.lastReq.Query["filter"]; got != want {
+		t.Errorf("Query[%q] = %q, want %q", "filter", got, want)
+	}
+}
+
+// TestExecute_ADottedKeyBodyMappingWithAnEmbeddedValueNestsTheComposedValue
+// proves the dotted-key nesting (properties.email) still builds correctly
+// once the mapped value itself is a composed, not whole-token, expression.
+func TestExecute_ADottedKeyBodyMappingWithAnEmbeddedValueNestsTheComposedValue(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithEmbeddedBodyMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"email": "ada@example.com"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true; Error = %+v", result.Error)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(provider.lastReq.Body), &body); err != nil {
+		t.Fatalf("could not decode provider request body %q as JSON: %v", provider.lastReq.Body, err)
+	}
+	properties, ok := body["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("body %+v does not carry a nested \"properties\" object", body)
+	}
+	if got := properties["email"]; got != "mailto:ada@example.com" {
+		t.Errorf(`properties["email"] = %v, want %q`, got, "mailto:ada@example.com")
+	}
+}
+
+// TestExecute_AnEmbeddedMappingValueWithAMissingTokenFailsInvalidArgumentsAndNeverCallsTheProvider
+// is AC7's tool-level guarantee: a query/header/body mapping value that
+// embeds a token the call omitted must fail the whole tool call as
+// invalid-arguments naming the missing token, and the provider is provably
+// never called — the request is never even partially built.
+func TestExecute_AnEmbeddedMappingValueWithAMissingTokenFailsInvalidArgumentsAndNeverCallsTheProvider(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithEmbeddedQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected platform-level error: %v (an embedded missing token is a tool-level failure, not an HTTP error)", err)
+	}
+	if result.Successful {
+		t.Fatal("Successful = true, want false when an embedded mapping token is not supplied")
+	}
+	if result.Error == nil || result.Error.Code != execution.CodeInvalidArguments {
+		t.Fatalf("Error = %+v, want code %q", result.Error, execution.CodeInvalidArguments)
+	}
+	if !strings.Contains(result.Error.Message, "{input.since}") {
+		t.Errorf("Error.Message = %q, want it to name the missing token %q", result.Error.Message, "{input.since}")
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider was called %d times, want 0 — an embedded missing token must never reach the provider", provider.callCount)
+	}
+}
+
 // --- AC2: invalid arguments ---
 
 func TestExecute_InvalidArgumentsReturnFailureResultAndNeverCallTheProvider(t *testing.T) {
@@ -922,5 +1019,211 @@ func TestExecute_ExhaustedRetriesLogsEveryAttemptAsRateLimited(t *testing.T) {
 		if !entry.RateLimited {
 			t.Errorf("entries[%d].RateLimited = false, want true", i)
 		}
+	}
+}
+
+// --- Slice 2 (Gap C): tool-input defaults ---
+
+// toolWithUserIdDefault builds on testTool() with an extra "userId" property
+// declaring a schema default of "me" (mirroring the spec's own example),
+// wired into the request the way callerBuildsMapping asks for (query, header,
+// or path) — the one thing that differs test to test is where the defaulted
+// value needs to actually show up in the provider's request.
+func toolWithUserIdDefault(configure func(tool *catalog.ProviderTool)) catalog.ProviderTool {
+	tool := testTool()
+	properties := tool.InputSchema["properties"].(map[string]any)
+	properties["userId"] = map[string]any{"type": "string", "default": "me"}
+	configure(&tool)
+	return tool
+}
+
+func toolWithUserIdDefaultQueryMapping() catalog.ProviderTool {
+	return toolWithUserIdDefault(func(tool *catalog.ProviderTool) {
+		tool.Mapping = catalog.Mapping{Query: map[string]string{"userId": "{input.userId}"}}
+	})
+}
+
+// TestExecute_FillsAMissingToolArgumentWithItsSchemaDefaultAndForwardsItToTheProvider
+// is Gap C's core behavior: an omitted argument whose schema declares a
+// default reaches the provider carrying that default value.
+func TestExecute_FillsAMissingToolArgumentWithItsSchemaDefaultAndForwardsItToTheProvider(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithUserIdDefaultQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true; Error = %+v", result.Error)
+	}
+	if got := provider.lastReq.Query["userId"]; got != "me" {
+		t.Errorf(`Query["userId"] = %q, want the schema default %q`, got, "me")
+	}
+}
+
+// TestExecute_AnExplicitlySuppliedArgumentIsNotOverriddenByItsSchemaDefault
+// proves a caller-supplied value always wins over its schema default.
+func TestExecute_AnExplicitlySuppliedArgumentIsNotOverriddenByItsSchemaDefault(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithUserIdDefaultQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"userId": "someone-else"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := provider.lastReq.Query["userId"]; got != "someone-else" {
+		t.Errorf(`Query["userId"] = %q, want the caller's own value %q, not the schema default`, got, "someone-else")
+	}
+}
+
+// TestExecute_AnExplicitNullArgumentCountsAsPresentAndIsNotDefaultedEvenThoughItFailsTypeValidation
+// proves an explicit null counts as "supplied" for default-merging purposes:
+// since it is not overridden by the "me" default, it is left as JSON null
+// against a "type": "string" property, which the shared schema validator
+// correctly rejects. If the default had wrongly filled a null value, this
+// call would have succeeded instead.
+func TestExecute_AnExplicitNullArgumentCountsAsPresentAndIsNotDefaultedEvenThoughItFailsTypeValidation(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithUserIdDefaultQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"userId": nil})
+
+	if err != nil {
+		t.Fatalf("unexpected platform-level error: %v", err)
+	}
+	if result.Successful {
+		t.Fatal("Successful = true, want false — an explicit null must not be replaced by the schema default, and null fails the property's string type")
+	}
+	if result.Error == nil || result.Error.Code != execution.CodeInvalidArguments {
+		t.Fatalf("Error = %+v, want code %q", result.Error, execution.CodeInvalidArguments)
+	}
+	if provider.callCount != 0 {
+		t.Errorf("provider was called %d times, want 0", provider.callCount)
+	}
+}
+
+// TestExecute_AnExplicitEmptyStringArgumentCountsAsPresentAndIsNotOverriddenByItsDefault
+// is AC3's other case: an explicit empty string is valid against "type":
+// "string", so the call succeeds — but the provider must receive the
+// caller's own empty string, not the "me" default.
+func TestExecute_AnExplicitEmptyStringArgumentCountsAsPresentAndIsNotOverriddenByItsDefault(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(toolWithUserIdDefaultQueryMapping()), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{"userId": ""})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true; Error = %+v", result.Error)
+	}
+	if got, present := provider.lastReq.Query["userId"]; !present || got != "" {
+		t.Errorf(`Query["userId"] = %q (present=%v), want the caller's own empty string, not the schema default %q`, got, present, "me")
+	}
+}
+
+// TestExecute_DefaultsAreMergedBeforeValidationSoARequiredButDefaultedArgumentValidatesAndRuns
+// is AC4: a tool call that omits a required-but-defaulted argument must
+// validate and run rather than failing invalid-arguments — proving the merge
+// happens before validateArguments, not after.
+func TestExecute_DefaultsAreMergedBeforeValidationSoARequiredButDefaultedArgumentValidatesAndRuns(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	tool := toolWithUserIdDefaultQueryMapping()
+	tool.InputSchema["required"] = []any{"userId"}
+	f := execution.NewFacade(fakeToolReaderWithTool(tool), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true — a required-but-defaulted argument must validate and run; Error = %+v", result.Error)
+	}
+	if result.Error != nil && result.Error.Code == execution.CodeInvalidArguments {
+		t.Fatalf("Error = %+v, want no invalid-arguments failure once the default fills the required property", result.Error)
+	}
+	if got := provider.lastReq.Query["userId"]; got != "me" {
+		t.Errorf(`Query["userId"] = %q, want the schema default %q`, got, "me")
+	}
+	if provider.callCount != 1 {
+		t.Errorf("provider was called %d times, want exactly 1", provider.callCount)
+	}
+}
+
+// TestExecute_ASchemaDefaultFillsAMissingPathTokenInTheToolsPath is AC5: a
+// default must be merged before the path is rendered, so it can fill a path
+// token exactly like an explicitly-supplied argument would.
+func TestExecute_ASchemaDefaultFillsAMissingPathTokenInTheToolsPath(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	tool := toolWithUserIdDefault(func(tool *catalog.ProviderTool) {
+		tool.Path = "https://graph.microsoft.com/v1.0/users/{input.userId}"
+	})
+	f := execution.NewFacade(fakeToolReaderWithTool(tool), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "https://graph.microsoft.com/v1.0/users/me"
+	if provider.lastReq.URL != want {
+		t.Errorf("URL = %q, want %q (the userId default filling the path token)", provider.lastReq.URL, want)
+	}
+}
+
+// TestExecute_ANestedObjectPropertysDefaultIsNotFilledOnlyTopLevelDefaultsApply
+// is AC6: a nested property's own "default" (declared inside a top-level
+// object property that itself has no default) must never be filled in — the
+// top-level "profile" key stays absent, so a mapping entry referencing it is
+// dropped entirely, not populated with a synthesized nested object.
+func TestExecute_ANestedObjectPropertysDefaultIsNotFilledOnlyTopLevelDefaultsApply(t *testing.T) {
+	tool := testTool()
+	properties := tool.InputSchema["properties"].(map[string]any)
+	properties["profile"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"role": map[string]any{"type": "string", "default": "guest"},
+		},
+	}
+	tool.Mapping = catalog.Mapping{Body: map[string]string{"profileRole": "{input.profile}"}}
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(fakeToolReaderWithTool(tool), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	result, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Successful {
+		t.Fatalf("Successful = false, want true; Error = %+v", result.Error)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(provider.lastReq.Body), &body); err != nil {
+		t.Fatalf("could not decode provider request body %q as JSON: %v", provider.lastReq.Body, err)
+	}
+	if _, present := body["profileRole"]; present {
+		t.Errorf(`body["profileRole"] = %v, want it entirely absent — a nested property's default must never synthesize the top-level "profile" argument`, body["profileRole"])
+	}
+}
+
+// TestExecute_AToolWithNoSchemaDefaultsInventsNoArgument is AC7: a tool whose
+// inputSchema declares no defaults at all builds the exact same request as
+// before this slice existed — no argument is invented out of thin air.
+func TestExecute_AToolWithNoSchemaDefaultsInventsNoArgument(t *testing.T) {
+	provider := &fakeProviderClient{response: messagesResponse()}
+	f := execution.NewFacade(newFakeToolReader(), activeConnectionReader(), provider, nil, fixedClock(time.Now()))
+
+	_, err := f.Execute(context.Background(), testOrg, testUser, testConnectionID, testToolSlug, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(provider.lastReq.Query) != 0 {
+		t.Errorf("Query = %+v, want empty — a schema with no declared defaults must never invent an argument", provider.lastReq.Query)
 	}
 }

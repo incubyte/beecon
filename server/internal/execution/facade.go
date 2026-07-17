@@ -219,11 +219,43 @@ func (f *Facade) Execute(
 		return FailureResult(CodeConnectionNotActive, connectionNotActiveMessage(access.Status)), nil
 	}
 
+	arguments = mergeWithSchemaDefaults(arguments, tool.InputSchema)
 	if violation := validateArguments(tool.InputSchema, arguments); violation != nil {
 		return FailureResult(CodeInvalidArguments, violation.Error()), nil
 	}
 
 	return f.callProvider(ctx, org, userID, connectionID, toolSlug, definition, tool, access.AccessToken, arguments, toAnyMap(access.Params))
+}
+
+// mergeWithSchemaDefaults fills in every top-level property in schema that
+// declares a "default" for a key values itself does not carry (PD35's
+// folderId-defaults-to-Inbox behavior, and this slice's Gap C tool-input
+// defaults, e.g. userId defaulting to "me"): a key already present in values
+// — including an explicit null or empty string — is left untouched, since
+// presence in the map, not truthiness of the value, is what "supplied" means.
+// Only top-level properties are considered; a nested object property's own
+// "default" is never applied. Shared by poll.go's trigger config merge and
+// Execute's tool argument merge — both evaluate a JSON-Schema-shaped map the
+// same way, against the same shape of schema.
+func mergeWithSchemaDefaults(values map[string]any, valueSchema map[string]any) map[string]any {
+	merged := make(map[string]any, len(values))
+	for key, value := range values {
+		merged[key] = value
+	}
+	properties, _ := valueSchema["properties"].(map[string]any)
+	for key, raw := range properties {
+		if _, exists := merged[key]; exists {
+			continue
+		}
+		propertySchema, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if def, ok := propertySchema["default"]; ok {
+			merged[key] = def
+		}
+	}
+	return merged
 }
 
 // toAnyMap converts a connection's decrypted pre-auth param values (Slice 3)
@@ -276,6 +308,14 @@ func (f *Facade) callProvider(
 	if err != nil {
 		return FailureResult(CodeInvalidArguments, err.Error()), nil
 	}
+	requestQuery, err := buildToolQuery(tool.Mapping, arguments, params)
+	if err != nil {
+		return FailureResult(CodeInvalidArguments, err.Error()), nil
+	}
+	requestHeaders, err := buildToolHeaders(tool.Mapping, arguments, params)
+	if err != nil {
+		return FailureResult(CodeInvalidArguments, err.Error()), nil
+	}
 	files, fileErr, err := f.resolveFileInputs(ctx, org, tool.Mapping.FileInputs, arguments)
 	if err != nil {
 		return Result{}, err
@@ -288,8 +328,8 @@ func (f *Facade) callProvider(
 		Method:      tool.Method,
 		URL:         requestURL,
 		AccessToken: accessToken,
-		Query:       buildToolQuery(tool.Mapping, arguments, params),
-		Headers:     buildToolHeaders(tool.Mapping, arguments, params),
+		Query:       requestQuery,
+		Headers:     requestHeaders,
 		Body:        requestBody,
 		Files:       files,
 	}
@@ -461,25 +501,31 @@ func joinBaseURLAndPath(baseURL, path string) string {
 
 // buildToolQuery evaluates the tool's declared query mapping against
 // arguments and params (Slice 3, AC8), then applies its declared
-// pagination's canonical pageSize/cursor arguments (PD15b): a mapping entry
-// whose input/param was not supplied is dropped (an optional argument the
-// caller omitted). A tool with no declared query mapping, body mapping, or
+// pagination's canonical pageSize/cursor arguments (PD15b): a whole-token
+// mapping entry whose input/param was not supplied is dropped (an optional
+// argument the caller omitted); an embedded-token entry with a missing token
+// is an error (Slice 1, Gap A) naming the missing token, and the provider is
+// never called. A tool with no declared query mapping, body mapping, or
 // pagination at all falls back to stringifyArguments (Phase 1's generic
 // pass-through) — a tool that declares only a body mapping (e.g.
 // hubspot-create-contact) or only pagination (e.g. hubspot-list-contacts)
 // does not.
-func buildToolQuery(mapping catalog.Mapping, arguments, params map[string]any) map[string]string {
+func buildToolQuery(mapping catalog.Mapping, arguments, params map[string]any) (map[string]string, error) {
 	if len(mapping.Query) == 0 && len(mapping.Body) == 0 && mapping.Pagination == nil {
-		return stringifyArguments(withoutFileInputs(arguments, mapping.FileInputs))
+		return stringifyArguments(withoutFileInputs(arguments, mapping.FileInputs)), nil
 	}
 	query := make(map[string]string, len(mapping.Query))
 	for param, expression := range mapping.Query {
-		if value, ok := RenderMappedValue(expression, arguments, params); ok {
+		value, ok, err := RenderMappedValue(expression, arguments, params)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			query[param] = value
 		}
 	}
 	applyPaginationQuery(query, mapping.Pagination, arguments)
-	return query
+	return query, nil
 }
 
 // withoutFileInputs drops every argument named in fileInputs (PD22): a
@@ -502,33 +548,42 @@ func withoutFileInputs(arguments map[string]any, fileInputs []string) map[string
 
 // buildToolHeaders evaluates the tool's declared header mapping against
 // arguments and params the same way buildToolQuery does for query
-// parameters. A tool with no declared header mapping sends no extra
+// parameters, including the whole-token-drop vs embedded-missing-error
+// distinction. A tool with no declared header mapping sends no extra
 // headers.
-func buildToolHeaders(mapping catalog.Mapping, arguments, params map[string]any) map[string]string {
+func buildToolHeaders(mapping catalog.Mapping, arguments, params map[string]any) (map[string]string, error) {
 	if len(mapping.Header) == 0 {
-		return nil
+		return nil, nil
 	}
 	headers := make(map[string]string, len(mapping.Header))
 	for name, expression := range mapping.Header {
-		if value, ok := RenderMappedValue(expression, arguments, params); ok {
+		value, ok, err := RenderMappedValue(expression, arguments, params)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			headers[name] = value
 		}
 	}
-	return headers
+	return headers, nil
 }
 
 // buildToolBody evaluates the tool's declared JSON body mapping against
 // arguments and params (PD13, Hubspot's create-contact; Slice 3's {params.x},
-// AC8): a mapping entry whose input/param was not supplied is dropped, and a
-// dotted key (e.g. "properties.email") builds a nested JSON object. A tool
-// with no declared body mapping sends no request body at all.
+// AC8): a whole-token mapping entry whose input/param was not supplied is
+// dropped, an embedded-token entry with a missing token is an error (Slice 1,
+// Gap A), and a dotted key (e.g. "properties.email") builds a nested JSON
+// object. A tool with no declared body mapping sends no request body at all.
 func buildToolBody(mapping catalog.Mapping, arguments, params map[string]any) (string, error) {
 	if len(mapping.Body) == 0 {
 		return "", nil
 	}
 	body := map[string]any{}
 	for key, expression := range mapping.Body {
-		value, ok := RenderMappedValue(expression, arguments, params)
+		value, ok, err := RenderMappedValue(expression, arguments, params)
+		if err != nil {
+			return "", err
+		}
 		if !ok {
 			continue
 		}

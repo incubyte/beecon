@@ -67,8 +67,11 @@ func TestRenderPath_TreatsAMissingParamsTokenAsMissingWhenParamsIsNil(t *testing
 }
 
 func TestRenderMappedValue_RendersALiteralExpressionWithNoTemplateTokenAsIs(t *testing.T) {
-	rendered, ok := execution.RenderMappedValue("application/json", map[string]any{}, nil)
+	rendered, ok, err := execution.RenderMappedValue("application/json", map[string]any{}, nil)
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatal("ok = false, want true for a literal (token-free) mapping expression")
 	}
@@ -78,8 +81,11 @@ func TestRenderMappedValue_RendersALiteralExpressionWithNoTemplateTokenAsIs(t *t
 }
 
 func TestRenderMappedValue_RendersTheSuppliedInputValue(t *testing.T) {
-	rendered, ok := execution.RenderMappedValue("{input.select}", map[string]any{"select": "subject"}, nil)
+	rendered, ok, err := execution.RenderMappedValue("{input.select}", map[string]any{"select": "subject"}, nil)
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatal("ok = false, want true when the input is supplied")
 	}
@@ -92,9 +98,15 @@ func TestRenderMappedValue_RendersTheSuppliedInputValue(t *testing.T) {
 // optionality contract: a mapping entry whose input the caller omitted must
 // be dropped entirely by the caller (buildToolQuery/buildToolHeaders in
 // facade.go), not sent as an empty string or the literal "{input.x}" token.
+// A whole-token expression's absence is the backward-compatible DROP -
+// ok=false with err=nil - distinct from an embedded expression's missing
+// token, which is an error (see the embedded-missing-token tests below).
 func TestRenderMappedValue_IsNotOKWhenItsInputIsAbsent(t *testing.T) {
-	rendered, ok := execution.RenderMappedValue("{input.select}", map[string]any{}, nil)
+	rendered, ok, err := execution.RenderMappedValue("{input.select}", map[string]any{}, nil)
 
+	if err != nil {
+		t.Fatalf("err = %v, want nil - a whole-token absence is a silent drop, not an error", err)
+	}
 	if ok {
 		t.Fatalf("ok = true, want false when the input is absent (rendered = %q)", rendered)
 	}
@@ -104,8 +116,11 @@ func TestRenderMappedValue_IsNotOKWhenItsInputIsAbsent(t *testing.T) {
 }
 
 func TestRenderMappedValue_ResolvesAParamsTokenAgainstTheParamsBag(t *testing.T) {
-	rendered, ok := execution.RenderMappedValue("{params.orgId}", map[string]any{}, map[string]any{"orgId": "org-1"})
+	rendered, ok, err := execution.RenderMappedValue("{params.orgId}", map[string]any{}, map[string]any{"orgId": "org-1"})
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatal("ok = false, want true when the param is supplied")
 	}
@@ -115,14 +130,129 @@ func TestRenderMappedValue_ResolvesAParamsTokenAgainstTheParamsBag(t *testing.T)
 }
 
 // TestRenderMappedValue_IsNotOKForAParamsTokenWhenParamsIsNil pins today's
-// wiring (Slice 1: Facade.callProvider always passes a nil params bag —
+// wiring (Slice 1: Facade.callProvider always passes a nil params bag -
 // expected params arrive in Slice 3): a {params.x} mapping entry is simply
 // dropped, the same as any other unsupplied optional value.
 func TestRenderMappedValue_IsNotOKForAParamsTokenWhenParamsIsNil(t *testing.T) {
-	rendered, ok := execution.RenderMappedValue("{params.orgId}", map[string]any{}, nil)
+	rendered, ok, err := execution.RenderMappedValue("{params.orgId}", map[string]any{}, nil)
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if ok {
 		t.Fatalf("ok = true, want false when params is nil (rendered = %q)", rendered)
+	}
+}
+
+// --- Slice 1 (Gap A): embedded/multi-token mapping values ---
+
+// TestRenderMappedValue_SubstitutesASingleTokenEmbeddedInsideALargerLiteral
+// mirrors RenderPollTemplate's already-pinned embedded-substitution
+// behavior: a query/header/body mapping value can now embed a token inside
+// surrounding literal text instead of being whole-token-only.
+func TestRenderMappedValue_SubstitutesASingleTokenEmbeddedInsideALargerLiteral(t *testing.T) {
+	rendered, ok, err := execution.RenderMappedValue("receivedDateTime gt {input.since}", map[string]any{"since": "2024-01-01T00:00:00Z"}, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true when the embedded input is supplied")
+	}
+	if rendered != "receivedDateTime gt 2024-01-01T00:00:00Z" {
+		t.Errorf("rendered = %q, want the token substituted in place with the surrounding literal preserved", rendered)
+	}
+}
+
+// TestRenderMappedValue_SubstitutesEveryTokenInAMultiTokenExpression covers
+// the "{input.first} {input.last}" AC: every token is substituted, and the
+// literal text between them (here, a single space) is preserved.
+func TestRenderMappedValue_SubstitutesEveryTokenInAMultiTokenExpression(t *testing.T) {
+	rendered, ok, err := execution.RenderMappedValue("{input.first} {input.last}", map[string]any{"first": "Ada", "last": "Lovelace"}, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true when every embedded input is supplied")
+	}
+	if rendered != "Ada Lovelace" {
+		t.Errorf("rendered = %q, want %q", rendered, "Ada Lovelace")
+	}
+}
+
+// TestRenderMappedValue_ResolvesAnEmbeddedParamsTokenAgainstTheParamsBag
+// proves {params.x} resolves the same way when embedded, not just as a
+// whole-token expression.
+func TestRenderMappedValue_ResolvesAnEmbeddedParamsTokenAgainstTheParamsBag(t *testing.T) {
+	rendered, ok, err := execution.RenderMappedValue("org:{params.orgId}", map[string]any{}, map[string]any{"orgId": "org-1"})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true when the embedded param is supplied")
+	}
+	if rendered != "org:org-1" {
+		t.Errorf("rendered = %q, want %q", rendered, "org:org-1")
+	}
+}
+
+// TestRenderMappedValue_AnEmbeddedMissingTokenIsAnErrorNamingTheTokenNotASilentDrop
+// is the core Gap A distinction the spec calls out: unlike a whole-token
+// expression's absence (silent drop, ok=false/err=nil, pinned above), an
+// embedded expression's missing token must fail loudly, naming the token -
+// the caller (buildToolQuery/Headers/Body) turns this into an
+// invalid-arguments tool failure before the provider is ever called.
+func TestRenderMappedValue_AnEmbeddedMissingTokenIsAnErrorNamingTheTokenNotASilentDrop(t *testing.T) {
+	rendered, ok, err := execution.RenderMappedValue("receivedDateTime gt {input.since}", map[string]any{}, nil)
+
+	if err == nil {
+		t.Fatal("expected an error when an embedded token's input is absent, got nil")
+	}
+	if !strings.Contains(err.Error(), "{input.since}") {
+		t.Errorf("error = %q, want it to name the missing token %q", err.Error(), "{input.since}")
+	}
+	if !strings.Contains(err.Error(), "not supplied") {
+		t.Errorf("error = %q, want it to explain the token was not supplied", err.Error())
+	}
+	if ok {
+		t.Errorf("ok = %v, want false alongside the error", ok)
+	}
+	if rendered != "" {
+		t.Errorf("rendered = %q, want empty when the embedded token is missing", rendered)
+	}
+}
+
+// TestRenderMappedValue_AnEmbeddedMissingTokenAmongMultipleNamesTheMissingOne
+// proves the error names the specific absent token even when other tokens in
+// the same multi-token expression are supplied.
+func TestRenderMappedValue_AnEmbeddedMissingTokenAmongMultipleNamesTheMissingOne(t *testing.T) {
+	_, _, err := execution.RenderMappedValue("{input.first} {input.last}", map[string]any{"first": "Ada"}, nil)
+
+	if err == nil {
+		t.Fatal("expected an error when {input.last} is not supplied, got nil")
+	}
+	if !strings.Contains(err.Error(), "{input.last}") {
+		t.Errorf("error = %q, want it to name the missing token %q", err.Error(), "{input.last}")
+	}
+}
+
+// TestRenderMappedValue_DoesNotURLEscapeASubstitutedValue proves the
+// query/header/body contract stays raw (not escaped) after embedded
+// interpolation was added - RenderPath (path segments) escapes, but
+// RenderMappedValue's substitutions never do, whole-token or embedded.
+func TestRenderMappedValue_DoesNotURLEscapeASubstitutedValue(t *testing.T) {
+	rendered, ok, err := execution.RenderMappedValue("filter eq {input.value}", map[string]any{"value": "a b:c+d"}, nil)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if rendered != "filter eq a b:c+d" {
+		t.Errorf("rendered = %q, want the raw unescaped value substituted", rendered)
 	}
 }
 
