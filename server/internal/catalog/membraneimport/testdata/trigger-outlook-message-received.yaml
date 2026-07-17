@@ -1,0 +1,64 @@
+uuid: 264eb0c3-611e-4044-b3b7-0833e8cc055e
+key: outlook-message-trigger
+name: New Outlook Message
+description: Triggered when a new message is received in the Outlook mailbox.
+isCustomized: true
+parametersSchema:
+  type: object
+  properties:
+    folderId:
+      title: Folder ID
+      description: >-
+        Outlook folder identifier to monitor (well-known folder name like
+        Inbox/SentItems or a folder ID). Defaults to Inbox.
+      type: string
+      default: Inbox
+nodes:
+  message-received:
+    type: data-record-created-trigger
+    name: New Message Received
+    description: Triggered when a new message is received in the Outlook mailbox
+    config:
+      dataSource:
+        collectionKey: messages
+        parameters:
+          folderId:
+            $firstNotEmpty:
+              - $var: $.flowInstance.parameters.folderId
+              - Inbox
+        fullSyncIntervalSeconds: 60
+        pullUpdatesIntervalSeconds: 60
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        receivedDateTime:
+          type: string
+    links:
+      - key: send-to-api
+    dependencies: []
+  send-to-api:
+    type: api-request-to-your-app
+    name: Send to Your API
+    description: Send the message event to your API endpoint
+    config:
+      request:
+        uri: /api/flows/webhook
+        method: POST
+        body:
+          data:
+            trigger_id:
+              $var: $.flowInstance.id
+    outputSchema:
+      type: object
+      properties:
+        response:
+          type: object
+    links: []
+    dependencies: []
+autoCreateInstances: false
+integrationUuid: grp-test-crm-uuid
+externalAppUuid: 692b51bd-0b1b-4136-9a06-399d5972ce65

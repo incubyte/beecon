@@ -1,0 +1,27 @@
+uuid: 9f000000-0000-4000-8000-000000000013
+key: renamed-connector-get-contact
+name: Get Contact
+inputSchema:
+  description: Retrieves a single contact from the renamed connector by id.
+  type: object
+  properties:
+    contactId:
+      title: Contact ID
+      description: The unique identifier of the contact to retrieve
+      type: string
+  required:
+    - contactId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /crm/v3/objects/contacts/{contactId}
+    pathParameters:
+      contactId:
+        $var: $.input.contactId
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: renamed-grp-uuid-0001

@@ -1,0 +1,44 @@
+uuid: 9f000000-0000-4000-8000-000000000013
+key: test-crm-get-priority-record
+name: Get Priority Record
+inputSchema:
+  description: Retrieves a record, with optional debug/priority query flags that Membrane computes with predicates the token grammar cannot express.
+  type: object
+  properties:
+    recordId:
+      title: Record ID
+      type: string
+    debug:
+      title: Debug
+      type: string
+    priorityScope:
+      title: Priority Scope
+      type: string
+  required:
+    - recordId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /records/{recordId}
+    pathParameters:
+      recordId:
+        $var: $.input.recordId
+    query:
+      debugFlag:
+        $eval:
+          $var: $.input.debug
+      priorityFlag:
+        $and:
+          - $eval:
+              $var: $.input.priorityScope
+            isNotEmpty: true
+          - $eval:
+              $var: $.input.priorityScope
+            isNot: none
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: grp-test-crm-uuid

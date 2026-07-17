@@ -1,0 +1,6 @@
+uuid: msft-grp-uuid-0001
+key: 2-outlook-mail-connector
+name: Outlook Mail
+logoUri: https://static.integration.app/connectors/microsoft-outlook/logo.png
+connectorVersion: 1.0.0
+connectorUuid: outlook-connector-uuid-0001

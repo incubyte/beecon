@@ -1,0 +1,22 @@
+uuid: 9f000000-0000-4000-8000-000000000011
+key: outlook-list-messages
+name: List Messages
+inputSchema:
+  description: Lists messages in the authenticated user's mailbox.
+  type: object
+  properties:
+    top:
+      title: Top
+      description: Maximum number of messages to return
+      type: integer
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /me/messages
+customOutputSchema:
+  type: object
+  properties:
+    value:
+      type: array
+integrationUuid: msft-grp-uuid-0001

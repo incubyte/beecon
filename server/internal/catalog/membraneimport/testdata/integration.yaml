@@ -1,0 +1,6 @@
+uuid: grp-test-crm-uuid
+key: test-crm
+name: Test CRM
+logoUri: https://static.example.com/test-crm.png
+connectorVersion: 1.0.0
+connectorUuid: test-crm-connector-uuid

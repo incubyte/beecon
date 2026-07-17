@@ -1,0 +1,32 @@
+uuid: 9f000000-0000-4000-8000-000000000010
+key: test-crm-get-user-message
+name: Get User Message
+inputSchema:
+  description: Retrieves a message for a given user, scoped by both userId and messageId.
+  type: object
+  properties:
+    userId:
+      title: User ID
+      type: string
+    messageId:
+      title: Message ID
+      type: string
+  required:
+    - userId
+    - messageId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /users/{userId}/messages/{messageId}
+    pathParameters:
+      userId:
+        $var: $.input.userId
+      messageId:
+        $var: $.input.messageId
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: grp-test-crm-uuid

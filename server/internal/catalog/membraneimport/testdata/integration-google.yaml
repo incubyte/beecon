@@ -1,0 +1,6 @@
+uuid: google-grp-uuid-0001
+key: 3-gmail-connector
+name: Gmail
+logoUri: https://static.integration.app/connectors/gmail/logo.png
+connectorVersion: 1.0.0
+connectorUuid: gmail-connector-uuid-0001

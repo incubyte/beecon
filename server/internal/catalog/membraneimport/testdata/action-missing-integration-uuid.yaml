@@ -1,0 +1,24 @@
+uuid: 9f000000-0000-4000-8000-000000000003
+key: test-crm-orphan-of-group
+name: Orphan Of Group Action
+inputSchema:
+  description: An action whose export omits integrationUuid entirely.
+  type: object
+  properties:
+    recordId:
+      type: string
+  required:
+    - recordId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /records/{recordId}
+    pathParameters:
+      recordId:
+        $var: $.input.recordId
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string

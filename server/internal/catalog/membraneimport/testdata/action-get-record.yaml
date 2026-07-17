@@ -1,0 +1,36 @@
+uuid: 9f000000-0000-4000-8000-000000000002
+key: test-crm-get-record
+name: Get Record
+inputSchema:
+  description: Retrieves a single record from the CRM by id.
+  type: object
+  properties:
+    recordId:
+      title: Record ID
+      description: The unique identifier of the record to retrieve
+      type: string
+    select:
+      title: Select Fields
+      description: Comma-separated list of fields to include in the response
+      type: string
+  required:
+    - recordId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /records/{recordId}
+    pathParameters:
+      recordId:
+        $var: $.input.recordId
+    query:
+      select:
+        $var: $.input.select
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+    name:
+      type: string
+integrationUuid: grp-test-crm-uuid

@@ -18,16 +18,26 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
-	if len(os.Args) < 2 || os.Args[1] != "serve" {
-		logger.Error("usage: beecon serve")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: beecon <serve|import-membrane>")
 		os.Exit(1)
 	}
 
-	if err := serve(logger); err != nil {
-		logger.Error("beecon exited with error", "err", err)
+	switch os.Args[1] {
+	case "serve":
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		slog.SetDefault(logger)
+		if err := serve(logger); err != nil {
+			logger.Error("beecon exited with error", "err", err)
+			os.Exit(1)
+		}
+	case "import-membrane":
+		if err := runImportMembrane(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: beecon <serve|import-membrane>")
 		os.Exit(1)
 	}
 }

@@ -1,0 +1,49 @@
+uuid: 9f000000-0000-4000-8000-000000000011
+key: test-crm-get-scoped-record
+name: Get Scoped Record
+inputSchema:
+  description: Retrieves a record, scoped by team, then by user, else a global default — genuine three-way branching with no single fallback.
+  type: object
+  properties:
+    teamId:
+      title: Team ID
+      type: string
+    userId:
+      title: User ID
+      type: string
+    recordId:
+      title: Record ID
+      type: string
+  required:
+    - recordId
+type: api-request-to-external-app
+config:
+  request:
+    path:
+      $case:
+        cases:
+          - filter:
+              $eval:
+                $var: $.input.teamId
+              isNotEmpty: true
+            value: /teams/{teamId}/records/{recordId}
+          - filter:
+              $eval:
+                $var: $.input.userId
+              isNotEmpty: true
+            value: /users/{userId}/records/{recordId}
+          - value: /records/{recordId}
+    method: GET
+    pathParameters:
+      teamId:
+        $var: $.input.teamId
+      userId:
+        $var: $.input.userId
+      recordId:
+        $var: $.input.recordId
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: grp-test-crm-uuid

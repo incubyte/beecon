@@ -1,0 +1,10 @@
+# The connector is really HubSpot (key carries the alias); the installation
+# renamed its display name to something that names no known provider at all,
+# proving matchProviderPreset ignores "name" and matches on key/connectorUuid/
+# logoUri instead (Slice 3 AC3).
+uuid: renamed-grp-uuid-0001
+key: hubspot-crm-sync-connector
+name: My Custom Business App
+logoUri: https://static.example.com/custom-logo.png
+connectorVersion: 1.0.0
+connectorUuid: custom-connector-uuid-0001

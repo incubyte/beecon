@@ -1,0 +1,25 @@
+uuid: 9f000000-0000-4000-8000-000000000004
+key: orphan-action
+name: Orphan Action
+inputSchema:
+  description: An action whose integrationUuid names no integration file in this run.
+  type: object
+  properties:
+    recordId:
+      type: string
+  required:
+    - recordId
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /records/{recordId}
+    pathParameters:
+      recordId:
+        $var: $.input.recordId
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: no-such-integration-uuid

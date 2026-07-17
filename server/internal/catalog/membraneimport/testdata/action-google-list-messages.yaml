@@ -1,0 +1,22 @@
+uuid: 9f000000-0000-4000-8000-000000000012
+key: gmail-list-messages
+name: List Messages
+inputSchema:
+  description: Lists messages in the authenticated user's Gmail mailbox.
+  type: object
+  properties:
+    labelId:
+      title: Label ID
+      description: Restrict the listing to one Gmail label
+      type: string
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /users/me/messages
+customOutputSchema:
+  type: object
+  properties:
+    messages:
+      type: array
+integrationUuid: google-grp-uuid-0001

@@ -1,0 +1,27 @@
+uuid: 9f000000-0000-4000-8000-000000000012
+key: test-crm-list-folder-messages
+name: List Folder Messages
+inputSchema:
+  description: Lists messages in a folder, defaulting to the Inbox when none is given.
+  type: object
+  properties:
+    folderId:
+      title: Folder ID
+      description: The folder to list messages from. Defaults to Inbox.
+      type: string
+type: api-request-to-external-app
+config:
+  request:
+    method: GET
+    path: /me/mailFolders/{folderId}/messages
+    pathParameters:
+      folderId:
+        $firstNotEmpty:
+          - $var: $.input.folderId
+          - Inbox
+customOutputSchema:
+  type: object
+  properties:
+    id:
+      type: string
+integrationUuid: grp-test-crm-uuid
