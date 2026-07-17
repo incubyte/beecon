@@ -21,7 +21,19 @@ import (
 // defaultTimeout bounds every request this client makes to a provider —
 // neither the token endpoint nor the user-info endpoint should ever hang the
 // OAuth callback indefinitely.
-const defaultTimeout = 15 * time.Second
+//
+// defaultUserAgent (PD83) is sent on every request this client issues (token
+// exchange, FetchAccount, FetchUserInfo). GitHub's REST API — including its
+// token endpoint and account-fetch endpoint — rejects any request with no
+// User-Agent header (HTTP 403); a request with no User-Agent otherwise set
+// would fail to activate a GitHub connection (403 on FetchAccount, stuck
+// INITIATED). A default is harmless for every other provider (Outlook,
+// Hubspot, Gmail, Calendar, Slack): none of them requires or rejects a
+// User-Agent header.
+const (
+	defaultTimeout   = 15 * time.Second
+	defaultUserAgent = "Beecon/1.0"
+)
 
 // Client is the connections module's real driven OAuthClient.
 type Client struct {
@@ -107,6 +119,7 @@ func (c *Client) doTokenGrant(ctx context.Context, tokenURL string, form url.Val
 	if credentialStyle == connections.CredentialStyleBasicAuth {
 		httpReq.SetBasicAuth(clientID, clientSecret)
 	}
+	httpReq.Header.Set("User-Agent", defaultUserAgent)
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -186,6 +199,7 @@ func (c *Client) FetchAccount(ctx context.Context, req connections.AccountFetchR
 	if err != nil {
 		return connections.AccountInfo{}, fmt.Errorf("build account info request: %w", err)
 	}
+	httpReq.Header.Set("User-Agent", defaultUserAgent)
 	httpReq.Header.Set("Authorization", "Bearer "+req.AccessToken)
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -221,6 +235,7 @@ func (c *Client) FetchUserInfo(ctx context.Context, userInfoURL, accessToken str
 	if err != nil {
 		return fmt.Errorf("build reconciliation probe request: %w", err)
 	}
+	httpReq.Header.Set("User-Agent", defaultUserAgent)
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	httpReq.Header.Set("Accept", "application/json")
 

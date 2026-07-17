@@ -1,0 +1,255 @@
+# Google Calendar provider definition, finalized format v1 (PD13). Phase 5's
+# clean poll trigger (PD77/PD80): reuses gmail.yaml's shared Google OAuth
+# block (same authorize/token/userinfo endpoints and OpenID userInfo
+# mapping — only scopes and baseUrl differ, PD78) and adds the strand's one
+# poll trigger, whose RFC3339-watermarked events.list/updatedMin shape maps
+# cleanly onto the poll model (PD80). Pure declarative YAML — no
+# provider-specific Go code was added to ship it.
+formatVersion: 1
+slug: google-calendar
+name: Google Calendar
+logo: https://static.beecon.dev/providers/google-calendar.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://accounts.google.com/o/oauth2/v2/auth
+  tokenUrl: https://oauth2.googleapis.com/token
+  # Identical to gmail.yaml's userInfoUrl (PD78): Google's own OpenID Connect
+  # userinfo endpoint, bearer-authenticated, read by the OAuth callback's
+  # generic account-fetch mechanism (PD9) to capture the connected account's
+  # email/display name.
+  #
+  # DEVIATION (flagged, not built here — see spec's Provider deviations,
+  # cross-cutting both Google slices): Google issues a refresh token only
+  # when access_type=offline (+ prompt=consent) is present on the
+  # *authorize* request. connections/oauth.go's buildAuthorizeURL hard-codes
+  # client_id/response_type/redirect_uri/scope/state with no field for extra
+  # authorize params, and this definition format has no place to declare
+  # them. Consequence: Calendar access tokens work but expire (~1h) with no
+  # refresh, so a Calendar connection goes stale over time. Recommended
+  # follow-up: let a definition declare static authorize-request params
+  # (e.g. access_type: offline) — out of scope for this definitions-only
+  # strand.
+  userInfoUrl: https://www.googleapis.com/oauth2/v3/userinfo
+  # openid/email/profile are the OpenID Connect scopes the userinfo endpoint
+  # above requires (identical to gmail.yaml); calendar.events is what
+  # gcal-list-events/gcal-create-event and the poll trigger need to read and
+  # write the authenticated user's events.
+  scopes:
+    - openid
+    - email
+    - profile
+    - https://www.googleapis.com/auth/calendar.events
+  # credentialStyle is omitted deliberately: it defaults to formBody, which is
+  # exactly how Google's token endpoint takes client_id/client_secret (PD78).
+  userInfo:
+    email: email
+    displayName: name
+mapping:
+  baseUrl: https://www.googleapis.com/calendar/v3
+tools:
+  - slug: gcal-list-events
+    name: List events
+    description: List events on a Google Calendar, cursor-paginated.
+    inputSchema:
+      type: object
+      properties:
+        calendarId:
+          title: Calendar ID
+          description: >-
+            The calendar identifier to list events from. Defaults to the
+            authenticated user's primary calendar.
+          type: string
+          default: primary
+        timeMin:
+          title: Time min
+          description: >-
+            RFC3339 timestamp; only events ending at or after this time are
+            returned.
+          type: string
+        singleEvents:
+          title: Expand recurring events
+          description: >-
+            Whether recurring events should be expanded into individual
+            instances.
+          type: boolean
+        orderBy:
+          title: Order by
+          description: The order of returned events (startTime or updated).
+          type: string
+        pageSize:
+          type: integer
+          description: Maximum number of events to return in this page.
+        cursor:
+          type: string
+          description: Opaque pagination cursor from a previous page's nextCursor.
+      required:
+        - calendarId
+    outputSchema:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+              summary:
+                type: string
+              start:
+                type: object
+              end:
+                type: object
+              updated:
+                type: string
+        nextPageToken:
+          type: string
+    mapping:
+      method: GET
+      # {input.calendarId} is URL-escaped by RenderPath before it is
+      # substituted into the path, so a calendarId cannot break out of its
+      # path segment. calendarId is required by this inputSchema and
+      # defaults to "primary" (engine-gaps Gap C's inputSchema default,
+      # applied by execution/facade.go's mergeWithSchemaDefaults) when the
+      # caller supplies none.
+      path: /calendars/{input.calendarId}/events
+      query:
+        timeMin: "{input.timeMin}"
+        singleEvents: "{input.singleEvents}"
+        orderBy: "{input.orderBy}"
+      # Canonical pageSize/cursor call arguments (PD15b) map onto Calendar's
+      # own maxResults/pageToken query parameters; the following page's
+      # cursor is read back out of the response at nextPageToken.
+      pagination:
+        pageSizeParam: maxResults
+        cursorParam: pageToken
+        nextCursorPath: nextPageToken
+
+  - slug: gcal-create-event
+    name: Create event
+    description: Create an event on a Google Calendar.
+    inputSchema:
+      type: object
+      properties:
+        calendarId:
+          title: Calendar ID
+          description: >-
+            The calendar identifier to create the event on. Defaults to the
+            authenticated user's primary calendar.
+          type: string
+          default: primary
+        summary:
+          title: Summary
+          description: The event's title.
+          type: string
+        startDateTime:
+          title: Start
+          description: RFC3339 timestamp the event starts at.
+          type: string
+        endDateTime:
+          title: End
+          description: RFC3339 timestamp the event ends at.
+          type: string
+      required:
+        - calendarId
+        - summary
+        - startDateTime
+        - endDateTime
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        start:
+          type: object
+          properties:
+            dateTime:
+              type: string
+        end:
+          type: object
+          properties:
+            dateTime:
+              type: string
+    mapping:
+      method: POST
+      path: /calendars/{input.calendarId}/events
+      # Dotted body keys build the nested {"start":{"dateTime":...},
+      # "end":{"dateTime":...}} JSON shape Calendar's events.insert requires
+      # from the tool's flat inputSchema (mirrors Hubspot's properties.*
+      # body mapping, PD16).
+      body:
+        summary: "{input.summary}"
+        start.dateTime: "{input.startDateTime}"
+        end.dateTime: "{input.endDateTime}"
+
+# Phase 5's one poll trigger (PD80): Calendar's events.list returns a
+# per-record RFC3339 "updated" timestamp and takes an updatedMin filter,
+# which maps cleanly onto the poll model's {watermark}/recordTimestampPath —
+# unlike Gmail's historyId model (deferred, see gmail.yaml) or Slack/GitHub
+# (deferred, see slack.yaml/github.yaml). Mirrors outlook.yaml's
+# outlook-message-received trigger shape.
+triggers:
+  - slug: gcal-event-updated
+    name: Event created or updated
+    description: >-
+      Triggered when an event on the configured calendar is created or
+      updated. Polls Google Calendar events newer than the trigger's
+      watermark, ordered by their own updated timestamp.
+    ingestion: poll
+    pollIntervalSeconds: 60
+    configSchema:
+      type: object
+      properties:
+        calendarId:
+          type: string
+          description: >-
+            Google Calendar to monitor: a calendar id, or "primary" for the
+            authenticated user's own calendar. Defaults to primary.
+          default: primary
+    payloadSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        summary:
+          type: string
+        status:
+          type: string
+        start:
+          type: string
+        end:
+          type: string
+        updated:
+          type: string
+      required:
+        - id
+        - updated
+    poll:
+      method: GET
+      path: /calendars/{config.calendarId}/events
+      # updatedMin is Calendar's own "modified since" filter (the
+      # {watermark}-based equivalent of Outlook's "receivedDateTime gt
+      # {watermark}" OData filter); orderBy=updated sorts the response by
+      # the same field recordTimestampPath reads; singleEvents=true expands
+      # recurring events into individual instances so each fired instance
+      # carries its own updated timestamp, exactly like a plain event.
+      query:
+        updatedMin: "{watermark}"
+        orderBy: updated
+        singleEvents: "true"
+      recordsPath: items
+      recordIdPath: id
+      recordTimestampPath: updated
+      payload:
+        id: id
+        summary: summary
+        status: status
+        start: start.dateTime
+        end: end.dateTime
+        updated: updated

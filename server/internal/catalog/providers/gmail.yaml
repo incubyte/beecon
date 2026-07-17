@@ -1,0 +1,186 @@
+# Gmail provider definition, finalized format v1 (PD13). Phase 5's walking
+# skeleton (PD77/PD78): establishes the shared Google OAuth block (also
+# reused, endpoints-and-userInfo-identical, by google-calendar.yaml) and
+# proves a Google tool executes end to end. Pure declarative YAML — no
+# provider-specific Go code was added to ship it.
+formatVersion: 1
+slug: gmail
+name: Gmail
+logo: https://static.beecon.dev/providers/gmail.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://accounts.google.com/o/oauth2/v2/auth
+  tokenUrl: https://oauth2.googleapis.com/token
+  # Google's own OpenID Connect userinfo endpoint (bearer-authenticated); the
+  # OAuth callback's generic account-fetch mechanism (PD9) reads it to
+  # capture the connected account's email/display name.
+  #
+  # DEVIATION (flagged, not built here — see spec's Provider deviations):
+  # Google issues a refresh token only when access_type=offline (+
+  # prompt=consent) is present on the *authorize* request. connections/
+  # oauth.go's buildAuthorizeURL hard-codes client_id/response_type/
+  # redirect_uri/scope/state with no field for extra authorize params, and
+  # this definition format has no place to declare them. Consequence: Gmail
+  # access tokens work but expire (~1h) with no refresh, so a Gmail
+  # connection goes stale over time. Recommended follow-up: let a definition
+  # declare static authorize-request params (e.g. access_type: offline) —
+  # out of scope for this definitions-only strand.
+  userInfoUrl: https://www.googleapis.com/oauth2/v3/userinfo
+  # openid/email/profile are the OpenID Connect scopes the userinfo endpoint
+  # above requires; the gmail.readonly/gmail.send scopes are what
+  # gmail-list-messages/gmail-get-message and gmail-send-message need
+  # respectively.
+  scopes:
+    - openid
+    - email
+    - profile
+    - https://www.googleapis.com/auth/gmail.readonly
+    - https://www.googleapis.com/auth/gmail.send
+  # credentialStyle is omitted deliberately: it defaults to formBody, which is
+  # exactly how Google's token endpoint takes client_id/client_secret (PD78).
+  userInfo:
+    email: email
+    displayName: name
+mapping:
+  baseUrl: https://gmail.googleapis.com/gmail/v1
+tools:
+  - slug: gmail-list-messages
+    name: List messages
+    description: List messages in the authenticated user's mailbox, cursor-paginated.
+    inputSchema:
+      type: object
+      properties:
+        q:
+          type: string
+          description: >-
+            Gmail search query restricting which messages are returned (the
+            same syntax as the Gmail search box, e.g. 'is:unread').
+        pageSize:
+          type: integer
+          description: Maximum number of messages to return in this page.
+        cursor:
+          type: string
+          description: Opaque pagination cursor from a previous page's nextCursor.
+    outputSchema:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              threadId:
+                type: string
+        resultSizeEstimate:
+          type: integer
+        nextPageToken:
+          type: string
+    mapping:
+      method: GET
+      path: /users/me/messages
+      query:
+        q: "{input.q}"
+      # Canonical pageSize/cursor call arguments (PD15b) map onto Gmail's own
+      # maxResults/pageToken query parameters; the following page's cursor is
+      # read back out of the response at nextPageToken.
+      pagination:
+        pageSizeParam: maxResults
+        cursorParam: pageToken
+        nextCursorPath: nextPageToken
+
+  - slug: gmail-get-message
+    name: Get message
+    description: >-
+      Retrieves a specific email message by its ID from the authenticated
+      user's Gmail mailbox.
+    inputSchema:
+      type: object
+      properties:
+        messageId:
+          title: Message ID
+          description: The unique identifier of the Gmail message to retrieve.
+          type: string
+        format:
+          title: Format
+          description: >-
+            The format to return the message in (full, metadata, minimal, or
+            raw). Defaults to Gmail's own default (full) when omitted.
+          type: string
+      required:
+        - messageId
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        threadId:
+          type: string
+        labelIds:
+          type: array
+          items:
+            type: string
+        snippet:
+          type: string
+        historyId:
+          type: string
+        internalDate:
+          type: string
+        payload:
+          type: object
+        sizeEstimate:
+          type: integer
+    mapping:
+      method: GET
+      # {input.messageId} is URL-escaped by RenderPath before it is
+      # substituted into the path, so a messageId cannot break out of its
+      # path segment.
+      path: /users/me/messages/{input.messageId}
+      query:
+        format: "{input.format}"
+
+  - slug: gmail-send-message
+    name: Send message
+    description: >-
+      Sends an email message from the authenticated user's Gmail account.
+    inputSchema:
+      type: object
+      properties:
+        raw:
+          title: Raw MIME message
+          description: >-
+            A complete RFC 2822 email message (headers and body), base64url-
+            encoded. The caller must build and encode this MIME message —
+            Gmail's messages.send API takes only this pre-encoded form, and
+            the token grammar (ADR-0012 — pure substitution, no MIME
+            construction) can substitute a value but cannot build one (PD79,
+            flagged deviation).
+          type: string
+      required:
+        - raw
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: string
+        threadId:
+          type: string
+        labelIds:
+          type: array
+          items:
+            type: string
+    mapping:
+      method: POST
+      path: /users/me/messages/send
+      body:
+        raw: "{input.raw}"
+
+# Gmail declares no trigger (deferred, PD80/spec Provider deviations): its
+# incremental model is historyId (users.history.list), not a timestamp
+# watermark — messages.list items carry only {id,threadId} (no per-record
+# timestamp without a second call) and internalDate is epoch-millis, not
+# RFC3339. The poll model's RFC3339 {watermark} + recordTimestampPath cannot
+# express this; the strand's one poll trigger lives on Google Calendar
+# instead. This definition still parses and loads with an empty triggers
+# list — the field is simply omitted.

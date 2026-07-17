@@ -1,0 +1,229 @@
+# GitHub provider definition, finalized format v1 (PD13). Phase 5 Slice 4
+# (PD77/PD84): ships repo/issue tools while flagging two verified engine/
+# loader limitations below — no runtime code changes to the loader, poll
+# mapping schema, or execution engine were made to ship this file. The one
+# change GitHub needed to *activate* connections (a default User-Agent in
+# connections/driven/oauthhttp/client.go, PD83) is a small, shared,
+# precedented fix outside this definitions-only file.
+formatVersion: 1
+slug: github
+name: GitHub
+logo: https://static.beecon.dev/providers/github.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://github.com/login/oauth/authorize
+  # GitHub's token exchange takes client_id/client_secret/code in the form
+  # body and returns form-encoded output unless the request carries
+  # Accept: application/json — which connections/driven/oauthhttp's
+  # doTokenGrant already sends, so credentialStyle is omitted deliberately
+  # (defaults to formBody, PD16).
+  tokenUrl: https://github.com/login/oauth/access_token
+  # DEVIATION (flagged, fixed by PD83 — a shared oauthhttp default, not a
+  # provider-definition change): GitHub's REST API, including this account-
+  # fetch endpoint, rejects any request with no User-Agent header (HTTP 403).
+  # connections/driven/oauthhttp/client.go now sends a default User-Agent on
+  # every request it issues (token exchange, FetchAccount, FetchUserInfo), so
+  # this GET succeeds and a GitHub connection activates with captured account
+  # metadata.
+  userInfoUrl: https://api.github.com/user
+  scopes:
+    - repo
+    - read:user
+  # GET /user returns a flat top-level shape ({login, name, email, ...});
+  # email maps straight across, and login (GitHub's account handle) is used
+  # as the connection's display name — GitHub does not require a public
+  # "name" to be set, but every account has a login.
+  userInfo:
+    email: email
+    displayName: login
+mapping:
+  baseUrl: https://api.github.com
+tools:
+  # Every GitHub tool below declares its own literal User-Agent/Accept
+  # header pair (PD84): GitHub's REST API rejects requests with no
+  # User-Agent (403), and the recommended Accept for the REST API's current
+  # media type is application/vnd.github+json (overriding
+  # execution/driven/providerhttp's default Accept: application/json, which
+  # GitHub also tolerates, but the declared header is what's actually sent).
+  - slug: github-list-repos
+    name: List repositories
+    description: List repositories owned by (or accessible to) the authenticated user, page-paginated.
+    inputSchema:
+      type: object
+      properties:
+        visibility:
+          title: Visibility
+          description: >-
+            Filter by repository visibility: all, public, or private.
+            Defaults to GitHub's own default (all) when omitted.
+          type: string
+        perPage:
+          title: Per page
+          description: Maximum number of repositories to return in this page (GitHub's per_page).
+          type: integer
+        page:
+          title: Page
+          description: >-
+            The page number to fetch. GitHub paginates /user/repos by page
+            number (with a Link response header the token grammar cannot
+            read), not by an opaque cursor, so the caller advances this
+            input directly rather than following a returned nextCursor.
+          type: integer
+    outputSchema:
+      type: array
+      items:
+        type: object
+        properties:
+          id:
+            type: integer
+          name:
+            type: string
+          full_name:
+            type: string
+          private:
+            type: boolean
+          html_url:
+            type: string
+    mapping:
+      method: GET
+      path: /user/repos
+      query:
+        visibility: "{input.visibility}"
+        per_page: "{input.perPage}"
+        page: "{input.page}"
+      header:
+        User-Agent: Beecon
+        Accept: application/vnd.github+json
+
+  - slug: github-list-issues
+    name: List issues
+    description: List issues in a repository, page-paginated.
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          title: Owner
+          description: The repository owner (user or organization login).
+          type: string
+        repo:
+          title: Repository
+          description: The repository name.
+          type: string
+        state:
+          title: State
+          description: >-
+            Filter by issue state: open, closed, or all. Defaults to
+            GitHub's own default (open) when omitted.
+          type: string
+        perPage:
+          title: Per page
+          description: Maximum number of issues to return in this page (GitHub's per_page).
+          type: integer
+      required:
+        - owner
+        - repo
+    outputSchema:
+      type: array
+      items:
+        type: object
+        properties:
+          id:
+            type: integer
+          number:
+            type: integer
+          title:
+            type: string
+          body:
+            type: string
+          state:
+            type: string
+          html_url:
+            type: string
+    mapping:
+      method: GET
+      # {input.owner}/{input.repo} are URL-escaped by RenderPath before being
+      # substituted into the path, so neither can break out of its path
+      # segment.
+      path: /repos/{input.owner}/{input.repo}/issues
+      query:
+        state: "{input.state}"
+        per_page: "{input.perPage}"
+      header:
+        User-Agent: Beecon
+        Accept: application/vnd.github+json
+
+  - slug: github-create-issue
+    name: Create issue
+    description: Create a new issue in a repository.
+    inputSchema:
+      type: object
+      properties:
+        owner:
+          title: Owner
+          description: The repository owner (user or organization login).
+          type: string
+        repo:
+          title: Repository
+          description: The repository name.
+          type: string
+        title:
+          title: Title
+          description: The issue title.
+          type: string
+        body:
+          title: Body
+          description: The issue body (Markdown).
+          type: string
+      required:
+        - owner
+        - repo
+        - title
+    outputSchema:
+      type: object
+      properties:
+        id:
+          type: integer
+        number:
+          type: integer
+        title:
+          type: string
+        body:
+          type: string
+        state:
+          type: string
+        html_url:
+          type: string
+    mapping:
+      method: POST
+      path: /repos/{input.owner}/{input.repo}/issues
+      body:
+        title: "{input.title}"
+        body: "{input.body}"
+      header:
+        User-Agent: Beecon
+        Accept: application/vnd.github+json
+
+# GitHub declares no trigger (deferred, PD84/spec Provider deviations) — two
+# verified blockers, neither fixed here:
+#   1. GET /repos/{owner}/{repo}/issues returns a top-level JSON array. The
+#      poll engine (execution/poll.go's lookupPollField) can read a root
+#      array via an empty recordsPath, but the strict loader's
+#      validateTriggerPollMappingFileV1 requires poll.recordsPath to be
+#      non-empty — an inconsistency that would need resolving before any
+#      root-array poll trigger could load at all. (GET /search/issues
+#      returns {items:[...]}, which would solve this blocker alone, but not
+#      the next one.)
+#   2. triggerPollMappingFileV1 has no header field, so the mandatory
+#      User-Agent header a poll request needs (same 403-without-it
+#      requirement as every other GitHub call) cannot be declared for a poll
+#      request.
+# Shipping a trigger here would require both the loader's recordsPath rule
+# and the poll mapping schema to change — out of scope for this
+# definitions-only strand (see Out of Scope). This definition still parses
+# and loads with an empty triggers list — the field is simply omitted.
+#
+# DEVIATION (flagged, not built here): GitHub OAuth Apps issue non-expiring
+# access tokens (only GitHub Apps issue expiring ones), so no refresh_token
+# is ever returned; Beecon stores an empty refresh token and PD18's
+# refresh-on-401 path is simply never exercised for GitHub. No action
+# needed.

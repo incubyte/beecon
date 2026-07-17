@@ -366,3 +366,371 @@ func TestDefaultProviderDefinitions_LoadsTheEmbeddedHubspotDefinition(t *testing
 		}
 	}
 }
+
+// TestDefaultProviderDefinitions_LoadsTheEmbeddedGmailDefinition is the
+// Providers strand's Gmail slice's boot-load AC: gmail.yaml parses under the
+// real strict loader with no error and boot-loads purely as a definition
+// file — no provider-specific Go code was added to make its OAuth block or
+// its three tools' mappings (pagination, path templating, JSON body)
+// parseable.
+func TestDefaultProviderDefinitions_LoadsTheEmbeddedGmailDefinition(t *testing.T) {
+	defs, err := catalog.DefaultProviderDefinitions()
+
+	if err != nil {
+		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
+	}
+	gmail, ok := findDefinitionBySlug(defs, "gmail")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled Gmail definition", defs)
+	}
+	if gmail.Name != "Gmail" {
+		t.Errorf("Name = %q, want %q", gmail.Name, "Gmail")
+	}
+	if gmail.AuthorizeURL != "https://accounts.google.com/o/oauth2/v2/auth" {
+		t.Errorf("AuthorizeURL = %q, want the Google authorize endpoint", gmail.AuthorizeURL)
+	}
+	if gmail.TokenURL != "https://oauth2.googleapis.com/token" {
+		t.Errorf("TokenURL = %q, want the Google token endpoint", gmail.TokenURL)
+	}
+	if gmail.UserInfoURL != "https://www.googleapis.com/oauth2/v3/userinfo" {
+		t.Errorf("UserInfoURL = %q, want the Google OpenID userinfo endpoint", gmail.UserInfoURL)
+	}
+	wantScopes := []string{"openid", "email", "profile", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"}
+	for _, scope := range wantScopes {
+		if !slices.Contains(gmail.Scopes, scope) {
+			t.Errorf("Scopes = %v, want it to include %q", gmail.Scopes, scope)
+		}
+	}
+	if gmail.UserInfo.EmailField != "email" {
+		t.Errorf("UserInfo.EmailField = %q, want %q", gmail.UserInfo.EmailField, "email")
+	}
+	if gmail.UserInfo.DisplayNameField != "name" {
+		t.Errorf("UserInfo.DisplayNameField = %q, want %q", gmail.UserInfo.DisplayNameField, "name")
+	}
+	if gmail.BaseURL != "https://gmail.googleapis.com/gmail/v1" {
+		t.Errorf("BaseURL = %q, want the Gmail API base", gmail.BaseURL)
+	}
+	if len(gmail.Triggers) != 0 {
+		t.Errorf("Triggers = %+v, want an empty list (Gmail defers its trigger, PD80)", gmail.Triggers)
+	}
+
+	wantTools := map[string]bool{"gmail-list-messages": false, "gmail-get-message": false, "gmail-send-message": false}
+	for _, tool := range gmail.Tools {
+		if _, declared := wantTools[tool.Slug]; declared {
+			wantTools[tool.Slug] = true
+		}
+		if len(tool.InputSchema) == 0 || len(tool.OutputSchema) == 0 {
+			t.Errorf("tool %q has an empty input/output schema", tool.Slug)
+		}
+		if tool.Slug == "gmail-list-messages" {
+			if tool.Mapping.Pagination == nil {
+				t.Fatal("gmail-list-messages declares no Mapping.Pagination, want one (PD15b)")
+			}
+			if tool.Mapping.Pagination.PageSizeParam != "maxResults" || tool.Mapping.Pagination.CursorParam != "pageToken" {
+				t.Errorf("Pagination = %+v, want PageSizeParam=maxResults, CursorParam=pageToken", tool.Mapping.Pagination)
+			}
+			if tool.Mapping.Pagination.NextCursorPath != "nextPageToken" {
+				t.Errorf("NextCursorPath = %q, want %q", tool.Mapping.Pagination.NextCursorPath, "nextPageToken")
+			}
+		}
+		if tool.Slug == "gmail-get-message" {
+			if tool.Path != "/users/me/messages/{input.messageId}" {
+				t.Errorf("Path = %q, want the {input.messageId} path token", tool.Path)
+			}
+		}
+		if tool.Slug == "gmail-send-message" {
+			if tool.Mapping.Body["raw"] != "{input.raw}" {
+				t.Errorf(`Mapping.Body["raw"] = %q, want %q`, tool.Mapping.Body["raw"], "{input.raw}")
+			}
+		}
+	}
+	for slug, found := range wantTools {
+		if !found {
+			t.Errorf("Tools = %+v, want it to include %q", gmail.Tools, slug)
+		}
+	}
+}
+
+// TestDefaultProviderDefinitions_LoadsTheEmbeddedGoogleCalendarDefinition is
+// the Providers strand's Google Calendar slice's boot-load AC:
+// google-calendar.yaml parses under the real strict loader and boot-loads
+// purely as a definition file — reusing gmail.yaml's shared Google OAuth
+// block (PD78) and adding the strand's one poll trigger (PD80) with no
+// provider-specific Go code.
+func TestDefaultProviderDefinitions_LoadsTheEmbeddedGoogleCalendarDefinition(t *testing.T) {
+	defs, err := catalog.DefaultProviderDefinitions()
+
+	if err != nil {
+		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
+	}
+	gcal, ok := findDefinitionBySlug(defs, "google-calendar")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled Google Calendar definition", defs)
+	}
+	if gcal.Name != "Google Calendar" {
+		t.Errorf("Name = %q, want %q", gcal.Name, "Google Calendar")
+	}
+	if gcal.AuthorizeURL != "https://accounts.google.com/o/oauth2/v2/auth" {
+		t.Errorf("AuthorizeURL = %q, want the Google authorize endpoint (shared with gmail.yaml, PD78)", gcal.AuthorizeURL)
+	}
+	if gcal.TokenURL != "https://oauth2.googleapis.com/token" {
+		t.Errorf("TokenURL = %q, want the Google token endpoint (shared with gmail.yaml, PD78)", gcal.TokenURL)
+	}
+	if gcal.UserInfoURL != "https://www.googleapis.com/oauth2/v3/userinfo" {
+		t.Errorf("UserInfoURL = %q, want the Google OpenID userinfo endpoint (shared with gmail.yaml, PD78)", gcal.UserInfoURL)
+	}
+	if !slices.Contains(gcal.Scopes, "https://www.googleapis.com/auth/calendar.events") {
+		t.Errorf("Scopes = %v, want it to include the calendar.events scope", gcal.Scopes)
+	}
+	if gcal.UserInfo.EmailField != "email" {
+		t.Errorf("UserInfo.EmailField = %q, want %q", gcal.UserInfo.EmailField, "email")
+	}
+	if gcal.UserInfo.DisplayNameField != "name" {
+		t.Errorf("UserInfo.DisplayNameField = %q, want %q", gcal.UserInfo.DisplayNameField, "name")
+	}
+	if gcal.BaseURL != "https://www.googleapis.com/calendar/v3" {
+		t.Errorf("BaseURL = %q, want the Calendar API base", gcal.BaseURL)
+	}
+
+	wantTools := map[string]bool{"gcal-list-events": false, "gcal-create-event": false}
+	for _, tool := range gcal.Tools {
+		if _, declared := wantTools[tool.Slug]; declared {
+			wantTools[tool.Slug] = true
+		}
+		if len(tool.InputSchema) == 0 || len(tool.OutputSchema) == 0 {
+			t.Errorf("tool %q has an empty input/output schema", tool.Slug)
+		}
+		if tool.Slug == "gcal-list-events" {
+			if tool.Mapping.Pagination == nil {
+				t.Fatal("gcal-list-events declares no Mapping.Pagination, want one (PD15b)")
+			}
+			if tool.Mapping.Pagination.PageSizeParam != "maxResults" || tool.Mapping.Pagination.CursorParam != "pageToken" {
+				t.Errorf("Pagination = %+v, want PageSizeParam=maxResults, CursorParam=pageToken", tool.Mapping.Pagination)
+			}
+			properties, _ := tool.InputSchema["properties"].(map[string]any)
+			calendarID, _ := properties["calendarId"].(map[string]any)
+			if calendarID["default"] != "primary" {
+				t.Errorf("inputSchema.properties.calendarId.default = %v, want %q (engine-gaps Gap C)", calendarID["default"], "primary")
+			}
+		}
+		if tool.Slug == "gcal-create-event" {
+			if tool.Mapping.Body["start.dateTime"] != "{input.startDateTime}" {
+				t.Errorf(`Mapping.Body["start.dateTime"] = %q, want %q`, tool.Mapping.Body["start.dateTime"], "{input.startDateTime}")
+			}
+			if tool.Mapping.Body["end.dateTime"] != "{input.endDateTime}" {
+				t.Errorf(`Mapping.Body["end.dateTime"] = %q, want %q`, tool.Mapping.Body["end.dateTime"], "{input.endDateTime}")
+			}
+		}
+	}
+	for slug, found := range wantTools {
+		if !found {
+			t.Errorf("Tools = %+v, want it to include %q", gcal.Tools, slug)
+		}
+	}
+
+	if len(gcal.Triggers) != 1 {
+		t.Fatalf("Triggers = %+v, want exactly 1 (gcal-event-updated, PD80)", gcal.Triggers)
+	}
+	trigger := gcal.Triggers[0]
+	if trigger.Slug != "gcal-event-updated" {
+		t.Errorf("Triggers[0].Slug = %q, want %q", trigger.Slug, "gcal-event-updated")
+	}
+	if trigger.Ingestion != "poll" {
+		t.Errorf("Ingestion = %q, want %q", trigger.Ingestion, "poll")
+	}
+	if len(trigger.ConfigSchema) == 0 {
+		t.Error("ConfigSchema must not be empty")
+	}
+	if len(trigger.PayloadSchema) == 0 {
+		t.Error("PayloadSchema must not be empty")
+	}
+	if trigger.Poll.Path != "/calendars/{config.calendarId}/events" {
+		t.Errorf("Poll.Path = %q, want the config.calendarId-templated events path", trigger.Poll.Path)
+	}
+	if trigger.Poll.Query["updatedMin"] != "{watermark}" {
+		t.Errorf(`Poll.Query["updatedMin"] = %q, want %q`, trigger.Poll.Query["updatedMin"], "{watermark}")
+	}
+	if trigger.Poll.Query["orderBy"] != "updated" {
+		t.Errorf(`Poll.Query["orderBy"] = %q, want the literal %q`, trigger.Poll.Query["orderBy"], "updated")
+	}
+	if trigger.Poll.Query["singleEvents"] != "true" {
+		t.Errorf(`Poll.Query["singleEvents"] = %q, want the literal %q`, trigger.Poll.Query["singleEvents"], "true")
+	}
+	if trigger.Poll.RecordsPath != "items" {
+		t.Errorf("Poll.RecordsPath = %q, want %q", trigger.Poll.RecordsPath, "items")
+	}
+	if trigger.Poll.RecordIDPath != "id" {
+		t.Errorf("Poll.RecordIDPath = %q, want %q", trigger.Poll.RecordIDPath, "id")
+	}
+	if trigger.Poll.RecordTimestampPath != "updated" {
+		t.Errorf("Poll.RecordTimestampPath = %q, want %q", trigger.Poll.RecordTimestampPath, "updated")
+	}
+}
+
+// TestDefaultProviderDefinitions_LoadsTheEmbeddedSlackDefinition is the
+// Providers strand's Slice 3 boot-load AC: slack.yaml parses under the real
+// strict loader and boot-loads purely as a definition file — no
+// provider-specific Go code was added to make its two tools' mappings
+// (JSON body, cursor pagination) parseable. It also pins slack.yaml's two
+// deliberate deviations at the definition level: userInfoUrl/userInfo are
+// entirely omitted (the format allows it — validateDefinitionFileV1 only
+// requires oauth.authorizeUrl/tokenUrl) and Slack declares no trigger, so
+// both UserInfoURL/UserInfo and Triggers must come back empty rather than
+// failing to load or silently defaulting to some other provider's shape.
+func TestDefaultProviderDefinitions_LoadsTheEmbeddedSlackDefinition(t *testing.T) {
+	defs, err := catalog.DefaultProviderDefinitions()
+
+	if err != nil {
+		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
+	}
+	slack, ok := findDefinitionBySlug(defs, "slack")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled Slack definition", defs)
+	}
+	if slack.Name != "Slack" {
+		t.Errorf("Name = %q, want %q", slack.Name, "Slack")
+	}
+	if slack.AuthorizeURL != "https://slack.com/oauth/v2/authorize" {
+		t.Errorf("AuthorizeURL = %q, want the Slack OAuth v2 authorize endpoint", slack.AuthorizeURL)
+	}
+	if slack.TokenURL != "https://slack.com/api/oauth.v2.access" {
+		t.Errorf("TokenURL = %q, want the Slack OAuth v2 token endpoint", slack.TokenURL)
+	}
+	if slack.BaseURL != "https://slack.com/api" {
+		t.Errorf("BaseURL = %q, want the Slack Web API base", slack.BaseURL)
+	}
+	for _, scope := range []string{"chat:write", "channels:read"} {
+		if !slices.Contains(slack.Scopes, scope) {
+			t.Errorf("Scopes = %v, want it to include %q", slack.Scopes, scope)
+		}
+	}
+	if slack.UserInfoURL != "" {
+		t.Errorf("UserInfoURL = %q, want empty — slack.yaml deliberately omits userInfoUrl (PD77 deviation)", slack.UserInfoURL)
+	}
+	if slack.UserInfo != (catalog.UserInfoMapping{}) {
+		t.Errorf("UserInfo = %+v, want the zero value — slack.yaml declares no userInfo block", slack.UserInfo)
+	}
+	if len(slack.Triggers) != 0 {
+		t.Errorf("Triggers = %+v, want an empty list — Slack ships no trigger in this strand (PD81 deviation)", slack.Triggers)
+	}
+
+	wantTools := map[string]bool{"slack-post-message": false, "slack-list-channels": false}
+	for _, tool := range slack.Tools {
+		if _, declared := wantTools[tool.Slug]; declared {
+			wantTools[tool.Slug] = true
+		}
+		if len(tool.InputSchema) == 0 || len(tool.OutputSchema) == 0 {
+			t.Errorf("tool %q has an empty input/output schema", tool.Slug)
+		}
+		if tool.Slug == "slack-post-message" {
+			if tool.Method != "POST" || tool.Path != "/chat.postMessage" {
+				t.Errorf("Method/Path = %s %s, want POST /chat.postMessage", tool.Method, tool.Path)
+			}
+			if tool.Mapping.Body["channel"] != "{input.channel}" {
+				t.Errorf(`Mapping.Body["channel"] = %q, want %q`, tool.Mapping.Body["channel"], "{input.channel}")
+			}
+			if tool.Mapping.Body["text"] != "{input.text}" {
+				t.Errorf(`Mapping.Body["text"] = %q, want %q`, tool.Mapping.Body["text"], "{input.text}")
+			}
+		}
+		if tool.Slug == "slack-list-channels" {
+			if tool.Mapping.Pagination == nil {
+				t.Fatal("slack-list-channels declares no Mapping.Pagination, want one (PD15b)")
+			}
+			if tool.Mapping.Pagination.PageSizeParam != "limit" || tool.Mapping.Pagination.CursorParam != "cursor" {
+				t.Errorf("Pagination = %+v, want PageSizeParam=limit, CursorParam=cursor", tool.Mapping.Pagination)
+			}
+			if tool.Mapping.Pagination.NextCursorPath != "response_metadata.next_cursor" {
+				t.Errorf("NextCursorPath = %q, want %q", tool.Mapping.Pagination.NextCursorPath, "response_metadata.next_cursor")
+			}
+		}
+	}
+	for slug, found := range wantTools {
+		if !found {
+			t.Errorf("Tools = %+v, want it to include %q", slack.Tools, slug)
+		}
+	}
+}
+
+// TestDefaultProviderDefinitions_LoadsTheEmbeddedGitHubDefinition is the
+// Providers strand's Slice 4 boot-load AC: github.yaml parses under the real
+// strict loader and boot-loads purely as a definition file — no
+// provider-specific Go code was added to make its three tools' mappings
+// (query pagination, path templating, JSON body, and literal per-tool
+// headers) parseable. It also pins github.yaml's own OAuth block (including
+// the email->email/displayName->login userInfo mapping) and its deliberate
+// omission of any trigger (PD84 deviation).
+func TestDefaultProviderDefinitions_LoadsTheEmbeddedGitHubDefinition(t *testing.T) {
+	defs, err := catalog.DefaultProviderDefinitions()
+
+	if err != nil {
+		t.Fatalf("unexpected error loading the embedded provider definitions: %v", err)
+	}
+	github, ok := findDefinitionBySlug(defs, "github")
+	if !ok {
+		t.Fatalf("defs = %+v, want it to include the bundled GitHub definition", defs)
+	}
+	if github.Name != "GitHub" {
+		t.Errorf("Name = %q, want %q", github.Name, "GitHub")
+	}
+	if github.AuthorizeURL != "https://github.com/login/oauth/authorize" {
+		t.Errorf("AuthorizeURL = %q, want the GitHub OAuth authorize endpoint", github.AuthorizeURL)
+	}
+	if github.TokenURL != "https://github.com/login/oauth/access_token" {
+		t.Errorf("TokenURL = %q, want the GitHub OAuth token endpoint", github.TokenURL)
+	}
+	if github.UserInfoURL != "https://api.github.com/user" {
+		t.Errorf("UserInfoURL = %q, want the GitHub account-fetch endpoint", github.UserInfoURL)
+	}
+	for _, scope := range []string{"repo", "read:user"} {
+		if !slices.Contains(github.Scopes, scope) {
+			t.Errorf("Scopes = %v, want it to include %q", github.Scopes, scope)
+		}
+	}
+	if github.UserInfo.EmailField != "email" {
+		t.Errorf("UserInfo.EmailField = %q, want %q", github.UserInfo.EmailField, "email")
+	}
+	if github.UserInfo.DisplayNameField != "login" {
+		t.Errorf("UserInfo.DisplayNameField = %q, want %q", github.UserInfo.DisplayNameField, "login")
+	}
+	if github.BaseURL != "https://api.github.com" {
+		t.Errorf("BaseURL = %q, want the GitHub API base", github.BaseURL)
+	}
+	if len(github.Triggers) != 0 {
+		t.Errorf("Triggers = %+v, want an empty list — GitHub ships no trigger in this strand (PD84 deviation)", github.Triggers)
+	}
+
+	wantTools := map[string]bool{"github-list-repos": false, "github-list-issues": false, "github-create-issue": false}
+	for _, tool := range github.Tools {
+		if _, declared := wantTools[tool.Slug]; declared {
+			wantTools[tool.Slug] = true
+		}
+		if len(tool.InputSchema) == 0 || len(tool.OutputSchema) == 0 {
+			t.Errorf("tool %q has an empty input/output schema", tool.Slug)
+		}
+		if tool.Mapping.Header["User-Agent"] != "Beecon" {
+			t.Errorf("tool %q Mapping.Header[User-Agent] = %q, want %q (PD84)", tool.Slug, tool.Mapping.Header["User-Agent"], "Beecon")
+		}
+		if tool.Mapping.Header["Accept"] != "application/vnd.github+json" {
+			t.Errorf("tool %q Mapping.Header[Accept] = %q, want %q", tool.Slug, tool.Mapping.Header["Accept"], "application/vnd.github+json")
+		}
+		if tool.Slug == "github-list-issues" {
+			if tool.Path != "/repos/{input.owner}/{input.repo}/issues" {
+				t.Errorf("Path = %q, want the {input.owner}/{input.repo}-templated path", tool.Path)
+			}
+		}
+		if tool.Slug == "github-create-issue" {
+			if tool.Mapping.Body["title"] != "{input.title}" {
+				t.Errorf(`Mapping.Body["title"] = %q, want %q`, tool.Mapping.Body["title"], "{input.title}")
+			}
+			if tool.Mapping.Body["body"] != "{input.body}" {
+				t.Errorf(`Mapping.Body["body"] = %q, want %q`, tool.Mapping.Body["body"], "{input.body}")
+			}
+		}
+	}
+	for slug, found := range wantTools {
+		if !found {
+			t.Errorf("Tools = %+v, want it to include %q", github.Tools, slug)
+		}
+	}
+}

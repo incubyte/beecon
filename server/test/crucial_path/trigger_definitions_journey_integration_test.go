@@ -6,13 +6,15 @@
 // doJSONRequest, and mintBrowserUserToken already declared there and in
 // browser_token_journey_integration_test.go — same package). This file tells
 // Slice 1's story end to end against the real composition root and the real
-// embedded outlook.yaml/hubspot.yaml (support.BootApp, no provider-definition
-// override): both shipped triggers (outlook-message-received,
-// hubspot-contact-created) are visible through the catalog API with their
-// real declared schemas, filtered by providerSlug or integrationId,
-// cursor-paginated, fetched by slug, rejected for an unknown provider/
-// integration, and split between the list endpoint (org or user token) and
-// the get-by-slug endpoint (org-key-only) exactly as router.go documents.
+// embedded outlook.yaml/hubspot.yaml/google-calendar.yaml (support.BootApp,
+// no provider-definition override): every shipped trigger
+// (outlook-message-received, hubspot-contact-created,
+// gcal-event-updated — Phase 5 providers strand's Slice 2, PD80) is visible
+// through the catalog API with its real declared schemas, filtered by
+// providerSlug or integrationId, cursor-paginated, fetched by slug, rejected
+// for an unknown provider/integration, and split between the list endpoint
+// (org or user token) and the get-by-slug endpoint (org-key-only) exactly as
+// router.go documents.
 package crucial_path
 
 import (
@@ -233,7 +235,7 @@ func TestTriggerDefinitionsJourney_ListFilterGetAndPagination(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor pagination walks both shipped triggers once, sorted by slug, no dupes or gaps", func(t *testing.T) {
+	t.Run("cursor pagination walks every shipped trigger once, sorted by slug, no dupes or gaps", func(t *testing.T) {
 		seen := map[string]bool{}
 		cursor := ""
 		for page := 0; page < 5; page++ {
@@ -252,8 +254,8 @@ func TestTriggerDefinitionsJourney_ListFilterGetAndPagination(t *testing.T) {
 			}
 			cursor = result.NextCursor
 		}
-		if len(seen) != 2 {
-			t.Fatalf("walked %d triggers across all pages, want exactly 2 (no duplicates or gaps): %v", len(seen), seen)
+		if len(seen) != 3 {
+			t.Fatalf("walked %d triggers across all pages, want exactly 3 (no duplicates or gaps): %v", len(seen), seen)
 		}
 	})
 

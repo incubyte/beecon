@@ -1,0 +1,156 @@
+# Slack provider definition, finalized format v1 (PD13). Phase 5 Slice 3
+# (PD77/PD81): ships useful Slack tools while flagging two verified engine/
+# loader limitations in the definitions below — no runtime code changes.
+# Pure declarative YAML — no provider-specific Go code was added to ship it.
+formatVersion: 1
+slug: slack
+name: Slack
+logo: https://static.beecon.dev/providers/slack.png
+authScheme: oauth2
+oauth:
+  authorizeUrl: https://slack.com/oauth/v2/authorize
+  # Slack's OAuth v2 token exchange takes client_id/client_secret/code in the
+  # form body, matching the format's default (PD16) — credentialStyle is
+  # omitted deliberately, same as Gmail/Hubspot/Outlook.
+  tokenUrl: https://slack.com/api/oauth.v2.access
+  scopes:
+    - chat:write
+    - channels:read
+  # userInfoUrl (and the userInfo block below it) is deliberately OMITTED.
+  #
+  # DEVIATION (flagged, not built here — see spec's Provider deviations):
+  # oauth.v2.access's response carries no email at all — Slack's account
+  # email/name live under a separate users.identity call (authed_user /
+  # users.identity, nested under identity scopes: openid/profile/email or the
+  # older "identity.basic"/"identity.email"), not as top-level fields of the
+  # token response. connections/driven/oauthhttp's FetchAccount/stringField
+  # reads only a flat top-level field of whatever userInfoUrl returns — it has
+  # no way to read a nested users.identity shape or make the extra
+  # identity-scoped call. The finalized format's userInfo block (email/
+  # displayName) is a flat field-name mapping and cannot express this either.
+  # Consequence: a Slack connection activates with no captured email/
+  # displayName. Recommended follow-up: either extend the account-fetch
+  # mechanism to read nested paths, or add a dedicated Slack identity step —
+  # out of scope for this definitions-only strand. The format allows omitting
+  # userInfoUrl/userInfo entirely (validateDefinitionFileV1 only requires
+  # oauth.authorizeUrl/tokenUrl, not userInfoUrl), so this still loads.
+  #
+  # DEVIATION (flagged, not built here — see spec's Provider deviations):
+  # Slack bot tokens do not expire unless token rotation is explicitly
+  # enabled on the app, so oauth.v2.access returns no refresh_token in the
+  # common case; Beecon stores an empty refresh token and PD18's refresh-on-
+  # 401 path is simply never exercised for Slack. No action needed.
+mapping:
+  baseUrl: https://slack.com/api
+tools:
+  - slug: slack-post-message
+    name: Post message
+    description: Post a message to a Slack channel.
+    inputSchema:
+      type: object
+      properties:
+        channel:
+          title: Channel
+          description: The Slack channel id (or name) to post the message to.
+          type: string
+        text:
+          title: Text
+          description: The message text to post.
+          type: string
+      required:
+        - channel
+        - text
+    outputSchema:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        channel:
+          type: string
+        ts:
+          type: string
+        error:
+          type: string
+    mapping:
+      method: POST
+      path: /chat.postMessage
+      # Slack's chat.postMessage takes channel/text as a bearer-authenticated
+      # JSON body (not form-encoded), which providerhttp already sends by
+      # default for a tool mapping's body.
+      body:
+        channel: "{input.channel}"
+        text: "{input.text}"
+      #
+      # DEVIATION (flagged, not built here — see spec's Provider deviations):
+      # every Slack Web API method — including this one — returns HTTP 200
+      # even when the call fails, with {ok:false,error:"..."} in the JSON
+      # body. execution/driven/providerhttp treats any 2xx status as a
+      # successful tool call, so a Slack failure surfaces as a *successful*
+      # tool result whose Data carries ok:false and the error string, rather
+      # than a tool-level failure. Converting an ok:false body into a
+      # tool-level failure needs a conditional the token grammar does not
+      # have (ADR-0012 defers conditionals to CEL). Callers must inspect the
+      # ok field of the returned Data themselves until that lands.
+
+  - slug: slack-list-channels
+    name: List channels
+    description: List conversations (channels) visible to the bot, cursor-paginated.
+    inputSchema:
+      type: object
+      properties:
+        types:
+          title: Types
+          description: >-
+            Comma-separated list of conversation types to include (e.g.
+            'public_channel,private_channel'). Defaults to Slack's own
+            default (public_channel) when omitted.
+          type: string
+        pageSize:
+          type: integer
+          description: Maximum number of channels to return in this page.
+        cursor:
+          type: string
+          description: Opaque pagination cursor from a previous page's nextCursor.
+    outputSchema:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        channels:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              is_channel:
+                type: boolean
+              is_private:
+                type: boolean
+        response_metadata:
+          type: object
+          properties:
+            next_cursor:
+              type: string
+    mapping:
+      method: GET
+      path: /conversations.list
+      query:
+        types: "{input.types}"
+      # Canonical pageSize/cursor call arguments (PD15b) map onto Slack's own
+      # limit/cursor query parameters; the following page's cursor is read
+      # back out of the response at response_metadata.next_cursor.
+      pagination:
+        pageSizeParam: limit
+        cursorParam: cursor
+        nextCursorPath: response_metadata.next_cursor
+
+# Slack declares no trigger (deferred, PD81/spec Provider deviations): the
+# Web API has no timestamp-watermark-friendly polling surface for the tools
+# shipped here, and Slack's real-time delivery model is the Events API
+# (push, a webhook subscription Slack calls), not a poll — first-class push
+# ingestion is out of scope for this definitions-only strand. This
+# definition still parses and loads with an empty triggers list — the field
+# is simply omitted.

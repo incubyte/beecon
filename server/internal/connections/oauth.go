@@ -333,11 +333,17 @@ func (f *Facade) exchangeAndActivate(ctx context.Context, connection Connection,
 // account-profile fetch using the token it returned, read via the
 // definition's own declared userInfo field mapping (PD13) — generic across
 // providers, so Hubspot's differently-shaped token-metadata response needs no
-// provider-specific Go code here (AC1).
+// provider-specific Go code here (AC1). A definition with no userInfo block
+// (empty UserInfoURL) skips the account-profile fetch entirely and activates
+// with no captured identity, mirroring reconcileOne's guard (reconcile.go) —
+// otherwise FetchAccount would be called against an empty URL.
 func (f *Facade) exchangeTokensAndFetchAccount(ctx context.Context, request TokenExchangeRequest, definition catalog.ProviderDefinition) (TokenExchangeResult, AccountInfo, error) {
 	tokens, err := f.oauthClient.ExchangeCode(ctx, request)
 	if err != nil {
 		return TokenExchangeResult{}, AccountInfo{}, err
+	}
+	if definition.UserInfoURL == "" {
+		return tokens, AccountInfo{}, nil
 	}
 	account, err := f.oauthClient.FetchAccount(ctx, AccountFetchRequest{
 		UserInfoURL:      definition.UserInfoURL,
