@@ -224,7 +224,23 @@ func (f *Facade) Execute(
 		return FailureResult(CodeInvalidArguments, violation.Error()), nil
 	}
 
-	return f.callProvider(ctx, org, userID, connectionID, toolSlug, definition, tool, access.AccessToken, arguments, toAnyMap(access.Params))
+	return f.callProvider(ctx, org, userID, connectionID, definition, tool, access.AccessToken, arguments, toAnyMap(access.Params))
+}
+
+// toolAttribution carries a tool's resolved identity for logging attribution
+// (Phase 5 registry sub-phase, Slice 5, PD61): always the tool's own
+// resolved ID and Slug, regardless of which identifier the caller addressed
+// it by (a tool_ id or a slug — FindToolBySlug resolves either, ADR-0006),
+// so a log entry names the executed tool the same way either way. ID is
+// empty for a tool never assigned one (Slice 1: an embedded-seed tool not
+// yet through the registry; Slice 6 backfills it).
+type toolAttribution struct {
+	ID   string
+	Slug string
+}
+
+func attributionFor(tool catalog.ProviderTool) toolAttribution {
+	return toolAttribution{ID: tool.ID, Slug: tool.Slug}
 }
 
 // mergeWithSchemaDefaults fills in every top-level property in schema that
@@ -293,7 +309,6 @@ func (f *Facade) callProvider(
 	org organizations.OrgID,
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
-	toolSlug string,
 	definition catalog.ProviderDefinition,
 	tool catalog.ProviderTool,
 	accessToken string,
@@ -334,12 +349,13 @@ func (f *Facade) callProvider(
 		Files:       files,
 	}
 
-	outcome := f.callWithRetry(ctx, org, userID, connectionID, toolSlug, definition.Slug, request)
+	attribution := attributionFor(tool)
+	outcome := f.callWithRetry(ctx, org, userID, connectionID, attribution, definition.Slug, request)
 	if outcome.exhausted {
 		return Result{}, ErrRateLimited(outcome.retryAfter)
 	}
 	if outcome.callErr == nil && outcome.response.StatusCode == http.StatusUnauthorized {
-		return f.retryAfterRefresh(ctx, org, userID, connectionID, toolSlug, definition.Slug, request, tool.Mapping.Pagination)
+		return f.retryAfterRefresh(ctx, org, userID, connectionID, attribution, definition.Slug, request, tool.Mapping.Pagination)
 	}
 	return toolCallResult(outcome.response, outcome.callErr, tool.Mapping.Pagination), nil
 }
@@ -353,7 +369,7 @@ func (f *Facade) attemptCall(
 	org organizations.OrgID,
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
-	toolSlug string,
+	attribution toolAttribution,
 	providerSlug string,
 	request ToolCallRequest,
 ) (ToolCallResponse, error) {
@@ -363,7 +379,7 @@ func (f *Facade) attemptCall(
 
 	status, responseBody := providerOutcome(response, callErr)
 	rateLimited := callErr == nil && IsRateLimited(response)
-	f.recordAttempt(ctx, org, userID, connectionID, toolSlug, request, status, duration, responseBody, rateLimited)
+	f.recordAttempt(ctx, org, userID, connectionID, attribution, request, status, duration, responseBody, rateLimited)
 	f.recordExecutionMetric(providerSlug, status, duration)
 	return response, callErr
 }
@@ -388,7 +404,7 @@ func (f *Facade) retryAfterRefresh(
 	org organizations.OrgID,
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
-	toolSlug string,
+	attribution toolAttribution,
 	providerSlug string,
 	request ToolCallRequest,
 	pagination *catalog.Pagination,
@@ -401,7 +417,7 @@ func (f *Facade) retryAfterRefresh(
 		return FailureResult(CodeConnectionNotActive, connectionNotActiveMessage(access.Status)), nil
 	}
 	request.AccessToken = access.AccessToken
-	outcome := f.callWithRetry(ctx, org, userID, connectionID, toolSlug, providerSlug, request)
+	outcome := f.callWithRetry(ctx, org, userID, connectionID, attribution, providerSlug, request)
 	if outcome.exhausted {
 		return Result{}, ErrRateLimited(outcome.retryAfter)
 	}
@@ -439,7 +455,7 @@ func (f *Facade) recordAttempt(
 	org organizations.OrgID,
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
-	toolSlug string,
+	attribution toolAttribution,
 	request ToolCallRequest,
 	status int,
 	duration time.Duration,
@@ -453,7 +469,8 @@ func (f *Facade) recordAttempt(
 		OrgID:        org,
 		UserID:       userID,
 		ConnectionID: connectionID,
-		ToolSlug:     toolSlug,
+		ToolID:       attribution.ID,
+		ToolSlug:     attribution.Slug,
 		Status:       status,
 		DurationMs:   duration.Milliseconds(),
 		RequestBody:  toolCallRequestLogBody(request),

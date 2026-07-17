@@ -45,6 +45,7 @@ func newRetentionRouteRouter(t *testing.T) http.Handler {
 		organizationsHandler,
 		nil,            // accessHandler
 		nil,            // catalogHandler
+		nil,            // registryHandler
 		nil,            // connectionsHandler
 		nil,            // connectWebHandler
 		nil,            // adminUIHandler

@@ -31,6 +31,22 @@ type Overrides struct {
 	Now         func() time.Time
 	Vault       *vault.Vault
 	Governance  organizations.GovernanceReader
+
+	// RegistryClient and ActivatedDefinitions wire the facade's Slice 1
+	// registry-sync add-on (WithRegistrySync) — nil by default, exactly
+	// like production's optional BEECON_REGISTRY_URL: a test that doesn't
+	// care about registry pull/activate never needs to set these. When
+	// ActivatedDefinitions is supplied, NewFacadeWithOverrides also runs
+	// LoadActivatedDefinitions against it, mirroring the boot-time call
+	// app/wiring.go makes.
+	RegistryClient       catalog.RegistryClient
+	ActivatedDefinitions catalog.ActivatedDefinitions
+
+	// TriggerInstancePauser wires the facade's Slice 4 dependent-safety
+	// add-on (WithTriggerInstancePauser, PD66) — nil by default, exactly
+	// like RegistryClient/ActivatedDefinitions above: a test that doesn't
+	// exercise a removed trigger never needs to set this.
+	TriggerInstancePauser catalog.TriggerInstancePauser
 }
 
 // unrestrictedGovernanceReader is the default Overrides.Governance: every
@@ -77,7 +93,19 @@ func NewFacadeWithOverrides(o Overrides) (*catalog.Facade, error) {
 	if governance == nil {
 		governance = unrestrictedGovernanceReader{}
 	}
-	return catalog.NewFacade(repository, definitions, newID, now, tokenVault, governance), nil
+	facade := catalog.NewFacade(repository, definitions, newID, now, tokenVault, governance)
+	if o.RegistryClient != nil || o.ActivatedDefinitions != nil {
+		facade = facade.WithRegistrySync(o.RegistryClient, o.ActivatedDefinitions)
+	}
+	if o.TriggerInstancePauser != nil {
+		facade = facade.WithTriggerInstancePauser(o.TriggerInstancePauser)
+	}
+	if o.ActivatedDefinitions != nil {
+		if err := facade.LoadActivatedDefinitions(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	return facade, nil
 }
 
 func sequentialIDs(prefix string) func() string {

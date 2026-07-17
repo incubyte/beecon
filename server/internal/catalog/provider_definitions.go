@@ -19,8 +19,9 @@ func (f *Facade) ListProviderDefinitions(_ context.Context, cursor string, limit
 		return ProviderDefinitionPage{}, err
 	}
 
-	summaries := make([]ProviderDefinitionSummary, 0, len(f.definitions))
-	for _, definition := range f.definitions {
+	definitions := f.definitionsSnapshot()
+	summaries := make([]ProviderDefinitionSummary, 0, len(definitions))
+	for _, definition := range definitions {
 		summaries = append(summaries, providerDefinitionSummaryFrom(definition))
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Slug < summaries[j].Slug })
@@ -34,7 +35,7 @@ func (f *Facade) ListProviderDefinitions(_ context.Context, cursor string, limit
 // not-found ListTools/ListTriggerDefinitions already use for an unknown
 // provider filter.
 func (f *Facade) ProviderDefinitionDetail(_ context.Context, providerSlug string) (ProviderDefinitionBundleDetail, error) {
-	definition, ok := f.definitions[providerSlug]
+	definition, ok := f.definitionByProviderSlug(providerSlug)
 	if !ok {
 		return ProviderDefinitionBundleDetail{}, ErrProviderNotFound()
 	}
@@ -54,7 +55,7 @@ func (f *Facade) ProviderDefinitionDetail(_ context.Context, providerSlug string
 // is never governance-filtered, since this is the operator's real installed
 // estate for one provider, not the org-facing catalog.
 func (f *Facade) ListIntegrationsForProvider(ctx context.Context, providerSlug string) ([]IntegrationSummary, error) {
-	if _, ok := f.definitions[providerSlug]; !ok {
+	if _, ok := f.definitionByProviderSlug(providerSlug); !ok {
 		return nil, ErrProviderNotFound()
 	}
 	integrations, err := f.repo.ListAll(ctx)

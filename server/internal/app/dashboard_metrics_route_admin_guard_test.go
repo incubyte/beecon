@@ -44,7 +44,7 @@ func newDashboardMetricsRouter(t *testing.T) http.Handler {
 	noOperatorsYet := func(context.Context) (bool, error) { return false, nil }
 	return buildRouter(
 		cfg, database,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, // organizationsHandler..deliveryHandler
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, // organizationsHandler..deliveryHandler
 		nil,                       // operatorHandler
 		nil,                       // metricsHandler
 		registry.SummaryHandler(), // dashboardMetricsHandler

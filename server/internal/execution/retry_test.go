@@ -26,6 +26,8 @@ const (
 	retryTestProvider = "retry-test-provider"
 )
 
+var retryTestAttribution = toolAttribution{Slug: retryTestToolSlug}
+
 // recordingSleep is a sleepFunc test double: it never actually waits, but
 // records every duration it was asked to sleep for.
 type recordingSleep struct {
@@ -71,7 +73,7 @@ func TestCallWithRetry_HonorsTheProvidersRetryAfterSecondsValue(t *testing.T) {
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if outcome.exhausted {
 		t.Fatal("exhausted = true, want false — the retried call succeeded")
@@ -89,7 +91,7 @@ func TestCallWithRetry_FallsBackToAJitteredBackoffWhenRetryAfterIsAbsent(t *test
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if len(sleep.durations) != 1 {
 		t.Fatalf("sleep durations = %v, want exactly one jittered backoff", sleep.durations)
@@ -113,7 +115,7 @@ func TestCallWithRetry_StopsAtMaxAttemptsAndReportsExhausted(t *testing.T) {
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if !outcome.exhausted {
 		t.Fatal("exhausted = false, want true after maxAttempts rate-limited attempts")
@@ -138,7 +140,7 @@ func TestCallWithRetry_StopsWhenTheTotalWaitWouldExceedTheRetryBudget(t *testing
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if !outcome.exhausted {
 		t.Fatal("exhausted = false, want true — the second attempt's delay would exceed the 30s total budget")
@@ -156,7 +158,7 @@ func TestCallWithRetry_ANonRateLimitedResponseReturnsAfterExactlyOneAttempt(t *t
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if outcome.exhausted {
 		t.Fatal("exhausted = true, want false — a non-rate-limited status must not be treated as exhaustion")
@@ -174,7 +176,7 @@ func TestCallWithRetry_ANetworkFailureReturnsAfterExactlyOneAttemptWithoutSleepi
 	sleep := &recordingSleep{}
 	f := retryTestFacade(provider, sleep.sleep)
 
-	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestToolSlug, retryTestProvider, ToolCallRequest{})
+	outcome := f.callWithRetry(context.Background(), retryTestOrg, retryTestUser, retryTestConnID, retryTestAttribution, retryTestProvider, ToolCallRequest{})
 
 	if outcome.callErr == nil {
 		t.Fatal("callErr = nil, want the provider's network error surfaced")

@@ -20,6 +20,7 @@ import (
 	"beecon/internal/adminui"
 	"beecon/internal/catalog"
 	catalogbun "beecon/internal/catalog/driven/bun"
+	"beecon/internal/catalog/driven/registryhttp"
 	cataloghttp "beecon/internal/catalog/driving/httpapi"
 	"beecon/internal/config"
 	"beecon/internal/connections"
@@ -139,12 +140,18 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		WithLoginThrottle(loginMaxAttemptsOrDefault(deps.Config.LoginMaxAttempts), loginLockoutOrDefault(deps.Config.LoginLockout))
 	secureCookies := config.SecureCookies(deps.Config.BaseURL)
 	operatorHandler := accesshttp.NewOperatorHandler(operatorFacade, errorRenderer, secureCookies)
-	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now, organizationsFacade)
+	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now, organizationsFacade).
+		WithRegistrySync(buildRegistryClient(deps.Config.RegistryURL, deps.Config.RegistryAPIKey), catalogbun.NewActivatedDefinitionRepository(database))
+	if err := catalogFacade.LoadActivatedDefinitions(ctx); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("load activated registry definitions: %w", err)
+	}
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("encrypt plaintext client secrets: %w", err)
 	}
 	catalogHandler := cataloghttp.NewHandler(catalogFacade, errorRenderer)
+	registryHandler := cataloghttp.NewRegistryHandler(catalogFacade, errorRenderer)
 
 	// retention is the Slice 7/PD44 adapter both loggingFacade and
 	// deliveryFacade's own purge workers read their per-org effective window
@@ -234,6 +241,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		now,
 	).WithMetrics(metricsRegistry)
 	connectionsFacade.WithDependents(triggersDependents{triggers: triggersFacade})
+	catalogFacade.WithTriggerInstancePauser(catalogTriggerInstancePauser{triggers: triggersFacade})
 	triggersHandler := triggershttp.NewHandler(triggersFacade, errorRenderer)
 
 	// PD38d's connections-by-status and outbox metrics gauges are registered
@@ -262,6 +270,7 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 		organizationsHandler,
 		accessHandler,
 		catalogHandler,
+		registryHandler,
 		connectionsHandler,
 		connectWebHandler,
 		adminUIHandler,
@@ -368,6 +377,18 @@ func loginLockoutOrDefault(configured time.Duration) time.Duration {
 func buildCatalogFacade(database *upstreambun.DB, definitions []catalog.ProviderDefinition, tokenVault *vault.Vault, now func() time.Time, organizationsFacade *organizations.Facade) *catalog.Facade {
 	repo := catalogbun.NewRepository(database)
 	return catalog.NewFacade(repo, definitions, idgen.Prefixed("intg_"), now, tokenVault, organizationsFacade)
+}
+
+// buildRegistryClient wires catalog's RegistryClient HTTP adapter (PD64)
+// when BEECON_REGISTRY_URL is configured; nil otherwise (PD59: unset means
+// no registry — Facade.Activate then fails clearly with
+// ErrRegistryNotConfigured rather than this installation ever depending on
+// the registry to boot or run).
+func buildRegistryClient(registryURL, registryAPIKey string) catalog.RegistryClient {
+	if registryURL == "" {
+		return nil
+	}
+	return registryhttp.NewClient(registryURL, registryAPIKey, nil)
 }
 
 // buildConnectionsFacade wires the connections facade with its bun
@@ -482,13 +503,14 @@ func buildTriggersFacade(
 ) *triggers.Facade {
 	repo := triggersbun.NewRepository(database)
 	facade := triggers.NewFacade(repo, catalogFacade, connectionsFacade, idgen.Prefixed("trg_"), now)
-	return facade.WithPolling(
+	facade = facade.WithPolling(
 		repo,
 		executionRecordSource{execution: executionFacade},
 		triggersEventSink{delivery: deliveryFacade},
 		recorder,
 		pollMinInterval,
 	)
+	return facade.WithTriggerSlugIndex(repo)
 }
 
 // pollMinIntervalOrDefault falls back to config.DefaultPollMinIntervalSeconds

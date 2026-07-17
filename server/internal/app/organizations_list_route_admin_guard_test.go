@@ -46,6 +46,7 @@ func newOrganizationsListRouter(t *testing.T) (http.Handler, *organizations.Faca
 		organizationsHandler,
 		nil,            // accessHandler
 		nil,            // catalogHandler
+		nil,            // registryHandler
 		nil,            // connectionsHandler
 		nil,            // connectWebHandler
 		nil,            // adminUIHandler

@@ -41,6 +41,12 @@ type Facade struct {
 	recorder        Recorder
 	pollMinInterval time.Duration
 	metrics         *metrics.Registry
+
+	// triggerSlugIndex wires PauseInstancesForRemovedTrigger (Phase 5
+	// registry sub-phase, Slice 4, PD66) — nil until WithTriggerSlugIndex is
+	// called, in which case it is a no-op, mirroring every other optional
+	// add-on this facade already has.
+	triggerSlugIndex TriggerSlugIndex
 }
 
 // NewFacade wires the facade with its driven Repository, the narrow
@@ -85,6 +91,17 @@ func (f *Facade) WithPolling(pollQueue PollQueue, recordSource RecordSource, eve
 // silent no-op, exactly like a nil Recorder already does for logging.
 func (f *Facade) WithMetrics(registry *metrics.Registry) *Facade {
 	f.metrics = registry
+	return f
+}
+
+// WithTriggerSlugIndex wires this facade's PauseInstancesForRemovedTrigger
+// support (Phase 5 registry sub-phase, Slice 4, PD66): the
+// installation-level, cross-org TriggerSlugIndex lookup (mirrors
+// WithPolling's own PollQueue wiring — in production the same bun
+// Repository satisfies both). Nil until wired, in which case
+// PauseInstancesForRemovedTrigger is a no-op.
+func (f *Facade) WithTriggerSlugIndex(index TriggerSlugIndex) *Facade {
+	f.triggerSlugIndex = index
 	return f
 }
 

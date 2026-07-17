@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"beecon/internal/catalog"
 	"beecon/internal/connections"
 	"beecon/internal/delivery"
 	"beecon/internal/execution"
@@ -56,6 +57,7 @@ func executionLogRecorder(logs *logging.Facade) execution.Recorder {
 			OrgID:        entry.OrgID,
 			UserID:       string(entry.UserID),
 			ConnectionID: string(entry.ConnectionID),
+			ToolID:       entry.ToolID,
 			ToolSlug:     entry.ToolSlug,
 			Kind:         logging.KindToolExecution,
 			Status:       entry.Status,
@@ -179,4 +181,24 @@ var _ connections.Dependents = triggersDependents{}
 
 func (a triggersDependents) OnConnectionDeleted(ctx context.Context, org organizations.OrgID, connID connections.ConnectionID) error {
 	return a.triggers.DeleteByConnection(ctx, org, connID)
+}
+
+// catalogTriggerInstancePauser adapts *triggers.Facade to
+// catalog.TriggerInstancePauser (Phase 5 registry sub-phase, Slice 4,
+// PD66): catalog does not depend on triggers (BOUNDARIES — the dependency
+// points the other way, triggers depends on catalog) — only the
+// composition root, which already depends on every module, may cross that
+// boundary. Wired via catalog.Facade's WithTriggerInstancePauser so
+// Activate's removed-trigger safety net reaches
+// triggers.Facade.PauseInstancesForRemovedTrigger without catalog ever
+// importing triggers — mirrors triggersDependents' own adapter shape for
+// the opposite module pairing.
+type catalogTriggerInstancePauser struct {
+	triggers *triggers.Facade
+}
+
+var _ catalog.TriggerInstancePauser = catalogTriggerInstancePauser{}
+
+func (a catalogTriggerInstancePauser) PauseInstancesForRemovedTrigger(ctx context.Context, triggerSlug string) error {
+	return a.triggers.PauseInstancesForRemovedTrigger(ctx, triggerSlug)
 }

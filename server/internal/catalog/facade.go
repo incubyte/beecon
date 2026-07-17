@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"beecon/internal/httpx"
 	"beecon/internal/organizations"
 	"beecon/internal/vault"
 )
+
+// toolIDPrefix is the reserved tool_ id prefix (ADR-0003, PD61): a tool
+// identifier carrying it is resolved by ProviderTool.ID rather than by
+// slug — see FindToolBySlug.
+const toolIDPrefix = "tool_"
 
 // defaultPageLimit and maxPageLimit bound every in-memory list operation's
 // page size (PD15) — tools and, since Slice 1, trigger definitions — when a
@@ -22,12 +29,36 @@ const (
 
 // Facade is the catalog module's only public surface.
 type Facade struct {
-	repo        Repository
-	definitions map[string]ProviderDefinition
-	newID       func() string
-	now         func() time.Time
-	vault       *vault.Vault
-	governance  organizations.GovernanceReader
+	repo Repository
+
+	// definitionsMu guards definitions: Activate (Phase 5 registry
+	// sub-phase, PD65) swaps a provider's served ProviderDefinition at
+	// runtime, concurrently with every read below (ListTools,
+	// FindToolBySlug, ...) — a plain map would race.
+	definitionsMu sync.RWMutex
+	definitions   map[string]ProviderDefinition
+
+	newID      func() string
+	now        func() time.Time
+	vault      *vault.Vault
+	governance organizations.GovernanceReader
+
+	// registryClient and activatedDefinitions are Slice 1's optional
+	// registry-sync add-on (PD64/PD65), wired via WithRegistrySync — nil
+	// until then, exactly like execution.Facade's own WithFiles/
+	// WithTriggerDefinitions convention. A facade with registryClient nil
+	// (BEECON_REGISTRY_URL unset, PD59) can serve everything except
+	// Activate, which fails clearly (ErrRegistryNotConfigured) rather than
+	// panicking.
+	registryClient       RegistryClient
+	activatedDefinitions ActivatedDefinitions
+
+	// triggerInstancePauser is Slice 4's optional dependent-safety add-on
+	// (PD66), wired via WithTriggerInstancePauser — nil until then, in which
+	// case Activate simply never pauses any trigger-instance (the same
+	// "optional add-on, no-op without it" convention every other With*
+	// method on this facade already follows).
+	triggerInstancePauser TriggerInstancePauser
 }
 
 // NewFacade wires the facade with the installation's loaded provider
@@ -45,6 +76,76 @@ func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() s
 	return &Facade{repo: repo, definitions: byslug, newID: newID, now: now, vault: tokenVault, governance: governance}
 }
 
+// WithRegistrySync wires this facade's registry pull/activate support
+// (PD64/PD65, Phase 5 registry sub-phase Slice 1): the driven RegistryClient
+// port (an HTTP adapter in production, an in-memory fake in tests) and the
+// DB-backed ActivatedDefinitions store. A facade built without this can
+// still serve every embedded-seed operation unchanged; only Activate needs
+// registryClient, and only LoadActivatedDefinitions needs
+// activatedDefinitions — the same optional "With*" convention
+// execution.Facade already uses for its own add-ons (WithFiles,
+// WithTriggerDefinitions).
+func (f *Facade) WithRegistrySync(client RegistryClient, activated ActivatedDefinitions) *Facade {
+	f.registryClient = client
+	f.activatedDefinitions = activated
+	return f
+}
+
+// WithTriggerInstancePauser wires this facade's dependent-trigger-instance
+// safety net (PD66, Phase 5 registry sub-phase Slice 4): Activate calls it
+// once per trigger slug a newly-activated version removes, so live
+// trigger-instances bound to a disappearing trigger are paused rather than
+// left polling a trigger definition that no longer exists. Optional — a
+// facade built without one (WithRegistrySync's own tests, or any test that
+// never exercises a removed trigger) simply never pauses anything.
+func (f *Facade) WithTriggerInstancePauser(pauser TriggerInstancePauser) *Facade {
+	f.triggerInstancePauser = pauser
+	return f
+}
+
+// definitionsSnapshot returns a point-in-time copy of every loaded
+// definition, safe to range over without holding definitionsMu — Activate
+// replaces a definition wholesale (never mutates one in place), so a reader
+// holding a snapshot always sees a fully-formed ProviderDefinition, old or
+// new, never a half-updated one.
+func (f *Facade) definitionsSnapshot() map[string]ProviderDefinition {
+	f.definitionsMu.RLock()
+	defer f.definitionsMu.RUnlock()
+	snapshot := make(map[string]ProviderDefinition, len(f.definitions))
+	for slug, definition := range f.definitions {
+		snapshot[slug] = definition
+	}
+	return snapshot
+}
+
+// definitionByProviderSlug looks up one definition by its provider slug.
+func (f *Facade) definitionByProviderSlug(slug string) (ProviderDefinition, bool) {
+	f.definitionsMu.RLock()
+	defer f.definitionsMu.RUnlock()
+	definition, ok := f.definitions[slug]
+	return definition, ok
+}
+
+// setDefinition installs definition as its provider slug's served
+// definition — used by Activate (a runtime swap, Slice 1) and
+// LoadActivatedDefinitions (the boot-time rebuild, PD65).
+func (f *Facade) setDefinition(definition ProviderDefinition) {
+	f.definitionsMu.Lock()
+	defer f.definitionsMu.Unlock()
+	f.definitions[definition.Slug] = definition
+}
+
+// deleteDefinition removes providerSlug's served definition entirely —
+// Activate's rollback path (Slice 4, PD66) uses this only when the
+// provider being activated had never been served at all before this call
+// (hadPreviousDefinition false), so "roll back to the prior state" means
+// "there was nothing being served," not "restore an earlier definition."
+func (f *Facade) deleteDefinition(providerSlug string) {
+	f.definitionsMu.Lock()
+	defer f.definitionsMu.Unlock()
+	delete(f.definitions, providerSlug)
+}
+
 // CreateIntegration validates providerSlug against a loaded
 // ProviderDefinition and persists a new Integration carrying the
 // installation's OAuth client credentials, encrypted under the vault before
@@ -52,7 +153,7 @@ func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() s
 // The returned summary never carries clientSecret (AC4: it appears in no API
 // response after creation).
 func (f *Facade) CreateIntegration(ctx context.Context, providerSlug, clientID, clientSecret string) (IntegrationSummary, error) {
-	if _, ok := f.definitions[providerSlug]; !ok {
+	if _, ok := f.definitionByProviderSlug(providerSlug); !ok {
 		return IntegrationSummary{}, ErrUnknownProvider(providerSlug)
 	}
 	encryptedSecret, err := f.vault.Encrypt(clientSecret)
@@ -169,7 +270,7 @@ func (f *Facade) GetExpectedParams(ctx context.Context, id IntegrationID) (Expec
 	if integration == nil {
 		return ExpectedParamsView{}, ErrIntegrationNotFound()
 	}
-	definition, ok := f.definitions[integration.ProviderSlug]
+	definition, ok := f.definitionByProviderSlug(integration.ProviderSlug)
 	if !ok {
 		return ExpectedParamsView{}, ErrUnknownProvider(integration.ProviderSlug)
 	}
@@ -293,7 +394,7 @@ func orderByFeaturedList(visible []IntegrationSummary, featured []string) []Inte
 // redirect and complete the token exchange. Translates an unknown slug into
 // ErrUnknownProvider.
 func (f *Facade) GetProviderDefinition(_ context.Context, providerSlug string) (ProviderDefinition, error) {
-	definition, ok := f.definitions[providerSlug]
+	definition, ok := f.definitionByProviderSlug(providerSlug)
 	if !ok {
 		return ProviderDefinition{}, ErrUnknownProvider(providerSlug)
 	}
@@ -301,18 +402,33 @@ func (f *Facade) GetProviderDefinition(_ context.Context, providerSlug string) (
 }
 
 // FindToolBySlug returns the ProviderDefinition and ProviderTool for a tool
-// addressed by slug (PD8: tools are addressed by slug in Phase 1, across
-// every loaded provider). Translates an unknown slug into ErrToolNotFound
-// (AC3 of Slice 5).
-func (f *Facade) FindToolBySlug(_ context.Context, slug string) (ProviderDefinition, ProviderTool, error) {
-	for _, definition := range f.definitions {
+// addressed by slug (PD8: tools are addressed by slug, across every loaded
+// provider) or, since the Phase 5 registry sub-phase (PD61), by its
+// immutable tool_ id — an identifier carrying the reserved tool_ prefix
+// resolves against ProviderTool.ID instead, so execution.Facade.Execute
+// (which calls this unchanged, via the ToolReader port) can be handed
+// either a slug or a tool_ id at the same call site (ADR-0006's hand-off:
+// additive, never a replacement — a genuine slug keeps resolving exactly as
+// before). Translates an unknown identifier into ErrToolNotFound (AC3 of
+// Slice 5; also the registry sub-phase's Slice 1 AC that an unknown tool_ id
+// is a not-found, distinct from an execution failure).
+func (f *Facade) FindToolBySlug(_ context.Context, idOrSlug string) (ProviderDefinition, ProviderTool, error) {
+	byID := strings.HasPrefix(idOrSlug, toolIDPrefix)
+	for _, definition := range f.definitionsSnapshot() {
 		for _, tool := range definition.Tools {
-			if tool.Slug == slug {
+			if toolMatchesIdentifier(tool, idOrSlug, byID) {
 				return definition, tool, nil
 			}
 		}
 	}
 	return ProviderDefinition{}, ProviderTool{}, ErrToolNotFound()
+}
+
+func toolMatchesIdentifier(tool ProviderTool, idOrSlug string, byID bool) bool {
+	if byID {
+		return tool.ID == idOrSlug
+	}
+	return tool.Slug == idOrSlug
 }
 
 // ToolFilter narrows ListTools' result set (Slice 1's catalog API): supply
@@ -396,8 +512,9 @@ func (f *Facade) integrationVisibleToOrg(ctx context.Context, org organizations.
 // integrations remains visible to org; a provider whose every integration is
 // hidden/non-allowed is dropped.
 func (f *Facade) visibleProviderSlugs(ctx context.Context, org organizations.OrgID) (map[string]bool, error) {
-	all := make(map[string]bool, len(f.definitions))
-	for slug := range f.definitions {
+	definitions := f.definitionsSnapshot()
+	all := make(map[string]bool, len(definitions))
+	for slug := range definitions {
 		all[slug] = true
 	}
 
@@ -465,7 +582,7 @@ func (f *Facade) resolveProviderSlugFilter(ctx context.Context, integrationID In
 		return integration.ProviderSlug, nil
 	}
 	if providerSlug != "" {
-		if _, ok := f.definitions[providerSlug]; !ok {
+		if _, ok := f.definitionByProviderSlug(providerSlug); !ok {
 			return "", ErrProviderNotFound()
 		}
 		return providerSlug, nil
@@ -475,7 +592,7 @@ func (f *Facade) resolveProviderSlugFilter(ctx context.Context, integrationID In
 
 func (f *Facade) matchingToolSummaries(providerSlugFilter string, includeDeprecated bool, visibleProviders map[string]bool) []ToolSummary {
 	var summaries []ToolSummary
-	for _, definition := range f.definitions {
+	for _, definition := range f.definitionsSnapshot() {
 		if providerSlugFilter != "" && definition.Slug != providerSlugFilter {
 			continue
 		}
@@ -494,6 +611,7 @@ func (f *Facade) matchingToolSummaries(providerSlugFilter string, includeDepreca
 
 func toolSummaryFrom(definition ProviderDefinition, tool ProviderTool) ToolSummary {
 	return ToolSummary{
+		ID:           tool.ID,
 		Slug:         tool.Slug,
 		Name:         tool.Name,
 		Description:  tool.Description,
@@ -606,7 +724,7 @@ func (f *Facade) ListTriggerDefinitions(ctx context.Context, org organizations.O
 // convention, applied to triggers per PD14). An unknown slug is
 // ErrTriggerDefinitionNotFound.
 func (f *Facade) TriggerDefinitionDetail(_ context.Context, slug string) (TriggerDefinitionSummary, error) {
-	for _, definition := range f.definitions {
+	for _, definition := range f.definitionsSnapshot() {
 		for _, trigger := range definition.Triggers {
 			if trigger.Slug == slug {
 				return triggerDefinitionSummaryFrom(definition, trigger), nil
@@ -624,7 +742,7 @@ func (f *Facade) TriggerDefinitionDetail(_ context.Context, slug string) (Trigge
 // summarized shape (TriggerDefinitionDetail/TriggerDefinitionSummary).
 // Translates an unknown slug into ErrTriggerDefinitionNotFound.
 func (f *Facade) FindTriggerBySlug(_ context.Context, slug string) (ProviderDefinition, TriggerDefinition, error) {
-	for _, definition := range f.definitions {
+	for _, definition := range f.definitionsSnapshot() {
 		for _, trigger := range definition.Triggers {
 			if trigger.Slug == slug {
 				return definition, trigger, nil
@@ -636,7 +754,7 @@ func (f *Facade) FindTriggerBySlug(_ context.Context, slug string) (ProviderDefi
 
 func (f *Facade) matchingTriggerDefinitionSummaries(providerSlugFilter string, visibleProviders map[string]bool) []TriggerDefinitionSummary {
 	var summaries []TriggerDefinitionSummary
-	for _, definition := range f.definitions {
+	for _, definition := range f.definitionsSnapshot() {
 		if providerSlugFilter != "" && definition.Slug != providerSlugFilter {
 			continue
 		}
@@ -689,7 +807,7 @@ func paginateTriggerDefinitions(triggers []TriggerDefinitionSummary, limit int) 
 }
 
 func (f *Facade) summarize(integration Integration) IntegrationSummary {
-	definition := f.definitions[integration.ProviderSlug]
+	definition, _ := f.definitionByProviderSlug(integration.ProviderSlug)
 	return IntegrationSummary{
 		ID:           integration.ID,
 		ProviderSlug: integration.ProviderSlug,

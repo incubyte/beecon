@@ -93,8 +93,14 @@ type toolProviderDTO struct {
 }
 
 // toolSummaryDTO is one tool as GET /api/v1/tools and GET
-// /api/v1/tools/{slug} return it.
+// /api/v1/tools/{slug} return it. ID is the tool's immutable tool_ id
+// (Phase 5 registry sub-phase, Slice 5): empty for a tool loaded from the
+// embedded YAML seed that has never been through the registry (Slice 6
+// mints one for every already-embedded tool). Addressing by slug keeps
+// working unchanged (ADR-0006: additive, not a replacement) — id is
+// surfaced alongside slug, not instead of it.
 type toolSummaryDTO struct {
+	ID           string          `json:"id"`
 	Slug         string          `json:"slug"`
 	Name         string          `json:"name"`
 	Description  string          `json:"description"`
@@ -113,6 +119,7 @@ type toolsPageDTO struct {
 
 func toToolSummaryDTO(tool catalog.ToolSummary) toolSummaryDTO {
 	return toolSummaryDTO{
+		ID:           tool.ID,
 		Slug:         tool.Slug,
 		Name:         tool.Name,
 		Description:  tool.Description,
@@ -282,5 +289,79 @@ func toProviderDefinitionDetailDTO(detail catalog.ProviderDefinitionBundleDetail
 		Name:          detail.Name,
 		FormatVersion: detail.FormatVersion,
 		Bundle:        detail.Bundle,
+	}
+}
+
+// activateRequest is the POST /api/v1/registry/providers/{slug}/activate
+// body (Slice 1): the version to pull from the registry and activate.
+type activateRequest struct {
+	Version string `json:"version"`
+}
+
+// activatedVersionDTO is Activate's response shape.
+type activatedVersionDTO struct {
+	ActiveVersion string `json:"activeVersion"`
+}
+
+func toActivatedVersionDTO(activated catalog.ActivatedVersion) activatedVersionDTO {
+	return activatedVersionDTO{ActiveVersion: activated.ActiveVersion}
+}
+
+// registryVersionDTO is one row of GET
+// /api/v1/registry/providers/{slug}/versions (Slice 3): a version the
+// registry offers, marked active when it is the version currently active in
+// this installation.
+type registryVersionDTO struct {
+	Version string `json:"version"`
+	Active  bool   `json:"active"`
+}
+
+// registryVersionsDTO is ListVersions' response shape (Slice 3): every
+// available version, plus the version currently active in this
+// installation (omitted when this provider has never been activated
+// through the registry).
+type registryVersionsDTO struct {
+	Items         []registryVersionDTO `json:"items"`
+	ActiveVersion string               `json:"activeVersion,omitempty"`
+}
+
+func toRegistryVersionsDTO(view catalog.RegistryVersionsView) registryVersionsDTO {
+	items := make([]registryVersionDTO, 0, len(view.Items))
+	for _, item := range view.Items {
+		items = append(items, registryVersionDTO{Version: item.Version, Active: item.Active})
+	}
+	return registryVersionsDTO{Items: items, ActiveVersion: view.ActiveVersion}
+}
+
+// registryDiffItemDTO names the tool and trigger slugs one bucket of a
+// registry diff carries (Slice 3).
+type registryDiffItemDTO struct {
+	Tools    []string `json:"tools"`
+	Triggers []string `json:"triggers"`
+}
+
+// registryDiffDTO is GET /api/v1/registry/providers/{slug}/diff's response
+// shape (Slice 3): what the target version (to) would add, change, or
+// remove relative to the version currently active in this installation
+// (from) — a pure read, since Diff activates nothing.
+type registryDiffDTO struct {
+	From    string              `json:"from"`
+	To      string              `json:"to"`
+	Added   registryDiffItemDTO `json:"added"`
+	Changed registryDiffItemDTO `json:"changed"`
+	Removed registryDiffItemDTO `json:"removed"`
+}
+
+func toRegistryDiffItemDTO(item catalog.RegistryDiffItem) registryDiffItemDTO {
+	return registryDiffItemDTO{Tools: item.Tools, Triggers: item.Triggers}
+}
+
+func toRegistryDiffDTO(diff catalog.RegistryDiff) registryDiffDTO {
+	return registryDiffDTO{
+		From:    diff.From,
+		To:      diff.To,
+		Added:   toRegistryDiffItemDTO(diff.Added),
+		Changed: toRegistryDiffItemDTO(diff.Changed),
+		Removed: toRegistryDiffItemDTO(diff.Removed),
 	}
 }

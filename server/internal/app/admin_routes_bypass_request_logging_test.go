@@ -41,7 +41,7 @@ func TestBuildRouter_AdminRoutesAreNeverPassedThroughRequestLogging(t *testing.T
 	t.Cleanup(func() { middleware.DefaultLogger = originalLogger })
 
 	cfg := &config.Config{AdminAPIKey: "test-admin-key"}
-	router := buildRouter(cfg, database, nil, nil, nil, nil, nil, adminUIHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := buildRouter(cfg, database, nil, nil, nil, nil, nil, nil, adminUIHandler, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	if w := get(router, "/health"); w.Code != http.StatusOK {
 		t.Fatalf("/health status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())

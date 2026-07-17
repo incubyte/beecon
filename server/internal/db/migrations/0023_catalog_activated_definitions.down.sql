@@ -1,0 +1,1 @@
+DROP TABLE catalog_activated_definitions;

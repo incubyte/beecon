@@ -28,6 +28,7 @@ func buildRouter(
 	organizationsHandler *orgshttp.Handler,
 	accessHandler *accesshttp.Handler,
 	catalogHandler *cataloghttp.Handler,
+	registryHandler *cataloghttp.RegistryHandler,
 	connectionsHandler *connectionshttp.Handler,
 	connectWebHandler *connectweb.Handler,
 	adminUIHandler http.Handler,
@@ -347,6 +348,20 @@ func buildRouter(
 				r.Get("/", catalogHandler.ListProviderDefinitions)
 				r.Get("/{slug}", catalogHandler.GetProviderDefinition)
 				r.Get("/{slug}/integrations", catalogHandler.ListIntegrationsForProvider)
+			})
+
+			// /registry is the Phase 5 registry sub-phase's installation-side
+			// registry-sync surface (PD64): activate is a mutating console
+			// operation, so it is ConsoleAuth-guarded (operator session +
+			// CSRF) like every other console write, never the demoted
+			// break-glass admin key alone post-bootstrap. Version-list/diff
+			// (Slice 3) are reads — ConsoleAuth alone, no CSRF (its branch
+			// only applies to mutating methods) and no attributeOperator
+			// (that middleware only attributes mutations, PD56).
+			r.Route("/registry", func(r chi.Router) {
+				r.With(consoleAuth, attributeOperator).Post("/providers/{slug}/activate", registryHandler.Activate)
+				r.With(consoleAuth).Get("/providers/{slug}/versions", registryHandler.ListVersions)
+				r.With(consoleAuth).Get("/providers/{slug}/diff", registryHandler.Diff)
 			})
 
 			// RequireWrite (PD41, Slice 4) rejects a read-only org API key

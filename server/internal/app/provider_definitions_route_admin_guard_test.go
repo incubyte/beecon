@@ -65,6 +65,7 @@ func newProviderDefinitionsRouter(t *testing.T) (http.Handler, *organizations.Fa
 		nil, // organizationsHandler
 		nil, // accessHandler
 		catalogHandler,
+		nil,            // registryHandler
 		nil,            // connectionsHandler
 		nil,            // connectWebHandler
 		nil,            // adminUIHandler

@@ -42,12 +42,19 @@ type Overrides struct {
 func NewFacadeWithOverrides(o Overrides) *triggers.Facade {
 	repository := o.Repository
 	pollQueue := triggers.PollQueue(nil)
+	slugIndex := triggers.TriggerSlugIndex(nil)
 	if repository == nil {
 		shared := NewRepository()
 		repository = shared
 		pollQueue = shared
-	} else if asPollQueue, ok := repository.(triggers.PollQueue); ok {
-		pollQueue = asPollQueue
+		slugIndex = shared
+	} else {
+		if asPollQueue, ok := repository.(triggers.PollQueue); ok {
+			pollQueue = asPollQueue
+		}
+		if asSlugIndex, ok := repository.(triggers.TriggerSlugIndex); ok {
+			slugIndex = asSlugIndex
+		}
 	}
 	newID := o.NewID
 	if newID == nil {
@@ -58,7 +65,8 @@ func NewFacadeWithOverrides(o Overrides) *triggers.Facade {
 		now = func() time.Time { return fixedTestTime }
 	}
 	facade := triggers.NewFacade(repository, o.Definitions, o.Connections, newID, now)
-	return facade.WithPolling(pollQueue, o.RecordSource, o.Events, o.Recorder, o.PollMinInterval)
+	facade = facade.WithPolling(pollQueue, o.RecordSource, o.Events, o.Recorder, o.PollMinInterval)
+	return facade.WithTriggerSlugIndex(slugIndex)
 }
 
 func sequentialIDs(prefix string) func() string {

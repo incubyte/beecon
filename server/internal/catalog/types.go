@@ -19,6 +19,14 @@ import "time"
 // zero value means "no declared mapping", which execution treats as Phase
 // 1's generic argument pass-through.
 type ProviderTool struct {
+	// ID is this tool's immutable tool_<cuid2> id (ADR-0003, PD61), minted
+	// by the separate registry service at publish and carried in every
+	// bundle from then on — empty for a tool loaded from the embedded YAML
+	// seed that has never been through the registry (Slice 1; Slice 6
+	// backfills one for every already-embedded tool). Addressing by slug
+	// keeps working unchanged either way (ADR-0006: additive, not a
+	// replacement) — see Facade.FindToolBySlug.
+	ID           string
 	Slug         string
 	Name         string
 	Description  string
@@ -227,7 +235,13 @@ func NewIntegration(id IntegrationID, providerSlug, clientID, encryptedClientSec
 // catalog API): the tool's own catalog fields plus the identifying details
 // of the ProviderDefinition that owns it, since a consumer addressing tools
 // by slug alone (PD8) still needs to know which provider a tool belongs to.
+// ID is the tool's immutable tool_ id (Phase 5 registry sub-phase, Slice 5,
+// PD61/ADR-0006): surfaced alongside Slug so a consumer can discover and
+// address a tool by its stable id, not just its slug. Empty for a tool
+// loaded from the embedded YAML seed that has never been through the
+// registry (Slice 6 backfills one for every already-embedded tool).
 type ToolSummary struct {
+	ID           string
 	Slug         string
 	Name         string
 	Description  string
@@ -303,4 +317,75 @@ const (
 type IntegrationVisibility struct {
 	Integration IntegrationSummary
 	Visibility  string
+}
+
+// ActivatedDefinition is one provider's currently-activated registry bundle
+// version, DB-backed (PD65, Phase 5 registry sub-phase Slice 1): the source
+// of truth for that provider's served ProviderDefinition once an operator
+// has ever activated it, surviving restart with no redeploy — the embedded
+// YAML seed stays the pre-activation default (PD65/PD68). BundleJSON is the
+// full registrybundle.Bundle exactly as pulled from the registry, encoded,
+// so LoadActivatedDefinitions can rebuild the exact ProviderDefinition this
+// installation activated without re-pulling the registry at boot (PD59: a
+// pinned installation runs fully offline). One row per provider slug — this
+// installation is pinned to exactly one activated version per provider at a
+// time (PD66, Slice 4); rollback is activating a previous version again,
+// which simply overwrites this same row.
+type ActivatedDefinition struct {
+	ProviderSlug string
+	Version      string
+	ContentHash  string
+	BundleJSON   string
+	ActivatedAt  time.Time
+}
+
+// ActivatedVersion is what Facade.Activate returns (Slice 1's activate API,
+// installation side): the provider slug and the version now active for it.
+type ActivatedVersion struct {
+	ProviderSlug  string
+	ActiveVersion string
+}
+
+// RegistryVersionSummary is one version of a provider's bundle the registry
+// offers, as ListRegistryVersions returns it (Slice 3): the version string
+// and whether it is the version currently active in this installation.
+type RegistryVersionSummary struct {
+	Version string
+	Active  bool
+}
+
+// RegistryVersionsView is Facade.ListRegistryVersions' return shape (Slice
+// 3's review-before-adopting flow): every version the registry offers for a
+// provider, each marked active/not, plus the version currently active in
+// this installation (empty when this provider has never been activated
+// through the registry).
+type RegistryVersionsView struct {
+	Items         []RegistryVersionSummary
+	ActiveVersion string
+}
+
+// RegistryDiffItem names the tool and trigger slugs a registry diff places
+// in one bucket — added, changed, or removed (Slice 3). Computed
+// independently of registryservice.BundleDiffItem: catalog and
+// registryservice are separate deployables that share only the
+// registrybundle wire format (BOUNDARIES.md), and this diff additionally
+// distinguishes "changed" from "added"/"removed", which publish-time
+// bump-direction enforcement never needed.
+type RegistryDiffItem struct {
+	Tools    []string
+	Triggers []string
+}
+
+// RegistryDiff is Facade.DiffRegistryVersion's return shape (Slice 3): what
+// the target version (To) would add, change, or remove relative to the
+// version currently active in this installation (From) — pulled from the
+// registry and applied to nothing (AC4). From is empty when this provider
+// has never been activated through the registry, in which case every tool
+// and trigger in To counts as added.
+type RegistryDiff struct {
+	From    string
+	To      string
+	Added   RegistryDiffItem
+	Changed RegistryDiffItem
+	Removed RegistryDiffItem
 }

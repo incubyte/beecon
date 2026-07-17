@@ -21,6 +21,7 @@ type EventLogRow struct {
 	OrgID             string    `bun:"org_id,notnull"`
 	UserID            string    `bun:"user_id,notnull"`
 	ConnectionID      string    `bun:"connection_id,notnull"`
+	ToolID            *string   `bun:"tool_id"`
 	ToolSlug          string    `bun:"tool_slug,notnull"`
 	Kind              string    `bun:"kind,notnull"`
 	Status            int       `bun:"status,notnull"`
@@ -123,6 +124,7 @@ func rowFromEventLog(entry logging.EventLog) EventLogRow {
 		OrgID:             string(entry.OrgID),
 		UserID:            entry.UserID,
 		ConnectionID:      entry.ConnectionID,
+		ToolID:            nullableString(entry.ToolID),
 		ToolSlug:          entry.ToolSlug,
 		Kind:              string(entry.Kind),
 		Status:            entry.Status,
@@ -143,6 +145,7 @@ func eventLogFromRow(row *EventLogRow) logging.EventLog {
 		OrgID:             organizations.OrgID(row.OrgID),
 		UserID:            row.UserID,
 		ConnectionID:      row.ConnectionID,
+		ToolID:            stringFromNullable(row.ToolID),
 		ToolSlug:          row.ToolSlug,
 		Kind:              logging.Kind(row.Kind),
 		Status:            row.Status,

@@ -84,6 +84,17 @@ type PollQueue interface {
 	ClaimDuePolls(ctx context.Context, now time.Time, leaseTTL time.Duration, limit int) ([]TriggerInstance, error)
 }
 
+// TriggerSlugIndex is deliberately installation-level, not org-scoped
+// (mirrors PollQueue's own rationale — see test/arch/orgscope_test.go's
+// whitelist): PauseInstancesForRemovedTrigger (Phase 5 registry sub-phase,
+// Slice 4, PD66) touches every organization's instances bound to one
+// trigger slug when a catalog activation removes that trigger definition —
+// a genuinely cross-org bulk operation a single org's Repository call could
+// not express, the same shape as ClaimDuePolls' own cross-org poller scan.
+type TriggerSlugIndex interface {
+	ListByTriggerSlug(ctx context.Context, triggerSlug string) ([]TriggerInstance, error)
+}
+
 // PollRecord is one provider record RecordSource returns for one poll tick
 // — triggers' own copy of execution.Record's shape (BOUNDARIES: triggers
 // does not depend on execution; RecordSource plus an app/wiring.go adapter

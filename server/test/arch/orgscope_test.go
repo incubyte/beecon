@@ -258,6 +258,16 @@ func TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
 	}
 }
 
+// TestCatalogActivatedDefinitionsRepository_EveryMethodIsOrgScoped would be
+// the natural next test in this file's own progression — except
+// catalog.ActivatedDefinitions is installation-level by the same PD7
+// rationale as catalog.Repository itself (a provider's activated
+// definition applies to every organization in the installation, Phase 5
+// registry sub-phase PD65), so it is whitelisted below instead; see
+// TestCatalogActivatedDefinitionsRepository_WouldFailOrgScopingIfNotWhitelisted
+// (activated_definitions_repository_installation_level_test.go) for the
+// pinning test proving that whitelist entry is deliberate.
+
 // TestInstallationLevelPortsAreExplicitlyWhitelisted documents (and pins,
 // via NumMethod, so a rename/removal is noticed) the ports deliberately
 // exempted from org-scoping: access.PrefixLookup authenticates a secret
@@ -322,7 +332,28 @@ func TestAccessWebhookSecretsRepository_EveryMethodIsOrgScoped(t *testing.T) {
 // TestAccessOperatorsRepository_WouldFailOrgScopingIfNotWhitelisted and
 // TestAccessOperatorSessionsRepository_WouldFailOrgScopingIfNotWhitelisted
 // (operators_repository_installation_level_test.go) for the pinning tests
-// that prove these two whitelist entries are deliberate.
+// that prove these two whitelist entries are deliberate; and
+// catalog.ActivatedDefinitions (Phase 5 registry sub-phase Slice 1, PD65) is
+// the same rationale as catalog.Repository itself, one entity later: a
+// provider's activated registry bundle version is installation-wide (every
+// organization sees the same served definition, PD7), so FindByProviderSlug
+// takes a raw provider slug rather than organizations.OrgID, and Save's
+// ActivatedDefinition argument carries no OrgID field at all — see
+// TestCatalogActivatedDefinitionsRepository_WouldFailOrgScopingIfNotWhitelisted
+// (activated_definition_repository_installation_level_test.go) for the
+// pinning test that proves this whitelist entry is deliberate; and
+// triggers.TriggerSlugIndex (Phase 5 registry sub-phase Slice 4, PD66) is the
+// same cross-org-by-design rationale as triggers.PollQueue/delivery.WorkQueue
+// above, one bulk operation later: PauseInstancesForRemovedTrigger touches
+// every organization's instances bound to one trigger slug in a single call
+// when a catalog activation removes that trigger definition — a genuinely
+// cross-org bulk operation, not a per-org query — but ListByTriggerSlug's own
+// doc comment (port.go) is explicit that every returned TriggerInstance still
+// carries its own OrgID, so no row's organization is ever ambiguous once
+// listed — see
+// TestTriggersTriggerSlugIndex_WouldFailOrgScopingIfNotWhitelisted
+// (trigger_slug_index_installation_level_test.go) for the pinning test that
+// proves this whitelist entry is deliberate.
 func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 	whitelisted := []reflect.Type{
 		reflect.TypeOf((*access.PrefixLookup)(nil)).Elem(),
@@ -331,10 +362,12 @@ func TestInstallationLevelPortsAreExplicitlyWhitelisted(t *testing.T) {
 		reflect.TypeOf((*access.OperatorSessions)(nil)).Elem(),
 		reflect.TypeOf((*organizations.Repository)(nil)).Elem(),
 		reflect.TypeOf((*catalog.Repository)(nil)).Elem(),
+		reflect.TypeOf((*catalog.ActivatedDefinitions)(nil)).Elem(),
 		reflect.TypeOf((*connections.OAuthRepository)(nil)).Elem(),
 		reflect.TypeOf((*execution.FileStore)(nil)).Elem(),
 		reflect.TypeOf((*delivery.WorkQueue)(nil)).Elem(),
 		reflect.TypeOf((*triggers.PollQueue)(nil)).Elem(),
+		reflect.TypeOf((*triggers.TriggerSlugIndex)(nil)).Elem(),
 		reflect.TypeOf((*connections.RefreshQueue)(nil)).Elem(),
 		reflect.TypeOf((*connections.StatusCounter)(nil)).Elem(),
 		reflect.TypeOf((*delivery.OutboxStats)(nil)).Elem(),

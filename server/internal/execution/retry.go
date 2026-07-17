@@ -88,12 +88,12 @@ func (f *Facade) callWithRetry(
 	org organizations.OrgID,
 	userID organizations.UserID,
 	connectionID connections.ConnectionID,
-	toolSlug string,
+	attribution toolAttribution,
 	providerSlug string,
 	request ToolCallRequest,
 ) retryOutcome {
 	return f.retryLoop(ctx, func() (ToolCallResponse, error) {
-		return f.attemptCall(ctx, org, userID, connectionID, toolSlug, providerSlug, request)
+		return f.attemptCall(ctx, org, userID, connectionID, attribution, providerSlug, request)
 	}, func() { f.recordRateLimitRetryMetric(providerSlug) })
 }
 

@@ -53,6 +53,7 @@ type Repository struct {
 
 var _ triggers.Repository = (*Repository)(nil)
 var _ triggers.PollQueue = (*Repository)(nil)
+var _ triggers.TriggerSlugIndex = (*Repository)(nil)
 
 func NewRepository(db *upstreambun.DB) *Repository {
 	return &Repository{db: db}
@@ -93,6 +94,31 @@ func (r *Repository) ClaimDuePolls(ctx context.Context, now time.Time, leaseTTL 
 		return nil, err
 	}
 
+	instances := make([]triggers.TriggerInstance, 0, len(rows))
+	for _, row := range rows {
+		instance, err := instanceFromRow(&row)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, instance)
+	}
+	return instances, nil
+}
+
+// ListByTriggerSlug returns every TriggerInstance bound to triggerSlug,
+// across every organization (Phase 5 registry sub-phase Slice 4, PD66):
+// deliberately installation-level, like ClaimDuePolls — a catalog
+// activation that removes a trigger definition must pause every
+// organization's dependent instances, not just one org's.
+func (r *Repository) ListByTriggerSlug(ctx context.Context, triggerSlug string) ([]triggers.TriggerInstance, error) {
+	var rows []TriggerInstanceRow
+	err := r.db.NewSelect().
+		Model(&rows).
+		Where("trigger_slug = ?", triggerSlug).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
 	instances := make([]triggers.TriggerInstance, 0, len(rows))
 	for _, row := range rows {
 		instance, err := instanceFromRow(&row)

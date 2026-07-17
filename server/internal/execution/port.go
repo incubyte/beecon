@@ -124,11 +124,18 @@ type ProviderClient interface {
 // one tool call (AC8). RateLimited marks an attempt that IsRateLimited
 // normalized as a rate limit (PD21, Slice 6) — every attempt writes its own
 // entry, retried or not, so a rate-limited attempt that later succeeds still
-// has its own marked entry alongside the successful one.
+// has its own marked entry alongside the successful one. ToolID is the
+// executed tool's immutable tool_ id (Phase 5 registry sub-phase, Slice 5,
+// PD61): always the resolved tool's own id and slug, regardless of which
+// identifier the caller addressed it by, so a log entry names the executed
+// tool the same way whether Execute was addressed by tool_ id or slug —
+// empty for a tool never assigned one (Slice 1: an embedded-seed tool not
+// yet through the registry; Slice 6 backfills it).
 type LogEntry struct {
 	OrgID        organizations.OrgID
 	UserID       organizations.UserID
 	ConnectionID connections.ConnectionID
+	ToolID       string
 	ToolSlug     string
 	Status       int
 	DurationMs   int64

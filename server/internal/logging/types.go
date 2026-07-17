@@ -39,20 +39,28 @@ const (
 // (not organizations.UserID / connections.ConnectionID) — logging does not
 // depend on the connections module (BOUNDARIES), and carrying the raw id
 // value is all a log entry ever needs. ToolSlug is empty for an OAuth
-// token-exchange entry ("tool slug (where applicable)", AC8). RateLimited
-// marks a tool-execution attempt IsRateLimited normalized as a rate limit
-// (PD21, Slice 6) — always false for an OAuth token-exchange entry. EventID
-// and Attempt (Phase 3 Slice 3) are set only for a KindWebhookDelivery
-// entry: the outbox event's own evt_ id and this delivery attempt's
-// 1-indexed number. TriggerInstanceID (Phase 3 Slice 4) is set only for a
-// KindTriggerPoll entry — a plain string (not triggers.TriggerInstanceID):
-// logging does not depend on the triggers module (BOUNDARIES), the same
-// reason ConnectionID is a plain string rather than connections.ConnectionID.
+// token-exchange entry ("tool slug (where applicable)", AC8). ToolID is a
+// KindToolExecution entry's executed tool's immutable tool_ id (Phase 5
+// registry sub-phase, Slice 5, PD61) — carried alongside ToolSlug for
+// stable cross-version attribution (a tool_ id never changes even when its
+// definition is later deprecated/removed by a newer activated bundle
+// version); empty for every other Kind, and for a tool execution against a
+// tool never assigned one (Slice 1: an embedded-seed tool not yet through
+// the registry; Slice 6 backfills it). RateLimited marks a tool-execution
+// attempt IsRateLimited normalized as a rate limit (PD21, Slice 6) — always
+// false for an OAuth token-exchange entry. EventID and Attempt (Phase 3
+// Slice 3) are set only for a KindWebhookDelivery entry: the outbox event's
+// own evt_ id and this delivery attempt's 1-indexed number.
+// TriggerInstanceID (Phase 3 Slice 4) is set only for a KindTriggerPoll
+// entry — a plain string (not triggers.TriggerInstanceID): logging does not
+// depend on the triggers module (BOUNDARIES), the same reason ConnectionID
+// is a plain string rather than connections.ConnectionID.
 type EventLog struct {
 	ID                LogID
 	OrgID             organizations.OrgID
 	UserID            string
 	ConnectionID      string
+	ToolID            string
 	ToolSlug          string
 	Kind              Kind
 	Status            int
@@ -76,6 +84,7 @@ type RecordInput struct {
 	OrgID             organizations.OrgID
 	UserID            string
 	ConnectionID      string
+	ToolID            string
 	ToolSlug          string
 	Kind              Kind
 	Status            int
@@ -98,6 +107,7 @@ func newEventLog(id LogID, in RecordInput, now time.Time) EventLog {
 		OrgID:             in.OrgID,
 		UserID:            in.UserID,
 		ConnectionID:      in.ConnectionID,
+		ToolID:            in.ToolID,
 		ToolSlug:          in.ToolSlug,
 		Kind:              in.Kind,
 		Status:            in.Status,

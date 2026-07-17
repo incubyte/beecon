@@ -238,6 +238,32 @@ func BootAppWithDeliveryTimeoutAndClock(t *testing.T, deliveryTimeout time.Durat
 	return wired
 }
 
+// BootAppWithProviderDefinitionsAndRegistry is BootAppWithProviderDefinitions
+// plus a configured BEECON_REGISTRY_URL/BEECON_REGISTRY_API_KEY (Phase 5
+// registry sub-phase, PD59/PD64): the publish->pull->activate->execute
+// walking-skeleton journey points the installation's RegistryClient at a real
+// registry.NewTestRegistryServer instance instead of leaving it unconfigured
+// (offline).
+func BootAppWithProviderDefinitionsAndRegistry(t *testing.T, definitions []catalog.ProviderDefinition, registryURL, registryAPIKey string) *app.Wired {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg := testConfig(t, NewTestDSN(t))
+	cfg.RegistryURL = registryURL
+	cfg.RegistryAPIKey = registryAPIKey
+
+	wired, err := app.Wire(ctx, app.Deps{
+		Config:              cfg,
+		Logger:              testLogger(),
+		ProviderDefinitions: definitions,
+	})
+	if err != nil {
+		t.Fatalf("app.Wire failed: %v", err)
+	}
+	t.Cleanup(func() { _ = wired.Close() })
+	return wired
+}
+
 // testConfig is the PD12 config a test-booted app runs with: SQLite, the
 // shared AdminAPIKey, a placeholder public base URL, and a files directory
 // scoped to the calling test's own t.TempDir() (PD22, Slice 7) — so journeys

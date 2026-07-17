@@ -120,6 +120,8 @@ type Config struct {
 	SessionTTL                  time.Duration
 	LoginMaxAttempts            int
 	LoginLockout                time.Duration
+	RegistryURL                 string
+	RegistryAPIKey              string
 }
 
 // Load reads .env.local (if present) then the process environment, and
@@ -156,6 +158,14 @@ func Load() (*Config, error) {
 	// the same pattern as BEECON_ENCRYPTION_KEY: filestore.NewLocal validates
 	// it at boot (wiring.go), where a missing value names the exact problem.
 	filesDir := strings.TrimSpace(env("BEECON_FILES_DIR"))
+
+	// BEECON_REGISTRY_URL/BEECON_REGISTRY_API_KEY (Phase 5 registry
+	// sub-phase, PD59) are both optional and never fail-fast: unset means no
+	// registry configured, and this installation runs entirely on its
+	// embedded/activated definitions, offline (PD59's own binding decision —
+	// the registry is not a runtime dependency).
+	registryURL := strings.TrimSpace(env("BEECON_REGISTRY_URL"))
+	registryAPIKey := strings.TrimSpace(env("BEECON_REGISTRY_API_KEY"))
 
 	fileMaxBytes, err := parseFileMaxBytes(env("BEECON_FILE_MAX_BYTES"))
 	if err != nil {
@@ -242,6 +252,8 @@ func Load() (*Config, error) {
 		SessionTTL:                  sessionTTL,
 		LoginMaxAttempts:            loginMaxAttempts,
 		LoginLockout:                loginLockout,
+		RegistryURL:                 registryURL,
+		RegistryAPIKey:              registryAPIKey,
 	}, nil
 }
 

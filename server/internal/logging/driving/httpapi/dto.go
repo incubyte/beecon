@@ -6,12 +6,15 @@ const rfc3339Millis = "2006-01-02T15:04:05.000Z07:00"
 
 // logEntryDTO is one entry in GET /api/v1/logs's response (AC10): ids, tool
 // slug, HTTP status, duration, and the already-redacted request/response
-// bodies (AC9).
+// bodies (AC9). ToolID is the executed tool's immutable tool_ id (Phase 5
+// registry sub-phase, Slice 5) — omitted for a Kind other than
+// tool_execution, or a tool never assigned one.
 type logEntryDTO struct {
 	ID           string `json:"id"`
 	OrgID        string `json:"organizationId"`
 	UserID       string `json:"userId,omitempty"`
 	ConnectionID string `json:"connectionId,omitempty"`
+	ToolID       string `json:"toolId,omitempty"`
 	ToolSlug     string `json:"toolSlug,omitempty"`
 	Kind         string `json:"kind"`
 	Status       int    `json:"status"`
@@ -37,6 +40,7 @@ func toLogEntryDTO(entry logging.EventLog) logEntryDTO {
 		OrgID:        string(entry.OrgID),
 		UserID:       entry.UserID,
 		ConnectionID: entry.ConnectionID,
+		ToolID:       entry.ToolID,
 		ToolSlug:     entry.ToolSlug,
 		Kind:         string(entry.Kind),
 		Status:       entry.Status,

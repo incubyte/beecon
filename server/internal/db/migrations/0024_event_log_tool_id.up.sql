@@ -1,0 +1,1 @@
+ALTER TABLE event_logs ADD COLUMN tool_id VARCHAR(64) NULL;

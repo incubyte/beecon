@@ -16,8 +16,14 @@ import (
 type TriggerInstanceID string
 
 // Status is a TriggerInstance's lifecycle state (PD33). There is no separate
-// "paused" status: a connection leaving ACTIVE pausing its instances is a
-// poll-time concern (Slice 4), not a stored status here.
+// "paused" status for a connection leaving ACTIVE — that is a poll-time
+// concern (Slice 4 of the triggers phase, see PausedAt below), not a stored
+// status. StatusPausedTriggerRemoved (Phase 5 registry sub-phase, Slice 4,
+// PD66) is the one exception: a distinct, self-explanatory status exists for
+// it precisely because "the trigger definition this instance depends on no
+// longer exists" is a different, clearer condition than "the connection went
+// inactive," and an operator seeing PAUSED_TRIGGER_REMOVED in a list needs
+// no further lookup to understand why.
 type Status string
 
 const (
@@ -28,6 +34,15 @@ const (
 	// firing, but its poll state (introduced in Slice 4) is retained so a
 	// later Enable resumes rather than re-baselining.
 	StatusDisabled Status = "DISABLED"
+	// StatusPausedTriggerRemoved marks an instance whose bound trigger
+	// definition no longer exists after a catalog activation removed it
+	// (Phase 5 registry sub-phase, Slice 4, PD66): the instance is neither
+	// firing nor claimable by ClaimDuePolls (mirrors StatusDisabled's own
+	// "stops firing"), but nothing about it is deleted — Config,
+	// ConnectionID, and TriggerSlug are all untouched, so if a later
+	// activation reintroduces a trigger with the same slug, re-enabling the
+	// instance (Enable) is all that's needed to resume it.
+	StatusPausedTriggerRemoved Status = "PAUSED_TRIGGER_REMOVED"
 )
 
 // TriggerInstance is the domain aggregate root: one consumer's subscription
@@ -113,4 +128,16 @@ func (t TriggerInstance) Enable(now time.Time) TriggerInstance {
 	enabled.WatermarkAt = &now
 	enabled.SeenIDs = nil
 	return enabled
+}
+
+// PauseForRemovedTrigger returns a copy of t transitioned to
+// StatusPausedTriggerRemoved (Phase 5 registry sub-phase, Slice 4, PD66):
+// its bound trigger definition no longer exists after a catalog activation
+// removed it. Config/ConnectionID/TriggerSlug are left untouched — nothing
+// about the instance is deleted, only its ability to be claimed for polling
+// (mirrors Disable's own "stops firing, poll state retained").
+func (t TriggerInstance) PauseForRemovedTrigger() TriggerInstance {
+	paused := t
+	paused.Status = StatusPausedTriggerRemoved
+	return paused
 }

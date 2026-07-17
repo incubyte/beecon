@@ -25,6 +25,7 @@ type Repository struct {
 
 var _ triggers.Repository = (*Repository)(nil)
 var _ triggers.PollQueue = (*Repository)(nil)
+var _ triggers.TriggerSlugIndex = (*Repository)(nil)
 
 func NewRepository() *Repository {
 	return &Repository{
@@ -87,6 +88,22 @@ func sortInstancesOldestFirst(items []triggers.TriggerInstance) {
 		}
 		return items[i].ID < items[j].ID
 	})
+}
+
+// ListByTriggerSlug returns every TriggerInstance bound to triggerSlug,
+// across every organization (Phase 5 registry sub-phase Slice 4, PD66) —
+// mirrors the bun Repository's own installation-level query.
+func (r *Repository) ListByTriggerSlug(_ context.Context, triggerSlug string) ([]triggers.TriggerInstance, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var matches []triggers.TriggerInstance
+	for _, instance := range r.byID {
+		if instance.TriggerSlug == triggerSlug {
+			matches = append(matches, instance)
+		}
+	}
+	sortInstancesOldestFirst(matches)
+	return matches, nil
 }
 
 func (r *Repository) FindByID(_ context.Context, org organizations.OrgID, id triggers.TriggerInstanceID) (*triggers.TriggerInstance, error) {
