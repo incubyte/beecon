@@ -63,7 +63,8 @@ func (f *Facade) Activate(ctx context.Context, providerSlug, version string) (Ac
 		return ActivatedVersion{}, err
 	}
 
-	bundle := withCarriedOverDeprecatedTools(pulled, previousDefinition, hadPreviousDefinition)
+	bundle, toolsDiff := withCarriedOverDeprecatedTools(pulled, previousDefinition, hadPreviousDefinition)
+	triggersDiff, removedTriggers := diffTriggerSlugsAgainstPrevious(previousDefinition, pulled, hadPreviousDefinition)
 
 	if f.activatedDefinitions != nil {
 		if err := f.persistActivatedDefinition(ctx, providerSlug, bundle); err != nil {
@@ -72,12 +73,57 @@ func (f *Facade) Activate(ctx context.Context, providerSlug, version string) (Ac
 	}
 	f.setDefinition(definitionFromBundle(bundle))
 
-	if err := f.pauseInstancesForRemovedTriggers(ctx, previousDefinition, hadPreviousDefinition, bundle); err != nil {
+	if err := f.pauseInstancesForRemovedTriggers(ctx, removedTriggers); err != nil {
 		f.rollbackActivation(ctx, providerSlug, previousDefinition, hadPreviousDefinition, previousActivated)
 		return ActivatedVersion{}, err
 	}
 
+	logActivationSuccess(providerSlug, previousActivated, bundle.Version, toolsDiff, triggersDiff)
+
 	return ActivatedVersion{ProviderSlug: providerSlug, ActiveVersion: bundle.Version}, nil
+}
+
+// toolSlugDiff and triggerSlugDiff summarize how a newly activated bundle's
+// tools/triggers differ from the version it replaces (Slice 7, PD59 review
+// follow-up: logActivationSuccess's own counts below) — added is how many
+// slugs the new bundle declares that the previous version didn't; removed is
+// how many the previous version declared that the new bundle no longer does.
+// Both are computed once, inside the same diffing pass
+// withCarriedOverDeprecatedTools and diffTriggerSlugsAgainstPrevious already
+// run for Slice 4's deprecation-carry-over and trigger-pause logic, so the
+// numbers logged are exactly the ones this Activate call acted on.
+type toolSlugDiff struct {
+	added   int
+	removed int
+}
+
+type triggerSlugDiff struct {
+	added   int
+	removed int
+}
+
+// logActivationSuccess logs providerSlug's successful activation (Slice 7,
+// PD59 review follow-up), once the new definition is durably persisted and
+// swapped into what this facade serves: the version transition and the
+// tool/trigger counts the diff/deprecation logic above already computed.
+// fromVersion is "(none)" when providerSlug has never been activated through
+// the registry before this call (previousActivated nil) — there is no prior
+// activated version to name. Carries no secret/token/API-key: only the
+// provider slug, versions, and counts.
+func logActivationSuccess(providerSlug string, previousActivated *ActivatedDefinition, toVersion string, toolsDiff toolSlugDiff, triggersDiff triggerSlugDiff) {
+	fromVersion := "(none)"
+	if previousActivated != nil {
+		fromVersion = previousActivated.Version
+	}
+	slog.Default().Info(fmt.Sprintf("activated %s %s -> %s", providerSlug, fromVersion, toVersion),
+		"provider", providerSlug,
+		"fromVersion", fromVersion,
+		"toVersion", toVersion,
+		"toolsAdded", toolsDiff.added,
+		"toolsRemoved", toolsDiff.removed,
+		"triggersAdded", triggersDiff.added,
+		"triggersRemoved", triggersDiff.removed,
+	)
 }
 
 // validateBundleForActivation is Slice 4's pre-flight gate (PD66/PD67): a
@@ -178,17 +224,17 @@ func (f *Facade) rollbackActivation(ctx context.Context, providerSlug string, pr
 }
 
 // pauseInstancesForRemovedTriggers calls the TriggerInstancePauser port once
-// per trigger slug bundle no longer declares that previousDefinition did
-// (Slice 4, PD66) — never for a provider's very first activation
-// (hadPreviousDefinition false), since there is nothing yet to diff
-// against, and never at all when no pauser is wired (a facade under test
-// that doesn't exercise removed triggers, or an installation not yet wired
-// with one).
-func (f *Facade) pauseInstancesForRemovedTriggers(ctx context.Context, previousDefinition ProviderDefinition, hadPreviousDefinition bool, bundle registrybundle.Bundle) error {
-	if f.triggerInstancePauser == nil || !hadPreviousDefinition {
+// per trigger slug removedSlugs names (Slice 4, PD66) — removedSlugs is
+// always empty for a provider's very first activation
+// (diffTriggerSlugsAgainstPrevious has nothing yet to diff against), and
+// this is a no-op at all when no pauser is wired (a facade under test that
+// doesn't exercise removed triggers, or an installation not yet wired with
+// one).
+func (f *Facade) pauseInstancesForRemovedTriggers(ctx context.Context, removedSlugs []string) error {
+	if f.triggerInstancePauser == nil {
 		return nil
 	}
-	for _, slug := range removedTriggerSlugs(previousDefinition, bundle) {
+	for _, slug := range removedSlugs {
 		if err := f.triggerInstancePauser.PauseInstancesForRemovedTrigger(ctx, slug); err != nil {
 			return err
 		}
@@ -196,12 +242,31 @@ func (f *Facade) pauseInstancesForRemovedTriggers(ctx context.Context, previousD
 	return nil
 }
 
-// removedTriggerSlugs returns every trigger slug previousDefinition declared
-// that bundle no longer does.
-func removedTriggerSlugs(previousDefinition ProviderDefinition, bundle registrybundle.Bundle) []string {
+// diffTriggerSlugsAgainstPrevious returns how many of bundle's triggers
+// previousDefinition did not already declare, and which of
+// previousDefinition's trigger slugs bundle no longer declares (Slice 4,
+// PD66's removed-trigger pause list, and Slice 7, PD59 review follow-up's
+// activation log) — computed once, in the same pass, so
+// pauseInstancesForRemovedTriggers and logActivationSuccess both act on, and
+// report, the identical removed set rather than two separately-computed
+// diffs. hadPreviousDefinition false (a provider's very first activation)
+// has nothing yet to diff against: every trigger in bundle counts as added,
+// and nothing counts as removed.
+func diffTriggerSlugsAgainstPrevious(previousDefinition ProviderDefinition, bundle registrybundle.Bundle, hadPreviousDefinition bool) (triggerSlugDiff, []string) {
+	if !hadPreviousDefinition {
+		return triggerSlugDiff{added: len(bundle.Triggers)}, nil
+	}
+	previouslyDeclared := make(map[string]bool, len(previousDefinition.Triggers))
+	for _, t := range previousDefinition.Triggers {
+		previouslyDeclared[t.Slug] = true
+	}
 	stillDeclared := make(map[string]bool, len(bundle.Triggers))
+	added := 0
 	for _, t := range bundle.Triggers {
 		stillDeclared[t.Slug] = true
+		if !previouslyDeclared[t.Slug] {
+			added++
+		}
 	}
 	var removed []string
 	for _, t := range previousDefinition.Triggers {
@@ -209,7 +274,7 @@ func removedTriggerSlugs(previousDefinition ProviderDefinition, bundle registryb
 			removed = append(removed, t.Slug)
 		}
 	}
-	return removed
+	return triggerSlugDiff{added: added, removed: len(removed)}, removed
 }
 
 // withCarriedOverDeprecatedTools returns a copy of bundle with every tool
@@ -219,15 +284,28 @@ func removedTriggerSlugs(previousDefinition ProviderDefinition, bundle registryb
 // persists and serves, so a restart's LoadActivatedDefinitions rebuild
 // reproduces the identical accumulated deprecated-tool set with no
 // special-casing at boot (the persisted row IS the served definition,
-// always, PD65). hadPreviousDefinition false (a provider's very first
-// activation) has nothing yet to carry over.
-func withCarriedOverDeprecatedTools(bundle registrybundle.Bundle, previousDefinition ProviderDefinition, hadPreviousDefinition bool) registrybundle.Bundle {
+// always, PD65). Also returns how many tools were added/removed relative to
+// previousDefinition (Slice 7, PD59 review follow-up's activation log) —
+// removed counts a carried-over tool exactly once, the same moment it is
+// identified for carry-over, so logActivationSuccess never recomputes this
+// diff. hadPreviousDefinition false (a provider's very first activation) has
+// nothing yet to carry over or diff against: every tool in bundle counts as
+// added.
+func withCarriedOverDeprecatedTools(bundle registrybundle.Bundle, previousDefinition ProviderDefinition, hadPreviousDefinition bool) (registrybundle.Bundle, toolSlugDiff) {
 	if !hadPreviousDefinition {
-		return bundle
+		return bundle, toolSlugDiff{added: len(bundle.Tools)}
+	}
+	previouslyDeclared := make(map[string]bool, len(previousDefinition.Tools))
+	for _, t := range previousDefinition.Tools {
+		previouslyDeclared[t.Slug] = true
 	}
 	stillDeclared := make(map[string]bool, len(bundle.Tools))
+	added := 0
 	for _, t := range bundle.Tools {
 		stillDeclared[t.Slug] = true
+		if !previouslyDeclared[t.Slug] {
+			added++
+		}
 	}
 	var carried []registrybundle.Tool
 	for _, tool := range previousDefinition.Tools {
@@ -236,28 +314,38 @@ func withCarriedOverDeprecatedTools(bundle registrybundle.Bundle, previousDefini
 		}
 		carried = append(carried, bundleToolFromCarriedOverProviderTool(tool))
 	}
+	diff := toolSlugDiff{added: added, removed: len(carried)}
 	if len(carried) == 0 {
-		return bundle
+		return bundle, diff
 	}
 	merged := bundle
 	merged.Tools = append(append([]registrybundle.Tool{}, bundle.Tools...), carried...)
-	return merged
+	return merged, diff
 }
 
 // bundleToolFromCarriedOverProviderTool converts a ProviderTool this
 // installation was already serving (Activate's previousDefinition) into the
 // registrybundle.Tool wire shape, so it can be folded back into the bundle
-// this installation persists and serves going forward — the reverse of
-// toolsFromBundle/mappingFromBundle/paginationFromBundle, used only for this
+// this installation persists and serves going forward — used only for this
 // one purpose. Always marked deprecated, regardless of whatever it carried
 // before: being carried over is itself the deprecation event.
 func bundleToolFromCarriedOverProviderTool(tool ProviderTool) registrybundle.Tool {
+	return bundleToolFromProviderTool(tool, true)
+}
+
+// bundleToolFromProviderTool converts a ProviderTool into the
+// registrybundle.Tool wire shape — the reverse of
+// toolsFromBundle/mappingFromBundle/paginationFromBundle — shared by
+// bundleToolFromCarriedOverProviderTool (Slice 4, always deprecated) and
+// BundleFromProviderDefinition (Slice 6, PD68, preserves the tool's own
+// Deprecated flag).
+func bundleToolFromProviderTool(tool ProviderTool, deprecated bool) registrybundle.Tool {
 	return registrybundle.Tool{
 		ID:           tool.ID,
 		Slug:         tool.Slug,
 		Name:         tool.Name,
 		Description:  tool.Description,
-		Deprecated:   true,
+		Deprecated:   deprecated,
 		InputSchema:  tool.InputSchema,
 		OutputSchema: tool.OutputSchema,
 		Mapping: registrybundle.ToolMapping{
@@ -266,13 +354,13 @@ func bundleToolFromCarriedOverProviderTool(tool ProviderTool) registrybundle.Too
 			Query:      tool.Mapping.Query,
 			Header:     tool.Mapping.Header,
 			Body:       tool.Mapping.Body,
-			Pagination: bundlePaginationFromCarriedOverMapping(tool.Mapping.Pagination),
+			Pagination: bundlePaginationFromMapping(tool.Mapping.Pagination),
 			FileInputs: tool.Mapping.FileInputs,
 		},
 	}
 }
 
-func bundlePaginationFromCarriedOverMapping(p *Pagination) *registrybundle.Pagination {
+func bundlePaginationFromMapping(p *Pagination) *registrybundle.Pagination {
 	if p == nil {
 		return nil
 	}
@@ -281,6 +369,93 @@ func bundlePaginationFromCarriedOverMapping(p *Pagination) *registrybundle.Pagin
 		CursorParam:    p.CursorParam,
 		NextCursorPath: p.NextCursorPath,
 	}
+}
+
+// BundleFromProviderDefinition converts definition into the
+// registrybundle.Bundle wire shape a publish request carries — the reverse
+// of definitionFromBundle, field for field. FormatVersion, ProviderSlug,
+// Tools and Triggers are populated; Version and ContentHash are left empty,
+// exactly as registrybundle.Bundle's own doc comment describes a publish
+// request ("a publish request carries them empty ... advisory"): the
+// registry assigns Version at publish (PD62) and computes ContentHash over
+// the finalized bundle (PD62); BackfillEmbeddedSeed (Slice 6, PD68) sets
+// both itself before persisting, since it never goes through the registry's
+// own Publish.
+//
+// Exported so the one-time embedded-provider migration script
+// (cmd/publishembeddedproviders) can turn an already-loaded embedded
+// ProviderDefinition back into a publishable bundle without duplicating this
+// conversion outside the module that owns definition bundles and versions
+// (BOUNDARIES.md).
+func BundleFromProviderDefinition(definition ProviderDefinition) registrybundle.Bundle {
+	return registrybundle.Bundle{
+		FormatVersion: supportedBundleFormatVersion,
+		ProviderSlug:  definition.Slug,
+		Name:          definition.Name,
+		Logo:          definition.Logo,
+		AuthScheme:    definition.AuthScheme,
+		BaseURL:       definition.BaseURL,
+		OAuth: registrybundle.OAuthConfig{
+			AuthorizeURL:             definition.AuthorizeURL,
+			TokenURL:                 definition.TokenURL,
+			UserInfoURL:              definition.UserInfoURL,
+			Scopes:                   definition.Scopes,
+			CredentialStyle:          definition.CredentialStyle,
+			UserInfoEmailField:       definition.UserInfo.EmailField,
+			UserInfoDisplayNameField: definition.UserInfo.DisplayNameField,
+		},
+		ExpectedParams: bundleExpectedParamsFromDefinition(definition.ExpectedParams),
+		Tools:          bundleToolsFromDefinition(definition.Tools),
+		Triggers:       bundleTriggersFromDefinition(definition.Triggers),
+	}
+}
+
+func bundleExpectedParamsFromDefinition(params []ExpectedParam) []registrybundle.ExpectedParam {
+	converted := make([]registrybundle.ExpectedParam, 0, len(params))
+	for _, p := range params {
+		converted = append(converted, registrybundle.ExpectedParam{
+			Name:        p.Name,
+			DisplayName: p.DisplayName,
+			Description: p.Description,
+			Required:    p.Required,
+			Secret:      p.Secret,
+		})
+	}
+	return converted
+}
+
+func bundleToolsFromDefinition(tools []ProviderTool) []registrybundle.Tool {
+	converted := make([]registrybundle.Tool, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, bundleToolFromProviderTool(tool, tool.Deprecated))
+	}
+	return converted
+}
+
+func bundleTriggersFromDefinition(triggers []TriggerDefinition) []registrybundle.Trigger {
+	converted := make([]registrybundle.Trigger, 0, len(triggers))
+	for _, t := range triggers {
+		converted = append(converted, registrybundle.Trigger{
+			Slug:                t.Slug,
+			Name:                t.Name,
+			Description:         t.Description,
+			ConfigSchema:        t.ConfigSchema,
+			PayloadSchema:       t.PayloadSchema,
+			Ingestion:           t.Ingestion,
+			PollIntervalSeconds: t.PollIntervalSeconds,
+			Poll: registrybundle.TriggerPoll{
+				Method:              t.Poll.Method,
+				Path:                t.Poll.Path,
+				Query:               t.Poll.Query,
+				Body:                t.Poll.Body,
+				RecordsPath:         t.Poll.RecordsPath,
+				RecordIDPath:        t.Poll.RecordIDPath,
+				RecordTimestampPath: t.Poll.RecordTimestampPath,
+				Payload:             t.Poll.Payload,
+			},
+		})
+	}
+	return converted
 }
 
 func (f *Facade) persistActivatedDefinition(ctx context.Context, providerSlug string, bundle registrybundle.Bundle) error {

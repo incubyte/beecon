@@ -185,12 +185,12 @@ hand-off complete).
 The shipped Outlook and Hubspot definitions move into the registry model with zero
 interruption to live connections and trigger-instances.
 
-- [ ] A one-time publish loads the current embedded Outlook and Hubspot YAML into the registry as their initial `1.0.0` bundles, minting each tool's `tool_` id
-- [ ] On boot, the installation backfill records the embedded seed as the initially-activated version and mints/records `tool_` ids for its already-embedded tools
-- [ ] The boot backfill is idempotent — running it again after it has caught up mints nothing new and logs how many tools it stamped (including zero), mirroring the existing client-secret backfill convention
-- [ ] Existing connections continue to resolve and execute their provider's tools by slug throughout and after the migration, with no re-auth required
-- [ ] Existing trigger-instances continue to poll/fire against their trigger definitions throughout and after the migration
-- [ ] After migration, every embedded tool is addressable by both its slug and its newly-minted `tool_` id, and the two resolve to the same tool
+- [x] A one-time publish loads the current embedded Outlook and Hubspot YAML into the registry as their initial `1.0.0` bundles, minting each tool's `tool_` id
+- [x] On boot, the installation backfill records the embedded seed as the initially-activated version and mints/records `tool_` ids for its already-embedded tools
+- [x] The boot backfill is idempotent — running it again after it has caught up mints nothing new and logs how many tools it stamped (including zero), mirroring the existing client-secret backfill convention
+- [x] Existing connections continue to resolve and execute their provider's tools by slug throughout and after the migration, with no re-auth required
+- [x] Existing trigger-instances continue to poll/fire against their trigger definitions throughout and after the migration
+- [x] After migration, every embedded tool is addressable by both its slug and its newly-minted `tool_` id, and the two resolve to the same tool
 
 ---
 

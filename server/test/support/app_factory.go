@@ -81,10 +81,22 @@ func BootAppAt(t *testing.T, dsn string) *app.Wired {
 // run end to end through the real composition root.
 func BootAppWithProviderDefinitions(t *testing.T, definitions []catalog.ProviderDefinition) *app.Wired {
 	t.Helper()
+	return BootAppWithProviderDefinitionsAt(t, NewTestDSN(t), definitions)
+}
+
+// BootAppWithProviderDefinitionsAt is BootAppWithProviderDefinitions against
+// an explicit dsn instead of always a fresh one — e.g. so a "restart" style
+// journey (Phase 5 registry sub-phase, Slice 6: the boot backfill's
+// idempotency and continuity across a reboot) can boot twice at the same dsn
+// with the same fake-provider-pointed definitions, exactly the way
+// BootAppAt's own restart pattern already works for the real embedded
+// definitions elsewhere in this package.
+func BootAppWithProviderDefinitionsAt(t *testing.T, dsn string, definitions []catalog.ProviderDefinition) *app.Wired {
+	t.Helper()
 	ctx := context.Background()
 
 	wired, err := app.Wire(ctx, app.Deps{
-		Config:              testConfig(t, NewTestDSN(t)),
+		Config:              testConfig(t, dsn),
 		Logger:              testLogger(),
 		ProviderDefinitions: definitions,
 	})

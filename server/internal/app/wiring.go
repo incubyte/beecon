@@ -141,10 +141,14 @@ func Wire(ctx context.Context, deps Deps) (*Wired, error) {
 	secureCookies := config.SecureCookies(deps.Config.BaseURL)
 	operatorHandler := accesshttp.NewOperatorHandler(operatorFacade, errorRenderer, secureCookies)
 	catalogFacade := buildCatalogFacade(database, providerDefinitions, tokenVault, now, organizationsFacade).
-		WithRegistrySync(buildRegistryClient(deps.Config.RegistryURL, deps.Config.RegistryAPIKey), catalogbun.NewActivatedDefinitionRepository(database))
+		WithRegistrySync(buildRegistryClient(deps.Config.RegistryURL, deps.Config.RegistryAPIKey), catalogbun.NewActivatedDefinitionRepository(database), idgen.Prefixed("tool_"))
 	if err := catalogFacade.LoadActivatedDefinitions(ctx); err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("load activated registry definitions: %w", err)
+	}
+	if _, err := catalogFacade.BackfillEmbeddedSeed(ctx); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("backfill embedded provider seed: %w", err)
 	}
 	if err := catalogFacade.EncryptPlaintextClientSecrets(ctx); err != nil {
 		_ = database.Close()

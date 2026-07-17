@@ -42,6 +42,14 @@ type Overrides struct {
 	RegistryClient       catalog.RegistryClient
 	ActivatedDefinitions catalog.ActivatedDefinitions
 
+	// NewToolID is BackfillEmbeddedSeed's tool_ id minter (Slice 6, PD68) —
+	// deterministic sequential tool_ ids by default so a test asserting on a
+	// minted id (or on idempotency: mint once, nothing on the second run)
+	// never depends on real CUID2 randomness. Only used when
+	// ActivatedDefinitions is also supplied — WithRegistrySync wires the two
+	// together.
+	NewToolID func() string
+
 	// TriggerInstancePauser wires the facade's Slice 4 dependent-safety
 	// add-on (WithTriggerInstancePauser, PD66) — nil by default, exactly
 	// like RegistryClient/ActivatedDefinitions above: a test that doesn't
@@ -95,7 +103,11 @@ func NewFacadeWithOverrides(o Overrides) (*catalog.Facade, error) {
 	}
 	facade := catalog.NewFacade(repository, definitions, newID, now, tokenVault, governance)
 	if o.RegistryClient != nil || o.ActivatedDefinitions != nil {
-		facade = facade.WithRegistrySync(o.RegistryClient, o.ActivatedDefinitions)
+		newToolID := o.NewToolID
+		if newToolID == nil {
+			newToolID = sequentialIDs("tool_")
+		}
+		facade = facade.WithRegistrySync(o.RegistryClient, o.ActivatedDefinitions, newToolID)
 	}
 	if o.TriggerInstancePauser != nil {
 		facade = facade.WithTriggerInstancePauser(o.TriggerInstancePauser)

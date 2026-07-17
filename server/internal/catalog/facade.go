@@ -53,6 +53,17 @@ type Facade struct {
 	registryClient       RegistryClient
 	activatedDefinitions ActivatedDefinitions
 
+	// newToolID mints tool_ ids for the boot backfill (Slice 6, PD68) —
+	// BackfillEmbeddedSeed's own minter, distinct from newID (which only
+	// ever mints intg_ ids): the registry mints tool_ ids for everything
+	// that goes through publish/pull/activate, but an embedded provider
+	// that has never been through the registry needs one minted locally,
+	// once, at boot. Wired alongside activatedDefinitions by
+	// WithRegistrySync since both are part of the same PD65 activated-
+	// definition-store family; nil only in a facade built by a test that
+	// never calls BackfillEmbeddedSeed.
+	newToolID func() string
+
 	// triggerInstancePauser is Slice 4's optional dependent-safety add-on
 	// (PD66), wired via WithTriggerInstancePauser — nil until then, in which
 	// case Activate simply never pauses any trigger-instance (the same
@@ -78,16 +89,18 @@ func NewFacade(repo Repository, definitions []ProviderDefinition, newID func() s
 
 // WithRegistrySync wires this facade's registry pull/activate support
 // (PD64/PD65, Phase 5 registry sub-phase Slice 1): the driven RegistryClient
-// port (an HTTP adapter in production, an in-memory fake in tests) and the
-// DB-backed ActivatedDefinitions store. A facade built without this can
+// port (an HTTP adapter in production, an in-memory fake in tests), the
+// DB-backed ActivatedDefinitions store, and (Slice 6, PD68) the tool_ id
+// minter BackfillEmbeddedSeed mints with. A facade built without this can
 // still serve every embedded-seed operation unchanged; only Activate needs
-// registryClient, and only LoadActivatedDefinitions needs
-// activatedDefinitions — the same optional "With*" convention
-// execution.Facade already uses for its own add-ons (WithFiles,
-// WithTriggerDefinitions).
-func (f *Facade) WithRegistrySync(client RegistryClient, activated ActivatedDefinitions) *Facade {
+// registryClient, only LoadActivatedDefinitions/BackfillEmbeddedSeed need
+// activatedDefinitions, and only BackfillEmbeddedSeed needs newToolID — the
+// same optional "With*" convention execution.Facade already uses for its own
+// add-ons (WithFiles, WithTriggerDefinitions).
+func (f *Facade) WithRegistrySync(client RegistryClient, activated ActivatedDefinitions, newToolID func() string) *Facade {
 	f.registryClient = client
 	f.activatedDefinitions = activated
+	f.newToolID = newToolID
 	return f
 }
 

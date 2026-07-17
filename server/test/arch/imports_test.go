@@ -25,16 +25,33 @@ const modulePath = "beecon"
 // deliberately absent: BOUNDARIES.md's shared-infra line makes them
 // importable by every module, so TestModuleImportsRespectBoundariesDependencyGraph
 // below simply skips any import whose feature name isn't a key here.
+//
+// registryservice (BOUNDARIES.md's "registry-service", Phase 5 registry
+// sub-phase, PD59) is the one deliberate exception to that shared-infra
+// carve-out: BOUNDARIES.md documents it as depending on nothing but "shares
+// the definition-format package" (registrybundle) with catalog, and PD59's
+// whole point is that this separate deployable never depends on any domain
+// module — an invariant worth pinning here, not leaving unenforced like a
+// true leaf package would be. So, unlike httpx/idgen/schema, registrybundle
+// is given its own entry too (an empty allow-list — it is pure wire-format
+// data, PD62/registrybundle package doc, and imports nothing internal at
+// all), which is what makes registryservice's and catalog's own imports of
+// it require listing "registrybundle" explicitly below: the trade-off of
+// pinning PD59 is that registrybundle stops being "importable by every
+// module for free" and instead needs the same explicit allow-listing any
+// other tracked module does.
 var featureDependencies = map[string][]string{
-	"organizations": {},
-	"access":        {"organizations"},
-	"catalog":       {"organizations"},
-	"connections":   {"organizations", "access", "catalog"},
-	"connectweb":    {"connections"},
-	"execution":     {"connections", "catalog", "organizations"},
-	"triggers":      {"connections", "catalog", "organizations"},
-	"delivery":      {"access", "organizations"},
-	"logging":       {"organizations"},
+	"organizations":   {},
+	"access":          {"organizations"},
+	"catalog":         {"organizations", "registrybundle"},
+	"connections":     {"organizations", "access", "catalog"},
+	"connectweb":      {"connections"},
+	"execution":       {"connections", "catalog", "organizations"},
+	"triggers":        {"connections", "catalog", "organizations"},
+	"delivery":        {"access", "organizations"},
+	"logging":         {"organizations"},
+	"registrybundle":  {},
+	"registryservice": {"registrybundle"},
 }
 
 // bunAdapterAllowedDirs are the only places allowed to import database/sql or
